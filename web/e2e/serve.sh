@@ -2,7 +2,8 @@
 # Throwaway AIS server for the Playwright smoke: the seed tree in a fresh SQLite file and
 # one editor with a placeholder password (example-not-secret, test data only). Uses the
 # repo's .venv when it has `ais`, else `ais` from PATH (CI). Serves the UI from
-# server/ais/static, so run `npm run build` first.
+# server/ais/static, so run `npm run build` first. The smoke asserts exact revisions (1 → 4)
+# and audit row counts, so it needs a fresh database every run (E2E_BASE_URL targets too).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"

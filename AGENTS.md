@@ -228,6 +228,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - **TypeScript 7 is the native (Go) compiler**; it still installs `tsc`, and the config avoids
   options it dropped (`baseUrl`, `node10` resolution).
 - The Playwright smoke serves on **:8799** (not 8000, which compose and the CI plugin smoke use).
+  It asserts exact revisions (1 → 4) and audit counts, so it needs a **fresh database** per run
+  (serve.sh makes one; an `E2E_BASE_URL` server must be freshly seeded) and runs with no retries.
 - **Node lookups by path need the `GET /nodes/{ref}` route declared with `ref: str`**: FastAPI
   would 422 `all.commercial` against an `int` path parameter. Digits = id, anything else = path.
 

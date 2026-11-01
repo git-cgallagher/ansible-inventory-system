@@ -10,7 +10,9 @@ const external = process.env.E2E_BASE_URL;
 export default defineConfig({
   testDir: "e2e",
   timeout: 30_000,
-  retries: process.env.CI ? 1 : 0,
+  // No retries: the smoke asserts revisions 1→4 on a fresh database, so a second attempt
+  // against the same server could only fail again, misleadingly.
+  retries: 0,
   workers: 1,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
