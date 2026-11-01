@@ -1,0 +1,42 @@
+---
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: By path
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.prod.dc1
+      register: dc1
+    - name: By id (same node)
+      git_cgallagher.inventory.node_info:
+        id: "{{ dc1.node.id }}"
+      register: by_id
+    - name: Missing node is not an error
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.nope
+      register: missing
+    - name: Check mode is fine for an info module
+      git_cgallagher.inventory.node_info:
+        path: all
+      check_mode: true
+      register: root
+    - name: Failure - neither path nor id
+      git_cgallagher.inventory.node_info:
+      register: neither
+      ignore_errors: true
+    - name: Failure - a bad token is rejected
+      git_cgallagher.inventory.node_info:
+        path: all
+        token: ais_not-a-real-token
+      register: bad_token
+      ignore_errors: true
+    - ansible.builtin.assert:
+        that:
+          - dc1.exists and dc1.node.kind == 'datacenter' and dc1.node.vars.site_code == 'DC1'
+          - dc1.children | map(attribute='name') | sort == ['db', 'web']
+          - by_id.node == dc1.node
+          - not missing.exists and missing.node == {} and missing.children == []
+          - root.exists and root.node.path == 'all' and root is not changed
+          - neither is failed
+          - bad_token is failed and bad_token.status == 401

@@ -1,0 +1,4 @@
+# Copy to integration_config.yml (gitignored) and fill in; ansible-test passes it as extra vars.
+# The server must hold examples/seed.yml and the token must have the editor role.
+ais_url: http://127.0.0.1:8000
+ais_token: ais_replace-me

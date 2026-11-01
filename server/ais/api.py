@@ -7,6 +7,7 @@ writes ``editor`` (``ais.api_write``), user management ``admin`` (``ais.api_auth
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import os
 from contextlib import asynccontextmanager
@@ -14,15 +15,15 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ais import __version__, api_auth, api_write, oidc
+from ais import __version__, api_auth, api_write, audit, oidc
 from ais.auth import Principal, require
 from ais.db import get_session, init_db
-from ais.importer import ImportError_, import_tree
+from ais.importer import ImportError_, import_tree, live_node_by_path
 from ais.locking import check_precondition, etag
-from ais.models import Node, NodeKind, Revision, Role, VariableDefinition
+from ais.models import AuditLog, Node, NodeKind, NodeVariable, Revision, Role, VariableDefinition
 from ais.render import MOCK_HOSTNAME, render_templates
 from ais.resolver import GROUP_SEP, build_export, current_revision, load_snapshot, resolve
 from ais.snapshots import diff, get_snapshot, list_snapshots, materialize
@@ -39,6 +40,7 @@ if oidc.configured():  # the OIDC login flow keeps its state in a signed cookie
     from starlette.middleware.sessions import SessionMiddleware
 
     app.add_middleware(SessionMiddleware, secret_key=os.environ["AIS_SECRET_KEY"], https_only=os.environ.get("AIS_COOKIE_SECURE", "1") == "1")
+app.add_middleware(audit.RequestIdMiddleware)
 app.include_router(api_auth.router)
 app.include_router(api_write.router)
 app.include_router(oidc.router)
@@ -149,11 +151,13 @@ def nodes(
     return [api_write.node_out(n) for n in rows]
 
 
-@app.get("/api/v1/nodes/{node_id}")
-def node(node_id: int, principal: Principal = viewer, session: Session = Depends(get_session)) -> dict[str, Any]:
-    n = session.get(Node, node_id)
+@app.get("/api/v1/nodes/{ref}")
+def node(ref: str, principal: Principal = viewer, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """One node with its live variables, by id (any row, deleted included) or by
+    path (``all.commercial.prod``, live rows only)."""
+    n = session.get(Node, int(ref)) if ref.isdigit() else live_node_by_path(session, ref)
     if n is None:
-        raise HTTPException(404, f"node {node_id} does not exist")
+        raise HTTPException(404, f"node {ref!r} does not exist")
     return api_write.node_out(n, api_write.live_vars(session, n.id))
 
 
@@ -192,6 +196,47 @@ def revisions(limit: int = Query(50, ge=1, le=1000), before: int | None = None, 
     if before is not None:
         stmt = stmt.where(Revision.id < before)
     return [{"id": r.id, "actor": r.actor, "source": r.source, "ts": r.ts, "message": r.message} for r in session.scalars(stmt)]
+
+
+# ---------------------------------------------------------------------- audit
+
+
+@app.get("/api/v1/audit")
+def audit_log(
+    actor: str | None = None,
+    action: str | None = Query(None, description="Exact action, or a prefix ending in '.' such as 'node.'"),
+    target_type: str | None = None,
+    target_id: str | None = None,
+    revision: int | None = None,
+    request_id: str | None = None,
+    since: dt.datetime | None = None,
+    until: dt.datetime | None = None,
+    limit: int = Query(50, ge=1, le=1000),
+    before: int | None = Query(None, description="Only rows with an id below this (paging, newest first)"),
+    principal: Principal = editor,
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Audit rows, newest first. Editor or admin; viewers get 403."""
+    stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+    if actor is not None:
+        stmt = stmt.where(AuditLog.actor == actor)
+    if action is not None:
+        stmt = stmt.where(AuditLog.action.like(action + "%") if action.endswith(".") else AuditLog.action == action)
+    if target_type is not None:
+        stmt = stmt.where(AuditLog.target_type == target_type)
+    if target_id is not None:
+        stmt = stmt.where(AuditLog.target_id == target_id)
+    if revision is not None:
+        stmt = stmt.where(AuditLog.revision == revision)
+    if request_id is not None:
+        stmt = stmt.where(AuditLog.request_id == request_id)
+    if since is not None:
+        stmt = stmt.where(AuditLog.ts >= audit.as_utc(since))
+    if until is not None:
+        stmt = stmt.where(AuditLog.ts < audit.as_utc(until))
+    if before is not None:
+        stmt = stmt.where(AuditLog.id < before)
+    return [audit.audit_out(r) for r in session.scalars(stmt)]
 
 
 # ------------------------------------------------------------------ snapshots
@@ -244,5 +289,12 @@ def import_(
     except ImportError_ as exc:
         raise HTTPException(422, str(exc)) from exc
     api_write.check_export(session)
+    summary = {
+        "revision": rev.id,
+        "nodes_created": session.scalar(select(func.count()).select_from(Node).where(Node.created_rev == rev.id)) or 0,
+        "variables_set": session.scalar(select(func.count()).select_from(NodeVariable).where(NodeVariable.created_rev == rev.id)) or 0,
+        "definitions": sorted((req.tree.get("variables") or {}).keys()),
+    }
+    audit.record(session, actor=principal.actor, action="import", target_type="tree", target_id="all", after=summary, source="import", revision=rev.id)
     response.headers["ETag"] = etag(rev.id)
-    return {"revision": rev.id}
+    return {"revision": rev.id, **{k: v for k, v in summary.items() if k != "revision"}}

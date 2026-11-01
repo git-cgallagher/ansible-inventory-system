@@ -1,0 +1,7 @@
+plugins/inventory/db.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/node.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/node_info.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/variable.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/variable_definition.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/host.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/render_info.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)

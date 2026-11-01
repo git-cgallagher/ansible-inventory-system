@@ -1,0 +1,90 @@
+---
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: Set in check mode
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: it_feature_flag
+        value: {enabled: true, pct: 10}
+      check_mode: true
+      diff: true
+      register: chk
+    - name: Not written
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.lab
+      register: lab
+    - name: Set
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: it_feature_flag
+        value: {enabled: true, pct: 10}
+      register: set1
+    - name: Set again (same JSON value)
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: it_feature_flag
+        value: {pct: 10, enabled: true}
+      register: set2
+    - name: Change
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: it_feature_flag
+        value: {enabled: false, pct: 0}
+      diff: true
+      register: set3
+    - name: It resolves on a lab host
+      git_cgallagher.inventory.render_info:
+        host: lab-web01
+      register: rendered
+    - name: Failure - unknown node
+      git_cgallagher.inventory.variable:
+        path: all.nope
+        key: x
+        value: 1
+      register: nope
+      ignore_errors: true
+    - name: Failure - present without a value
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: x
+      register: novalue
+      ignore_errors: true
+    - name: Remove in check mode
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: it_feature_flag
+        state: absent
+      check_mode: true
+      register: rm_chk
+    - name: Remove
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: it_feature_flag
+        state: absent
+      register: rm
+    - name: Remove again
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: it_feature_flag
+        state: absent
+      register: rm2
+    - ansible.builtin.assert:
+        that:
+          - chk is changed and chk.diff.after.it_feature_flag.pct == 10
+          - "'it_feature_flag' not in lab.node.vars"
+          - set1 is changed and set1.value.enabled
+          - set2 is not changed and set2.revision == set1.revision
+          - set3 is changed and set3.diff.before.it_feature_flag.pct == 10 and set3.revision == set1.revision + 1
+          - rendered.resolved.it_feature_flag.pct == 0
+          - nope is failed and 'does not exist' in nope.msg
+          - novalue is failed
+          - rm_chk is changed and rm is changed and rm2 is not changed
+  always:
+    - name: Cleanup
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: it_feature_flag
+        state: absent

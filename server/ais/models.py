@@ -239,6 +239,37 @@ class ApiToken(Base):
     user: Mapped[User] = relationship(back_populates="tokens")
 
 
+# -------------------------------------------------------------------- audit
+
+
+class AuditLog(Base):
+    """One row per effective write or auth event, written in the same transaction
+    as the change it records (a refused write leaves no row). ``before``/``after``
+    are JSON documents of the target as it was and as it became; ``target_id`` is a
+    string because targets range from node ids to e-mail addresses. ``revision`` links
+    an inventory write to its ``Revision``; auth events have none."""
+
+    __tablename__ = "audit_log"
+    __table_args__ = (
+        Index("ix_audit_ts", "ts"),
+        Index("ix_audit_actor", "actor"),
+        Index("ix_audit_action", "action"),
+        Index("ix_audit_target", "target_type", "target_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    actor: Mapped[str] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(64))  # node.create, variable.set, login.failure, ...
+    target_type: Mapped[str] = mapped_column(String(32))  # node, node_variable, variable_definition, tree, user, token
+    target_id: Mapped[str] = mapped_column(String(512))
+    before: Mapped[object | None] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
+    after: Mapped[object | None] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
+    source: Mapped[str] = mapped_column(String(32), default="api")  # api|module|cli|login|import
+    request_id: Mapped[str | None] = mapped_column(String(64))
+    revision: Mapped[int | None] = mapped_column(ForeignKey("revision.id", name="fk_audit_revision"))
+
+
 # -------------------------------------------------------------------- snapshots
 
 

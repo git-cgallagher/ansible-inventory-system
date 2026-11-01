@@ -1,0 +1,91 @@
+---
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: Create in check mode
+      git_cgallagher.inventory.host:
+        name: it-web09
+        parent_path: all.commercial.prod.dc1.web
+        ansible_host: 10.1.1.19
+      check_mode: true
+      register: chk
+    - name: Not created
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.prod.dc1.web.it-web09
+      register: none_yet
+    - name: Create
+      git_cgallagher.inventory.host:
+        name: it-web09
+        parent_path: all.commercial.prod.dc1.web
+        ansible_host: 10.1.1.19
+        ansible_port: 2222
+        vars: {packages: [tcpdump]}
+      register: created
+    - name: Create again
+      git_cgallagher.inventory.host:
+        name: it-web09
+        parent_path: all.commercial.prod.dc1.web
+        ansible_host: 10.1.1.19
+        ansible_port: 2222
+        vars: {packages: [tcpdump]}
+      register: again
+    - name: Converge without parent_path (found by name)
+      git_cgallagher.inventory.host:
+        name: it-web09
+        ansible_user: deploy
+      register: conv
+    - name: It renders through the whole chain
+      git_cgallagher.inventory.render_info:
+        host: it-web09
+      register: rendered
+    - name: Failure - exists under another parent
+      git_cgallagher.inventory.host:
+        name: it-web09
+        parent_path: all.commercial.lab.dc1.web
+      register: elsewhere
+      ignore_errors: true
+    - name: Failure - new host without parent_path
+      git_cgallagher.inventory.host:
+        name: it-nowhere
+      register: nowhere
+      ignore_errors: true
+    - name: Failure - duplicate host name under another group (server refuses)
+      git_cgallagher.inventory.node:
+        path: all.commercial.lab.dc1.web.it-web09
+        kind: host
+      register: dup
+      ignore_errors: true
+    - name: Delete in check mode
+      git_cgallagher.inventory.host:
+        name: it-web09
+        state: absent
+      check_mode: true
+      register: rm_chk
+    - name: Delete
+      git_cgallagher.inventory.host:
+        name: it-web09
+        state: absent
+      register: rm
+    - name: Delete again
+      git_cgallagher.inventory.host:
+        name: it-web09
+        state: absent
+      register: rm2
+    - ansible.builtin.assert:
+        that:
+          - chk is changed and not none_yet.exists
+          - created is changed and created.host.kind == 'host' and created.host.vars.ansible_port == 2222
+          - again is not changed
+          - conv is changed and conv.host.vars.ansible_user == 'deploy' and conv.host.vars.ansible_host == '10.1.1.19'
+          - rendered.resolved.http_port == 8080 and 'tcpdump' in rendered.resolved.packages and 'nginx' in rendered.resolved.packages
+          - elsewhere is failed and 'already exists at' in elsewhere.msg
+          - nowhere is failed and 'parent_path is required' in nowhere.msg
+          - dup is failed and dup.status == 409 and 'duplicate host' in dup.msg
+          - rm_chk is changed and rm is changed and rm2 is not changed
+  always:
+    - name: Cleanup
+      git_cgallagher.inventory.host:
+        name: it-web09
+        state: absent

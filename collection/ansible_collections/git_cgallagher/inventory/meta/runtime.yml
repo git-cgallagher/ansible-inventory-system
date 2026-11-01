@@ -1,2 +1,10 @@
 ---
 requires_ansible: ">=2.18"
+action_groups:
+  inventory:
+    - node
+    - node_info
+    - variable
+    - variable_definition
+    - host
+    - render_info

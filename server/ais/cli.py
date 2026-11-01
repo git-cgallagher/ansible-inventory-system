@@ -109,7 +109,7 @@ def _user(args: argparse.Namespace) -> int:
 
     from sqlalchemy import select
 
-    from ais import auth
+    from ais import audit, auth
     from ais.models import Role, User
 
     init_db()
@@ -120,6 +120,7 @@ def _user(args: argparse.Namespace) -> int:
                 u = auth.create_user(s, args.email, role=Role(args.role), password=password, display_name=args.display_name)
             except ValueError as exc:
                 raise SystemExit(str(exc))
+            audit.record(s, actor="cli", action="user.create", target_type="user", target_id=u.email, after={"email": u.email, "role": u.role.value, "password": password is not None}, source="cli")
             print(f"created user {u.email} ({u.role.value}, {'password' if password else 'token-only'})", file=sys.stderr)
             return 0
         if args.user_cmd == "list":
@@ -134,7 +135,7 @@ def _token(args: argparse.Namespace) -> int:
 
     from sqlalchemy import select
 
-    from ais import auth
+    from ais import audit, auth
     from ais.models import ApiToken, Role, User
 
     init_db()
@@ -148,6 +149,7 @@ def _token(args: argparse.Namespace) -> int:
                 plaintext, row = auth.create_token(s, user, name=args.name, role=Role(args.role) if args.role else None, expires_at=expires)
             except ValueError as exc:
                 raise SystemExit(str(exc))
+            audit.record(s, actor="cli", action="token.create", target_type="token", target_id=row.id, after={"user": user.email, "name": row.name, "role": row.role.value if row.role else None, "expires_at": row.expires_at}, source="cli")
             print(f"token {row.id} ({row.prefix}…) for {user.email}; shown once:", file=sys.stderr)
             print(plaintext)
             return 0
@@ -156,6 +158,7 @@ def _token(args: argparse.Namespace) -> int:
             if row is None:
                 raise SystemExit(f"unknown token {args.id}")
             row.revoked_at = dt.datetime.now(dt.timezone.utc)
+            audit.record(s, actor="cli", action="token.revoke", target_type="token", target_id=row.id, before={"user_id": row.user_id, "name": row.name}, source="cli")
             print(f"revoked token {row.id}", file=sys.stderr)
             return 0
         if args.token_cmd == "list":

@@ -1,0 +1,67 @@
+---
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: Declare in check mode
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        merge_strategy: unique_append
+      check_mode: true
+      register: chk
+    - name: Declare
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        merge_strategy: unique_append
+        description: integration
+      register: decl
+    - name: Declare again
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        merge_strategy: unique_append
+        description: integration
+      register: decl2
+    - name: Change the strategy
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        merge_strategy: append
+        description: integration
+        json_schema: {type: array}
+      diff: true
+      register: decl3
+    - name: Failure - unknown strategy is rejected by the argument spec
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        merge_strategy: concat
+      register: bad
+      ignore_errors: true
+    - name: Undeclare in check mode
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        state: absent
+      check_mode: true
+      register: rm_chk
+    - name: Undeclare
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        state: absent
+      register: rm
+    - name: Undeclare again
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        state: absent
+      register: rm2
+    - ansible.builtin.assert:
+        that:
+          - chk is changed
+          - decl is changed and decl.definition.merge_strategy == 'unique_append'
+          - decl2 is not changed
+          - decl3 is changed and decl3.diff.before.merge_strategy == 'unique_append' and decl3.definition.json_schema.type == 'array'
+          - bad is failed
+          - rm_chk is changed and rm is changed and rm.definition == {} and rm2 is not changed
+  always:
+    - name: Cleanup
+      git_cgallagher.inventory.variable_definition:
+        name: it_extra_packages
+        state: absent

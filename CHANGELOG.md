@@ -3,6 +3,34 @@
 ## Unreleased
 
 ### Added
+- **Phase 2 — write path.** `audit_log` (migration `0003`): one row per effective write
+  (`node.create|update|move|delete`, `variable.set|unset`, `definition.set|delete`, `import`)
+  and per auth event (`login.success|failure`, `logout`, `token.create|revoke`,
+  `user.create|update`; `ais user create` / `ais token create|revoke` with `source=cli`),
+  written in the same transaction as the change with actor, target, `before`/`after`,
+  `source`, `request_id` and the revision. `GET /api/v1/audit` (editor; filters `actor`,
+  `action` or `action` prefix ending in `.`, `target_type`, `target_id`, `revision`,
+  `request_id`, `since`, `until`; `limit`/`before` paging). Requests may send
+  `X-Request-ID` (echoed) and `X-AIS-Source: module|ui` (recorded on revisions and audit rows).
+- `POST /api/v1/nodes/{id}/move` (new parent and/or name, `If-Match`): closes the subtree and
+  reopens it with new paths, depths and ids under the new revision, carrying variables and
+  tag memberships; the response lists `moved` (old id → new id, path → path). Refuses the
+  root, a move under the node's own subtree, a child kind the parent cannot have, a live node
+  at the new path (409) and anything the exporter rejects (409).
+- `GET /api/v1/nodes/{ref}` also accepts a path (`all.commercial.prod`). `POST /import`
+  returns `nodes_created`, `variables_set`, `definitions`. `PUT /variables/{name}` with an
+  unchanged declaration is a no-op (`changed: false`, no revision), like `PUT …/vars/{key}`.
+- Collection `git_cgallagher.inventory` 0.2.0: modules `node`, `host`, `variable`,
+  `variable_definition` (idempotent, check + diff mode, `If-Match` locking via
+  `module_utils/client.py`, `expect_revision`, `revision_message`) and `node_info`,
+  `render_info`; doc fragments `api` / `api.write`; action group `inventory` for
+  `module_defaults`. `ansible-test sanity` (ignore files for 2.18–2.22, GPL header only) and an
+  integration target per module (check, real, repeat, failure, cleanup).
+- CI job `collection`: sanity + integration against a live `ais serve` with a minted editor
+  token (`timeout-minutes: 25`). Tests: audit rows (per write, before/after, auth events,
+  refused writes leave none, filters/paging, 403 for viewers), move/rename (path rewrite,
+  history, 409/422 refusals, tags carried), path lookup; 51 pytest tests, green on SQLite
+  and PostgreSQL 16.
 - **Phase 1 — core API.** Every `/api/v1` route now needs a bearer token (`Authorization:
   Bearer ais_…`); `/healthz` stays open. Local users with scrypt password hashes, API tokens
   hashed at rest (`api_token`), roles `viewer` < `editor` < `admin` (reads incl. export/render

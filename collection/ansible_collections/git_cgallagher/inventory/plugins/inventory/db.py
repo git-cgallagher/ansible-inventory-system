@@ -7,7 +7,7 @@ DOCUMENTATION = r"""
 name: db
 short_description: Ansible Inventory System (database-backed strict tree)
 version_added: "0.1.0"
-author: Chris Gallagher
+author: Chris Gallagher (@git-cgallagher)
 description:
   - Builds the inventory from the Ansible Inventory System export API.
   - The server emits the real group tree with variables at each node; Ansible merges
@@ -59,6 +59,7 @@ options:
     type: int
     default: 30
   validate_certs:
+    description: Validate the server's TLS certificate.
     type: bool
     default: true
 extends_documentation_fragment:

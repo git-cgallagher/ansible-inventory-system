@@ -1,0 +1,44 @@
+---
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: A real host with mock facts
+      git_cgallagher.inventory.render_info:
+        host: web02
+        facts:
+          default_ipv4: {address: 10.1.1.12}
+      register: web02
+    - name: A mock host with overrides, no templating
+      git_cgallagher.inventory.render_info:
+        path: all.commercial.lab.dc1.web
+        overrides: {http_port: 9000}
+        template: false
+      register: mock
+    - name: Pinned to revision 1 (the seed import)
+      git_cgallagher.inventory.render_info:
+        host: web01
+        revision: 1
+      check_mode: true
+      register: pinned
+    - name: Failure - unknown host
+      git_cgallagher.inventory.render_info:
+        host: nope
+      register: nope
+      ignore_errors: true
+    - name: Failure - neither host nor path
+      git_cgallagher.inventory.render_info:
+      register: neither
+      ignore_errors: true
+    - ansible.builtin.assert:
+        that:
+          - web02 is not changed
+          - web02.resolved.packages == ['vim', 'curl', 'awscli', 'nginx', 'tcpdump']
+          - web02.chain == ['all', 'commercial', 'commercial_prod', 'commercial_prod_dc1', 'commercial_prod_dc1_web', 'web02']
+          - web02.provenance.http_port[0].path == 'all.commercial.prod.dc1.web'
+          - web02.rendered.http_port == 8080 and web02.errors == {}
+          - mock.resolved.http_port == 9000 and mock.resolved.log_level == 'debug' and mock.rendered is not defined
+          - pinned.revision == 1 and pinned.resolved.inventory_revision == 1
+          - nope is failed and nope.status == 404
+          - neither is failed
