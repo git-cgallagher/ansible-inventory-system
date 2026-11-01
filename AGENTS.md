@@ -14,7 +14,8 @@ the server only folds declared merge/append variables. **Phase-0 spike** as of
 - **One path per node.** No multiple parents, no cross-cutting layers. Cross-cutting
   convenience = var-less tag groups only. **Tags never carry variables.**
 - **Fold is emitted at every contributing node as the cumulative fold** from the root
-  (`resolver.emitted_vars`). Not at the host, not only at the deepest node.
+  (`resolver.emitted_vars`), the host included when the host itself contributes. Nodes that
+  do not contribute emit nothing for the key. Never only at the deepest node.
 - **Group names are qualified** from the path with `_`; collisions are an export error.
 - **Variables are temporal rows**; never UPDATE a value in place — close the row with
   `deleted_rev` and insert a new one under a new `Revision`.
@@ -27,7 +28,7 @@ cd server && ../.venv/bin/python -m pytest -q          # 14 tests, ~4 s
 cd examples && AIS_DATABASE_URL=sqlite:///./ais.db ../.venv/bin/ais import seed.yml
 AIS_DATABASE_URL=sqlite:///./ais.db ../.venv/bin/ais serve      # from examples/
 ../.venv/bin/ansible-inventory --graph                           # examples/ansible.cfg sets collections_path
-docker compose -f deploy/compose.yml up --build                  # PostgreSQL + API on :8000
+docker compose -f deploy/compose.yml up --build                  # PostgreSQL + API on :8000 (verified 2026-11-01)
 ```
 The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac).
 
