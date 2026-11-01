@@ -3,6 +3,25 @@
 ## Unreleased
 
 ### Added
+- **Phase 3 — web UI.** React + TypeScript single-page app in `web/` (Vite, no component
+  library; `react`, `react-dom`, `yaml`), built into `server/ais/static` and served by the API
+  at `GET /` and `GET /assets/…` (`AIS_WEB_DIR` overrides the folder; a missing build is a 404 on
+  `/` only). Views: sign-in (local accounts; SSO button when `AIS_OIDC_*` is set), lazy tree with
+  ARIA keyboard navigation and node detail (own vars, inherited vars greyed with the winning or
+  contributing nodes from render provenance), JSON/YAML variable editor (merge-strategy badges
+  from `/variables`, `If-Match` from the revision shown, stale 409 reloads and keeps the text),
+  render (host or mock path, overrides, facts, Jinja results and per-key errors), host diff
+  between any two revisions, revision and audit browsers. UI requests send `X-AIS-Source: ui`.
+- `GET /healthz` reports `oidc` (whether single sign-on is configured).
+  `GET /api/v1/auth/oidc/login?ui=1` makes the callback hand the session to the UI through
+  `sessionStorage` instead of answering JSON (unverified against a real provider).
+- The Docker image builds the UI in a Node 22 stage; `docker compose -f deploy/compose.yml up
+  --build` serves it at `http://127.0.0.1:8000/`. `.dockerignore` added.
+- CI job `web`: `npm ci`, `npm run build` (typecheck + Vite), Playwright smoke against a
+  throwaway server on the seed tree (sign in, keyboard tree, edit with a forced 409, render,
+  diff, audit, deep link). `server/tests/test_web.py` pins the static routes (index and asset
+  headers, traversal refused, API routes and `/healthz` untouched, missing build). Dependabot
+  covers `web/` (npm, monthly, grouped).
 - **Phase 2 — write path.** `audit_log` (migration `0003`): one row per effective write
   (`node.create|update|move|delete`, `variable.set|unset`, `definition.set|delete`, `import`)
   and per auth event (`login.success|failure`, `logout`, `token.create|revoke`,

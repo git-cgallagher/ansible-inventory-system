@@ -32,7 +32,7 @@ where = ["."]
 include = ["ais*"]
 
 [tool.setuptools.package-data]
-ais = ["migrations/script.py.mako"]
+ais = ["migrations/script.py.mako", "static/*", "static/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

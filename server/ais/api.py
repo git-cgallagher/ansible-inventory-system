@@ -2,7 +2,9 @@
 
 Every ``/api/v1`` route needs a bearer token (``ais.auth``); reads need ``viewer``,
 writes ``editor`` (``ais.api_write``), user management ``admin`` (``ais.api_auth``).
-``/healthz`` is open.
+``/healthz`` is open. The web UI (``web/``, built into ``ais/static``) is served at ``/``
+and ``/assets/…``: static files only, no data, so they need no token; every call the UI
+makes goes to ``/api/v1`` with the bearer like any other client.
 """
 
 from __future__ import annotations
@@ -10,10 +12,12 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import os
+import pathlib
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -66,8 +70,9 @@ class ImportRequest(BaseModel):
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok", "version": __version__}
+def healthz() -> dict[str, Any]:
+    # ``oidc`` tells the login page whether to offer single sign-on.
+    return {"status": "ok", "version": __version__, "oidc": oidc.configured()}
 
 
 # --------------------------------------------------------------------- export
@@ -298,3 +303,44 @@ def import_(
     audit.record(session, actor=principal.actor, action="import", target_type="tree", target_id="all", after=summary, source="import", revision=rev.id)
     response.headers["ETag"] = etag(rev.id)
     return {"revision": rev.id, **{k: v for k, v in summary.items() if k != "revision"}}
+
+
+# --------------------------------------------------------------------- web UI
+
+
+def web_dir() -> pathlib.Path:
+    """The built UI: ``AIS_WEB_DIR`` or ``ais/static`` (``npm run build`` in ``web/``
+    writes there; the image bakes it in). Read per request, so a missing build only
+    makes ``/`` answer 404 and the API runs regardless."""
+    return pathlib.Path(os.environ.get("AIS_WEB_DIR") or pathlib.Path(__file__).parent / "static")
+
+
+_NO_UI = "the web UI is not built: run `npm ci && npm run build` in web/ (writes server/ais/static) or set AIS_WEB_DIR"
+
+
+@app.get("/", include_in_schema=False)
+def ui_index() -> FileResponse:
+    index = web_dir() / "index.html"
+    if not index.is_file():
+        raise HTTPException(404, _NO_UI)
+    return FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+
+def ui_assets() -> dict[str, pathlib.Path]:
+    """The built assets by file name. Vite writes them flat into ``assets/``."""
+    root = web_dir() / "assets"
+    if not root.is_dir():
+        return {}
+    return {p.name: p for p in root.iterdir() if p.is_file()}
+
+
+@app.get("/assets/{name:path}", include_in_schema=False)
+def ui_asset(name: str) -> FileResponse:
+    # Look the request up by exact name in the directory listing instead of joining it
+    # onto a path: no file path is ever built from the URL, so ``..``, encoded
+    # separators and symlink tricks have nothing to act on.
+    target = ui_assets().get(name)
+    if target is None:
+        raise HTTPException(404, "not found")
+    # Vite content-hashes asset names, so they never change under one URL.
+    return FileResponse(target, headers={"Cache-Control": "public, max-age=31536000, immutable"})

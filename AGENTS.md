@@ -10,7 +10,12 @@ facts, host snapshots + diff, Alembic migrations, ltree on PostgreSQL, ETag/304 
 plugin. **Phase 2 (write path) done 2026-11-01**: audit log (`audit_log`, `GET /audit`),
 node move/rename (`POST /nodes/{id}/move`), lookup by path, and the collection's write
 modules (`node`, `host`, `variable`, `variable_definition`) + info modules (`node_info`,
-`render_info`) with `ansible-test sanity` and integration targets in CI. No UI yet (phase 3).
+`render_info`) with `ansible-test sanity` and integration targets in CI. **Phase 3 (web UI)
+done 2026-11-01**: React + TypeScript (Vite) single-page app in `web/`, built into
+`server/ais/static` and served by FastAPI at `/` (same origin, bearer token from the login):
+login (SSO button when OIDC is configured), lazy keyboard tree with own vs inherited vars and
+provenance, JSON/YAML variable editor with `If-Match`, render (host or mock path), host diff,
+revision and audit browsers. Playwright smoke in CI (job `web`).
 
 ## Invariants (do not break)
 - **Parity test is load-bearing.** `server/tests/test_parity.py` must keep passing:
@@ -55,15 +60,29 @@ modules (`node`, `host`, `variable`, `variable_definition`) + info modules (`nod
   migration (`alembic -c server/alembic.ini revision --autogenerate -m …`, then review it);
   the drift check is "migrated SQLite schema == `Base.metadata`" (columns + indexes).
 - Never read `*.db` test artefacts into docs; never commit `examples/ais.db`.
+- **The UI is just another API client.** It calls `/api/v1` with the bearer token like the
+  plugin and the modules; it never gets a private endpoint or a cookie session. The server adds
+  only `GET /` (index, `no-cache`) and `GET /assets/{path}` (hashed files, `immutable`,
+  traversal-guarded). Routing is by hash (`#/tree?path=…`), so there is **no SPA catch-all**:
+  unknown paths stay 404 and no API route can be shadowed (`server/tests/test_web.py`).
+  A missing build makes `/` a 404 and nothing else (the `test` job runs without one).
+- **UI writes carry `If-Match` = the revision the page shows** (from the render that loaded the
+  values), never a revision fetched just before the write, which would defeat the lock. A stale
+  409 reloads the values and keeps the user's text; the UI sends `X-AIS-Source: ui`.
+- **Node detail reads through `POST /render {path, template: false}`**, also for hosts: a path
+  render has no side effects, a host render materializes a snapshot row on every click. Own vars
+  are the provenance entries whose `path` is the node's; ids go in no URL (a move changes them).
 
 ## Repo and CI
 Public repo `git-cgallagher/ansible-inventory-system` (created 2026-11-01; full new-public-repo
 baseline from `~/Code/AGENTS.md`). CI `ci.yml`: job `test` (pytest incl. parity, Python 3.12 +
 3.14, plus an `ansible-inventory --graph` smoke), job `image` (docker build) and job `collection`
 (`ansible-test sanity` + the six module integration targets against a live `ais serve` on SQLite,
-Python 3.12; the step mints an editor token into the gitignored `integration_config.yml`). All are
-required by the "main protection" ruleset (id `26318946`; `collection` added 2026-11-01 after its
-first green run); the "external contributor review" ruleset means your own PRs merge with
+Python 3.12; the step mints an editor token into the gitignored `integration_config.yml`) and job
+`web` (`npm ci`, `npm run build` = `tsc` + Vite, then the Playwright smoke against `e2e/serve.sh`;
+the report is uploaded on failure). The `image` job builds the UI too (Node stage in the
+Dockerfile). All are required by the "main protection" ruleset (id `26318946`; `collection` and
+`web` added 2026-11-01 after their first green runs); the "external contributor review" ruleset means your own PRs merge with
 `gh pr merge --admin` once every check is green. Work on branches, never push to `main`.
 **Several sessions may share this checkout**: never switch branches in the shared folder for side
 work; use `git worktree add` in the scratchpad instead.
@@ -78,7 +97,7 @@ cd examples && export AIS_DATABASE_URL=sqlite:///./ais.db
 export AIS_TOKEN="$(../.venv/bin/ais token create --user me@example.com)"   # shown once
 ../.venv/bin/ais serve                                 # from examples/
 ../.venv/bin/ansible-inventory --graph                 # examples/ansible.cfg sets collections_path; token from AIS_TOKEN
-docker compose -f deploy/compose.yml up --build        # PostgreSQL + API on :8000 (verified 2026-11-01, phase 1)
+docker compose -f deploy/compose.yml up --build        # PostgreSQL + API + UI on :8000 (verified 2026-11-01, phase 3: Playwright smoke passed against it)
 docker compose -f deploy/compose.yml exec api ais user create admin@example.com --role admin --no-password
 docker compose -f deploy/compose.yml exec api ais token create --user admin@example.com
 # whole suite against PostgreSQL (publish 5432 with an override file; schema is dropped per test):
@@ -90,6 +109,12 @@ cd collection/ansible_collections/git_cgallagher/inventory
 ../../../../.venv/bin/ansible-test sanity --requirements --python 3.14
 cp tests/integration/integration_config.yml.template tests/integration/integration_config.yml  # url + an EDITOR token of a server holding seed.yml
 ../../../../.venv/bin/ansible-test integration --python 3.14            # all targets; or name one: ... integration node
+# web UI (Node 22; from web/): build into server/ais/static, which `ais serve` then serves at /
+cd web && npm ci && npm run build
+npm run dev                                            # Vite on :5173, proxies /api + /healthz to ais serve on :8000
+npx playwright install chromium                        # once per machine
+npx playwright test                                    # smoke: starts e2e/serve.sh on :8799 (seed tree, e2e@example.com)
+E2E_BASE_URL=http://127.0.0.1:8000 npx playwright test # against a server you run (seed imported, e2e user created)
 # schema drift check (should print only the two known spike-era nullable diffs, see TODO):
 AIS_DATABASE_URL=sqlite:////tmp/drift.db ../.venv/bin/ais init-db && ../.venv/bin/python -c "from alembic.autogenerate import compare_metadata; from alembic.migration import MigrationContext; from ais.db import make_engine; from ais.models import Base; c=make_engine('sqlite:////tmp/drift.db').connect(); print(compare_metadata(MigrationContext.configure(c, opts={'compare_type': True}), Base.metadata))"
 ```
@@ -132,6 +157,16 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   real, repeat, failure cases with an `always:` cleanup, all against one shared server (unique
   `it_*`/`it-*` names per target). `tests/sanity/ignore-2.*.txt` only waive the GPLv3-header
   check (the collection is MIT).
+- `server/ais/api.py` (end) — `web_dir()` (`AIS_WEB_DIR` or `ais/static`), `GET /`, `GET /assets/…`;
+  `/healthz` reports `oidc`. `ais/oidc.py` `ui_handoff()`: with `/login?ui=1` the callback answers
+  with a page that puts the session into `sessionStorage['ais.session']` and goes to `/`.
+- `web/` — Vite + React 19 + TypeScript, no component library (deps: `react`, `react-dom`,
+  `yaml`). `src/api.ts` (fetch wrapper: bearer, `If-Match`, `X-AIS-Source: ui`, `ApiError.stale`
+  for the 409 body `{error, expected, current}`, any 401 → login), `src/router.ts` (hash routes),
+  `src/views/` (`Login`, `Tree` (lazy children, ARIA tree keys), `NodeDetail`, `VarEditor`,
+  `Render`, `Diff`, `Revisions`, `Audit`), `src/styles.css` (tokens, dark via
+  `prefers-color-scheme`). `vite.config.ts` sets `outDir: ../server/ais/static`.
+  `e2e/smoke.spec.ts` + `e2e/serve.sh` + `playwright.config.ts`.
 - `server/tests/conftest.py` — `engine` (SQLite or `AIS_TEST_DATABASE_URL`), role tokens,
   `AuthClient` (sends the bearer, `if_match=` kwarg), live `server` + real-plugin helpers.
 
@@ -183,10 +218,22 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   commit only the `.template`).
 - **Move changes ids.** Anything that caches a node id across a move (nothing in the repo today)
   must re-resolve by path; the modules always look up by path.
+- **The build output is generated and gitignored** (`server/ais/static/`); `pyproject.toml`
+  package-data (`static/*`, `static/assets/*`) is what puts it into the wheel, and the Dockerfile
+  asserts `ais/static/index.html` exists after `pip install`. A new asset subfolder needs a glob.
+- **React state updaters run later, after a loop has moved on.** `setExpanded(s => s.add(node.id))`
+  inside a `for` loop over ancestors expanded only the last node (deep links opened a collapsed
+  tree). Copy the value into a `const` first. Learned 2026-11-01 from the screenshot check.
+- **Playwright roles**: an `<input list=…>` (datalist) is a `combobox`, not a `textbox`.
+- **TypeScript 7 is the native (Go) compiler**; it still installs `tsc`, and the config avoids
+  options it dropped (`baseUrl`, `node10` resolution).
+- The Playwright smoke serves on **:8799** (not 8000, which compose and the CI plugin smoke use).
+  It asserts exact revisions (1 → 4) and audit counts, so it needs a **fresh database** per run
+  (serve.sh makes one; an `E2E_BASE_URL` server must be freshly seeded) and runs with no retries.
 - **Node lookups by path need the `GET /nodes/{ref}` route declared with `ref: str`**: FastAPI
   would 422 `all.commercial` against an `int` path parameter. Digits = id, anything else = path.
 
-## TODO (phases 3–4, see the plan)
+## TODO (phase 4 and leftovers, see the plan)
 - Phase 1/2 leftovers: OIDC is a stub that has never run against a real provider (set the
   four `AIS_OIDC_*`/`AIS_SECRET_KEY` vars and test before relying on it); tags have no write
   API yet (DB only); no rate limiting on login (failed logins are at least audited now); the
@@ -196,5 +243,10 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - Alembic autogenerate reports two spike-era nullability diffs (`node.meta`,
   `node_variable.value` are NOT NULL in the models, nullable in `0001`); harmless, fix in a
   `0004` when the next model change comes.
-- Phase 3: web UI (tree, editor, render real/mock, diff, audit).
+- Phase 3 leftovers: the OIDC button and `ui_handoff` are as unverified as the rest of OIDC; the
+  UI cannot create, move or delete nodes, declare variables or manage tags (no tag write API yet)
+  or API tokens (plan §7 lists token management; the endpoints exist); "history" links on a key
+  filter the audit log by `<node id>/<key>`, so they miss rows from before a move (ids change);
+  one ~350 kB bundle, no code splitting; tree children have no count, so every non-host node shows
+  an expander until opened.
 - Phase 4: RBAC roles, backups, release automation (Galaxy publish of the collection).
