@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: python -m pip install -e './server[test]'
+      - name: Unit, export and Ansible parity tests
+        working-directory: server
+        run: python -m pytest -q
+      - name: Plugin smoke (ansible-inventory --graph against the API)
+        working-directory: examples
+        env:
+          AIS_DATABASE_URL: sqlite:///./ci.db
+        run: |
+          ais import seed.yml
+          ais serve --port 8000 & echo $! > /tmp/ais.pid
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8000/healthz >/dev/null && break; sleep 0.5; done
+          ansible-inventory --graph
+          ansible-inventory --host web02 | grep -q tcpdump
+          kill "$(cat /tmp/ais.pid)"
+
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the API image
+        run: docker build -f deploy/Dockerfile -t ais:ci .
