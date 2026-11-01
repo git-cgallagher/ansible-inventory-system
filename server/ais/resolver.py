@@ -1,5 +1,10 @@
 """Export and resolution.
 
+Everything here reads the tree *as of a revision*: nodes and variables are temporal
+rows, so ``load_snapshot(session, revision=n)`` sees exactly the nodes and values
+that were live at revision ``n`` (nodes created later are absent, nodes deleted
+later are present).
+
 Two jobs:
 
 1. ``build_export`` turns the tree into the structure the inventory plugin feeds to
@@ -104,7 +109,11 @@ def current_revision(session: Session) -> int:
 
 def load_snapshot(session: Session, revision: int | None = None, subtree: str | None = None) -> Snapshot:
     rev = revision if revision is not None else current_revision(session)
-    nodes = {n.id: n for n in session.scalars(select(Node)).all()}
+    stmt_nodes = select(Node).where(
+        (Node.created_rev.is_(None)) | (Node.created_rev <= rev),
+        (Node.deleted_rev.is_(None)) | (Node.deleted_rev > rev),
+    )
+    nodes = {n.id: n for n in session.scalars(stmt_nodes).all()}
     by_path = {n.path: n for n in nodes.values()}
 
     if subtree:

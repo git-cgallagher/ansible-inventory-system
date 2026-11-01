@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from ais.models import (
     LEVEL_ORDER,
+    NAME_RE,
     PATH_SEP,
     MergeStrategy,
     Node,
@@ -56,6 +57,8 @@ def infer_kind(depth: int, declared: str | None) -> NodeKind:
 def check_kind(parent: Node, kind: NodeKind) -> None:
     if parent.kind is NodeKind.host:
         raise ImportError_(f"host {parent.path} cannot have children")
+    if kind is NodeKind.all:
+        raise ImportError_("only the root can be of kind 'all'")
     p_idx = LEVEL_ORDER.index(parent.kind)
     c_idx = LEVEL_ORDER.index(kind)
     if kind is NodeKind.group and parent.kind is NodeKind.group:
@@ -64,19 +67,52 @@ def check_kind(parent: Node, kind: NodeKind) -> None:
         raise ImportError_(f"{kind.value} {parent.path!r} child must be deeper than its parent kind {parent.kind.value}")
 
 
-def get_or_create_node(session: Session, parent: Node | None, name: str, kind: NodeKind, inventory_name: str | None = None) -> Node:
+def check_name(name: str) -> None:
+    if not NAME_RE.match(name):
+        raise ImportError_(f"invalid node name {name!r}: letters, digits, '_' and '-' only (max 255)")
+
+
+def live_node_by_path(session: Session, path: str) -> Node | None:
+    return session.scalar(select(Node).where(Node.path == path, Node.deleted_rev.is_(None)))
+
+
+def get_or_create_node(
+    session: Session,
+    parent: Node | None,
+    name: str,
+    kind: NodeKind,
+    rev: Revision | None = None,
+    inventory_name: str | None = None,
+) -> Node:
+    """Return the live node at ``parent/name``, creating it under ``rev`` if absent.
+
+    An existing live node's kind must match: the importer never changes a node's
+    kind or re-parents it.
+    """
+    check_name(name)
     if parent is None:
         path, depth = name, 0
     else:
+        if parent.deleted_rev is not None:
+            raise ImportError_(f"parent {parent.path} is deleted")
         check_kind(parent, kind)
         path, depth = f"{parent.path}{PATH_SEP}{name}", parent.depth + 1
-    if PATH_SEP in name or not name:
-        raise ImportError_(f"invalid node name {name!r}")
-    node = session.scalar(select(Node).where(Node.path == path))
+    node = live_node_by_path(session, path)
     if node is None:
-        node = Node(parent_id=parent.id if parent else None, kind=kind, name=name, path=path, depth=depth, inventory_name=inventory_name, meta={})
+        node = Node(
+            parent_id=parent.id if parent else None,
+            kind=kind,
+            name=name,
+            path=path,
+            depth=depth,
+            inventory_name=inventory_name,
+            meta={},
+            created_rev=rev.id if rev is not None else None,
+        )
         session.add(node)
         session.flush()
+    elif node.kind is not kind:
+        raise ImportError_(f"{path} exists as {node.kind.value}, not {kind.value}")
     return node
 
 
@@ -109,7 +145,7 @@ def import_tree(session: Session, data: dict[str, Any], *, actor: str = "import"
         definition.json_schema = spec.get("json_schema")
         session.add(definition)
 
-    root = get_or_create_node(session, None, "all", NodeKind.all)
+    root = get_or_create_node(session, None, "all", NodeKind.all, rev)
     _import_node(session, root, data["all"], rev)
     session.flush()
     return rev
@@ -121,10 +157,10 @@ def _import_node(session: Session, node: Node, spec: dict[str, Any], rev: Revisi
     for child_name, child_spec in (spec.get("children") or {}).items():
         child_spec = child_spec or {}
         kind = infer_kind(node.depth + 1, child_spec.get("kind"))
-        child = get_or_create_node(session, node, child_name, kind, child_spec.get("inventory_name"))
+        child = get_or_create_node(session, node, child_name, kind, rev, child_spec.get("inventory_name"))
         _import_node(session, child, child_spec, rev)
     for host_name, host_vars in (spec.get("hosts") or {}).items():
-        host = get_or_create_node(session, node, host_name, NodeKind.host)
+        host = get_or_create_node(session, node, host_name, NodeKind.host, rev)
         set_variables(session, host, host_vars or {}, rev)
 
 

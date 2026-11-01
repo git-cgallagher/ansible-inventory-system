@@ -1,22 +1,30 @@
-"""Database engine and session helpers.
+"""Database engine, session helpers and schema management.
 
-The spike uses a materialized path stored as text (``all.commercial.prod``) so the
-same schema runs on SQLite (tests, local CLI) and PostgreSQL (deployment). On
-PostgreSQL the ``path`` column can later be swapped for ``ltree`` without changing
-the resolver, which only ever asks "is this node under that prefix".
+``path`` is a materialized path stored as text (``all.commercial.prod``) so the same
+schema runs on SQLite (tests, local CLI) and PostgreSQL (deployment). On PostgreSQL
+the migrations add a generated ``ltree`` copy with a GiST index; the resolver keeps
+asking "is this node under that prefix" on the text column, so semantics are the
+same on both.
+
+The schema is created and upgraded by the Alembic migrations in ``ais.migrations``
+(``init_db``). A database created by the phase-0 spike's ``create_all`` (no
+``alembic_version`` table but a ``node`` table) is stamped at the baseline
+revision first, then upgraded.
 """
 
 from __future__ import annotations
 
 import os
+import pathlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 DEFAULT_URL = "sqlite:///./ais.db"
+BASELINE_REVISION = "0001"
 
 
 def database_url() -> str:
@@ -57,10 +65,44 @@ def configure(engine: Engine) -> None:
     _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
-def init_db(engine: Engine | None = None) -> None:
-    from ais.models import Base
+# ------------------------------------------------------------------ migrations
 
-    Base.metadata.create_all(engine or get_engine())
+
+def alembic_config():
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(pathlib.Path(__file__).with_name("migrations")))
+    return cfg
+
+
+def _is_legacy_spike_db(conn: Connection) -> bool:
+    names = set(inspect(conn).get_table_names())
+    return "node" in names and "alembic_version" not in names
+
+
+def init_db(engine: Engine | None = None) -> None:
+    """Create or upgrade the schema to the latest migration."""
+    from alembic import command
+
+    engine = engine or get_engine()
+    cfg = alembic_config()
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        if _is_legacy_spike_db(conn):
+            command.stamp(cfg, BASELINE_REVISION)
+        command.upgrade(cfg, "head")
+
+
+def schema_revision(engine: Engine | None = None) -> str | None:
+    engine = engine or get_engine()
+    with engine.connect() as conn:
+        if "alembic_version" not in inspect(conn).get_table_names():
+            return None
+        return conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+
+
+# -------------------------------------------------------------------- sessions
 
 
 @contextmanager
