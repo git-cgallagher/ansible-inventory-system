@@ -8,13 +8,21 @@ cookie) to enable ``GET /api/v1/auth/oidc/login`` → provider → ``…/callbac
 maps the ID token's ``email`` to a user (auto-provisioned with
 ``AIS_OIDC_DEFAULT_ROLE``, default ``viewer``, when ``AIS_OIDC_AUTO_PROVISION`` is
 ``1``) and answers with a session bearer token. Unconfigured, both routes answer 501.
+
+``/login?ui=1`` (the web UI's button) makes the callback answer with a small HTML page
+that puts the session into the tab's ``sessionStorage`` (key ``ais.session``, as
+``web/src/api.ts`` reads it) and goes to ``/``, instead of the JSON body; the token never
+travels in a URL. Like the rest of this module, unverified against a real provider.
 """
 
 from __future__ import annotations
 
+import json
 import os
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -57,9 +65,22 @@ def _not_configured() -> None:
         raise HTTPException(501, "OIDC is not configured (set AIS_OIDC_ISSUER, AIS_OIDC_CLIENT_ID, AIS_OIDC_CLIENT_SECRET, AIS_SECRET_KEY)")
 
 
+def ui_handoff(session_info: dict[str, Any]) -> HTMLResponse:
+    """Page that stores the session for the web UI and redirects to it. The JSON is
+    escaped so no value can close the script element."""
+    payload = json.dumps(session_info, default=str).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    html = (
+        "<!doctype html><meta charset=utf-8><title>Signing in</title>"
+        f"<script>sessionStorage.setItem('ais.session', JSON.stringify({payload}));location.replace('/');</script>"
+        "<noscript>Signing in needs JavaScript.</noscript>"
+    )
+    return HTMLResponse(html, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
 @router.get("/login")
-async def oidc_login(request: Request):
+async def oidc_login(request: Request, ui: bool = False):
     _not_configured()
+    request.session["ais_ui"] = ui
     redirect_uri = os.environ.get("AIS_OIDC_REDIRECT_URL") or str(request.url_for("oidc_callback"))
     return await _client().authorize_redirect(request, redirect_uri)
 
@@ -81,4 +102,7 @@ async def oidc_callback(request: Request, session: Session = Depends(get_session
     if not user.is_active:
         raise HTTPException(403, "user is disabled")
     plaintext, row = auth.create_token(session, user, name="oidc session", kind="session", expires_at=auth._now() + auth.session_ttl())
-    return {"token": plaintext, "expires_at": row.expires_at, "role": user.role.value, "email": user.email}
+    out = {"token": plaintext, "expires_at": row.expires_at, "role": user.role.value, "email": user.email}
+    if request.session.pop("ais_ui", False):
+        return ui_handoff(out)
+    return out
