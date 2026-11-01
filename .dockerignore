@@ -1,0 +1,16 @@
+# Keep the build context small and free of local state (the image builds the UI itself).
+.git
+.venv
+.claude
+**/node_modules
+**/__pycache__
+**/*.egg-info
+**/*.db
+**/*.db-journal
+server/ais/static
+web/dist
+web/test-results
+web/playwright-report
+web/blob-report
+collection/ansible_collections/git_cgallagher/inventory/tests/output
+collection/ansible_collections/git_cgallagher/inventory/tests/integration/integration_config.yml

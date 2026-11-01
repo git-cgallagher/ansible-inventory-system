@@ -7,13 +7,15 @@ An authoritative, database-backed Ansible inventory with a **strict tree hierarc
 per-variable merge strategies, revision history, and a render endpoint that shows what
 any real or hypothetical host resolves to.
 
-**Status: phase 2, write path (2026-11-01).** On top of phase 1 (bearer-token auth with
+**Status: phase 3, web UI (2026-11-01).** On top of phase 1 (bearer-token auth with
 roles, locked write endpoints, Jinja render with mock facts, per-host snapshots and diffs,
-Alembic migrations, an ETag-revalidating inventory plugin): an **audit log** of every write
-and auth event, **node move/rename** with history, and the collection's **Ansible modules**
-(`node`, `host`, `variable`, `variable_definition`, `node_info`, `render_info`), idempotent
-with check and diff mode, tested by `ansible-test` in CI. Still tested by a golden test that
-the server's render equals `ansible-inventory --host`. No web UI yet. See
+Alembic migrations, an ETag-revalidating inventory plugin) and phase 2 (an **audit log** of
+every write and auth event, **node move/rename** with history, and the collection's
+**Ansible modules**, idempotent with check and diff mode, tested by `ansible-test` in CI):
+a **web UI** served by the API at `/` for browsing the tree, editing variables, rendering
+real or mock hosts, diffing a host between revisions and reading the revision and audit
+history. Still tested by a golden test that the server's render equals
+`ansible-inventory --host`. See
 `ANSIBLE-INVENTORY-PLAN.md` in `~/Code` for the full plan and `AGENTS.md` here for how
 to work on it.
 
@@ -57,7 +59,8 @@ export AIS_TOKEN="$(../.venv/bin/ais token create --user me@example.com)"   # pr
 ../.venv/bin/ais render --path all.commercial.lab.dc1.web --facts '{"os_family": "RedHat"}'
 ```
 
-API docs at `http://127.0.0.1:8000/docs`. Every `/api/v1` call needs
+Open `http://127.0.0.1:8000/` for the web UI once it is built (next section). API docs at
+`http://127.0.0.1:8000/docs`. Every `/api/v1` call needs
 `Authorization: Bearer $AIS_TOKEN`; writes also need `If-Match: "<revision>"` (the
 current revision is the first entry of `GET /api/v1/revisions`, or the `ETag` of the
 last write):
@@ -71,6 +74,32 @@ curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/diff?host=web01&from=1&to=2'
 curl -s -H "$H" -H 'Content-Type: application/json' -X POST http://127.0.0.1:8000/api/v1/render \
   -d '{"host": "web01", "facts": {"default_ipv4": {"address": "10.1.1.11"}}}'
 ```
+
+### Web UI
+
+A React + TypeScript single-page app in `web/`, built with Vite into `server/ais/static` and
+served by the API itself at `/` (same origin; it signs in through `POST /api/v1/auth/login`
+and then calls `/api/v1` with that bearer token, like any other client). The Docker image
+builds it in; from a checkout:
+
+```bash
+cd web && npm ci && npm run build      # Node 22; then `ais serve` serves it at /
+npm run dev                            # or: hot reload on :5173, API proxied to :8000
+```
+
+- **Sign in** with a local account (`ais user create … --role editor` prompts for the
+  password). A single sign-on button appears when `AIS_OIDC_*` is configured (unverified, like
+  the OIDC stub itself).
+- **Tree**: loads one level at a time and works from the keyboard (arrows, Home/End, Enter).
+  A node shows the variables set on it and, greyed, everything it inherits with the node that
+  wins (or, for merge/append variables, every node that contributes).
+- **Variable editor** (editor role): JSON or YAML per key, with the merge-strategy badge and
+  description from `/variables`. Saves carry `If-Match` with the revision on screen; if someone
+  else wrote first, the page says so, reloads the values and keeps your text to re-apply.
+- **Render**: a real host, or a mock host at any path, with optional overrides and facts;
+  shows each resolved value, where it came from, the Jinja result and per-key template errors.
+- **Diff** a host between any two revisions, and browse **revisions** and the **audit log**
+  (editor role), including "history" links from a key.
 
 ### Managing the inventory from Ansible
 
@@ -133,7 +162,7 @@ through `POST /api/v1/import` or `ais import`.
 ### PostgreSQL (compose)
 
 ```bash
-docker compose -f deploy/compose.yml up --build      # API on :8000, migrations run at start
+docker compose -f deploy/compose.yml up --build      # API + web UI on :8000, migrations run at start
 docker compose -f deploy/compose.yml exec api ais user create admin@example.com --role admin --no-password
 docker compose -f deploy/compose.yml exec api ais token create --user admin@example.com
 ```
@@ -148,6 +177,7 @@ docker compose -f deploy/compose.yml exec api ais token create --user admin@exam
 | Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH/DELETE /nodes/{id}`, `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` | editor |
 | Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&since=&until=&limit=&before=` | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |
+| Open | `GET /healthz` (`status`, `version`, `oidc`), `GET /` + `/assets/…` (the built web UI, static files only) | none |
 
 Requests may send `X-Request-ID` (echoed, stored on audit rows) and `X-AIS-Source: module|ui`
 (recorded as the revision's and audit row's `source`).
@@ -164,6 +194,14 @@ AIS_TEST_DATABASE_URL=postgresql+psycopg://ais:ais@127.0.0.1:55432/ais_test ../.
 seeded host. The rest cover the fold, export, auth (401/403), locking (428/409),
 temporal writes, move/rename, the audit log, render errors, snapshots/diff and the
 plugin's 304 revalidation.
+
+The web UI has a Playwright smoke test (sign in, keyboard tree, inherited values, an edit
+that hits and recovers from a 409, render, diff, audit, a deep link) against a throwaway
+server on the seed tree; CI runs it in the `web` job:
+
+```bash
+cd web && npm ci && npm run build && npx playwright install chromium && npx playwright test
+```
 
 The collection has `ansible-test sanity` and one integration target per module (check
 mode, real change, idempotent repeat, failure cases) that CI runs against a live server:
@@ -182,5 +220,6 @@ cp tests/integration/integration_config.yml.template tests/integration/integrati
 | `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
 | `server/tests/` | fold property tests, export, auth, writes/locking, render, snapshots, plugin ETag, Ansible parity |
 | `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
+| `web/` | React + TypeScript UI (Vite; builds into `server/ais/static`), Playwright smoke in `e2e/` |
 | `examples/` | `seed.yml` tree, `inventory.yml`, `ansible.cfg` |
-| `deploy/` | `compose.yml` + `Dockerfile` (PostgreSQL + API) |
+| `deploy/` | `compose.yml` + `Dockerfile` (PostgreSQL + API; the image builds the UI in a Node stage) |
