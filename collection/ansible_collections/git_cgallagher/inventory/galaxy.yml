@@ -1,0 +1,15 @@
+namespace: git_cgallagher
+name: inventory
+version: 0.1.0
+readme: README.md
+authors:
+  - Chris Gallagher
+description: Inventory plugin and modules for the Ansible Inventory System (database-backed strict-tree inventory).
+license:
+  - MIT
+tags:
+  - inventory
+  - infrastructure
+repository: https://github.com/git-cgallagher/ansible-inventory-system
+build_ignore:
+  - tests/output

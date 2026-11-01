@@ -1,0 +1,78 @@
+# Example tree for the spike. Import with: ais import examples/seed.yml
+variables:
+  packages:
+    merge_strategy: unique_append
+    description: OS packages installed everywhere; each level adds its own.
+  sysctl:
+    merge_strategy: merge
+    description: Kernel settings; deeper levels add or override single keys.
+  dns_servers:
+    merge_strategy: replace
+
+all:
+  vars:
+    ntp_server: time.example.com
+    dns_servers: [10.0.0.2, 10.0.0.3]
+    packages: [vim, curl]
+    sysctl: {net.ipv4.ip_forward: 0, vm.swappiness: 60}
+  children:
+    commercial:
+      vars:
+        compliance_profile: cis-level1
+        packages: [awscli]
+      children:
+        prod:
+          vars:
+            log_level: warning
+            sysctl: {vm.swappiness: 10}
+          children:
+            dc1:
+              vars:
+                dns_servers: [10.1.0.2, 10.1.0.3]
+                site_code: DC1
+              children:
+                web:
+                  vars:
+                    http_port: 8080
+                    packages: [nginx]
+                  hosts:
+                    web01: {ansible_host: 10.1.1.11}
+                    web02: {ansible_host: 10.1.1.12, packages: [tcpdump]}
+                db:
+                  vars:
+                    packages: [postgresql-16]
+                    sysctl: {vm.swappiness: 1, kernel.shmmax: 68719476736}
+                  hosts:
+                    db01: {ansible_host: 10.1.2.11}
+        lab:
+          vars:
+            log_level: debug
+          children:
+            dc1:
+              children:
+                web:
+                  vars: {http_port: 8081}
+                  hosts:
+                    lab-web01: {ansible_host: 10.9.1.11}
+    federal:
+      vars:
+        compliance_profile: fedramp-moderate
+        packages: [aide]
+      children:
+        prod:
+          vars:
+            log_level: info
+            sysctl: {net.ipv4.ip_forward: 0, kernel.randomize_va_space: 2}
+          children:
+            dc2:
+              vars: {site_code: DC2}
+              children:
+                web:
+                  vars: {http_port: 443}
+                  children:
+                    edge:
+                      vars: {packages: [haproxy]}
+                      hosts:
+                        fed-edge01: {ansible_host: 10.2.1.11}
+                  hosts:
+                    fed-web01: {ansible_host: 10.2.1.21}

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.hypothesis/
+*.db
+*.db-journal
+examples/ais.db
+.claude/worktrees/
+dist/
+build/
+.env
