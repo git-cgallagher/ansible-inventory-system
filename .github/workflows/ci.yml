@@ -12,6 +12,7 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -26,21 +27,27 @@ jobs:
       - name: Unit, export and Ansible parity tests
         working-directory: server
         run: python -m pytest -q
-      - name: Plugin smoke (ansible-inventory --graph against the API)
+      - name: Plugin smoke (ansible-inventory --graph against the API, bearer token from AIS_TOKEN)
         working-directory: examples
         env:
           AIS_DATABASE_URL: sqlite:///./ci.db
         run: |
           ais import seed.yml
+          ais user create ci@example.com --role viewer --no-password
+          AIS_TOKEN="$(ais token create --user ci@example.com --name ci)"
+          export AIS_TOKEN
           ais serve --port 8000 & echo $! > /tmp/ais.pid
           for i in $(seq 1 40); do curl -sf http://127.0.0.1:8000/healthz >/dev/null && break; sleep 0.5; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/v1/export)" = 401
           ansible-inventory --graph
           ansible-inventory --host web02 | grep -q tcpdump
+          ansible-inventory --list >/dev/null   # second run revalidates with If-None-Match
           kill "$(cat /tmp/ais.pid)"
 
   image:
     name: image
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the API image

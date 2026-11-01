@@ -14,6 +14,9 @@ description:
     them natively (ancestors first by depth). Variables declared merge/append are
     pre-folded by the server so plain replace yields the right value.
   - Sets C(inventory_revision) on C(all) so every run records what it ran against.
+  - "Honours the export's C(ETag): the last export is kept in O(etag_store) and re-sent
+    as C(If-None-Match), so an unchanged inventory costs one cheap 304 instead of a
+    full download (independent of, and complementary to, Ansible's inventory cache)."
 options:
   plugin:
     description: Token that ensures this is a source file for the plugin.
@@ -25,10 +28,18 @@ options:
     env:
       - name: AIS_URL
   token:
-    description: Bearer token (phase 1; optional in the spike).
+    description: Bearer token (required by the server; mint one with C(ais token create)).
     type: str
     env:
       - name: AIS_TOKEN
+  etag_store:
+    description:
+      - Directory where the last export and its ETag are kept per source, for
+        C(If-None-Match) revalidation. Empty string disables it.
+    type: path
+    default: ~/.cache/ais
+    env:
+      - name: AIS_ETAG_STORE
   subtree:
     description: Only export this node and what is below it, e.g. C(all.commercial.prod).
     type: str
@@ -63,12 +74,62 @@ cache_plugin: jsonfile
 cache_connection: ~/.cache/ais
 """
 
+import hashlib
 import json
+import os
+import tempfile
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from ansible.errors import AnsibleError
 from ansible.module_utils.urls import open_url
 from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
+
+
+def etag_store_path(store_dir, url):
+    """One file per distinct export URL (host, params) inside ``store_dir``."""
+    if not store_dir:
+        return None
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(os.path.expanduser(store_dir), "export-%s.json" % digest)
+
+
+def fetch_export(url, headers, timeout=30, validate_certs=True, store_path=None):
+    """GET the export, revalidating with ``If-None-Match`` when a stored copy exists.
+
+    Returns ``(data, revalidated)``: ``revalidated`` is True when the server
+    answered 304 and the stored copy was used.
+    """
+    headers = dict(headers)
+    stored = None
+    if store_path and os.path.exists(store_path):
+        try:
+            with open(store_path) as fh:
+                stored = json.load(fh)
+        except (OSError, ValueError):
+            stored = None
+        if stored and stored.get("etag") and stored.get("data") is not None:
+            headers["If-None-Match"] = stored["etag"]
+        else:
+            stored = None
+    try:
+        resp = open_url(url, headers=headers, timeout=timeout, validate_certs=validate_certs)
+    except HTTPError as exc:
+        if exc.code == 304 and stored is not None:
+            return stored["data"], True
+        raise
+    data = json.loads(resp.read())
+    etag = resp.headers.get("ETag")
+    if store_path and etag:
+        try:
+            os.makedirs(os.path.dirname(store_path), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(store_path), prefix=".etag-")
+            with os.fdopen(fd, "w") as fh:
+                json.dump({"etag": etag, "url": url, "data": data}, fh)
+            os.replace(tmp, store_path)
+        except OSError:
+            pass  # the store is an optimisation; never fail the inventory over it
+    return data, False
 
 
 class InventoryModule(BaseInventoryPlugin, Cacheable):
@@ -92,10 +153,22 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         if token:
             headers["Authorization"] = "Bearer %s" % token
         try:
-            resp = open_url(url, headers=headers, timeout=self.get_option("timeout"), validate_certs=self.get_option("validate_certs"))
-            return json.loads(resp.read())
+            data, revalidated = fetch_export(
+                url,
+                headers,
+                timeout=self.get_option("timeout"),
+                validate_certs=self.get_option("validate_certs"),
+                store_path=etag_store_path(self.get_option("etag_store"), url),
+            )
+        except HTTPError as exc:
+            if exc.code in (401, 403):
+                raise AnsibleError("ais: %s rejected the token (%s); set AIS_TOKEN or the token option" % (url, exc.code))
+            raise AnsibleError("ais: failed to fetch %s: %s" % (url, exc))
         except Exception as exc:  # noqa: BLE001 - surface as an inventory error
             raise AnsibleError("ais: failed to fetch %s: %s" % (url, exc))
+        if revalidated:
+            self.display.vv("ais: export unchanged (304), using the stored copy")
+        return data
 
     def parse(self, inventory, loader, path, cache=True):
         super().parse(inventory, loader, path, cache)
