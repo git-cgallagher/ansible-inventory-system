@@ -25,6 +25,16 @@ SEED = ROOT / "examples" / "seed.yml"
 COLLECTION_PATH = ROOT / "collection"
 
 
+@pytest.fixture(autouse=True)
+def _reset_login_limiter():
+    """The failed-login limiter is process-global; start every test with a clean slate."""
+    from ais.ratelimit import login_limiter
+
+    login_limiter.reset()
+    yield
+    login_limiter.reset()
+
+
 @pytest.fixture()
 def engine(tmp_path):
     """Per-test database. SQLite by default; set ``AIS_TEST_DATABASE_URL`` to a

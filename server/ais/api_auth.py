@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
@@ -15,6 +15,7 @@ from ais import audit, auth
 from ais.auth import Principal, current_principal, require
 from ais.db import get_session
 from ais.models import ApiToken, Role, User
+from ais.ratelimit import login_limiter
 
 router = APIRouter(prefix="/api/v1", tags=["auth"])
 
@@ -55,13 +56,21 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/auth/login")
-def login(req: LoginRequest, session: Session = Depends(get_session)) -> Any:
+def login(req: LoginRequest, request: Request, session: Session = Depends(get_session)) -> Any:
     email = req.email.strip().lower()
+    ip = request.client.host if request.client else "unknown"
+    wait = login_limiter.retry_after(email, ip)
+    if wait is not None:
+        # Refused before the password is checked; returned (not raised) so the row commits.
+        audit.record(session, actor=email, action="login.throttled", target_type="user", target_id=email, after={"client": ip, "retry_after": wait}, source="login")
+        return JSONResponse(status_code=429, content={"detail": f"too many failed logins, retry in {wait} s"}, headers={"Retry-After": str(wait)})
     user = auth.authenticate_password(session, email, req.password)
     if user is None:
+        login_limiter.failure(email, ip)
         # Returned, not raised: raising would roll back the session and lose the audit row.
-        audit.record(session, actor=email, action="login.failure", target_type="user", target_id=email, source="login")
+        audit.record(session, actor=email, action="login.failure", target_type="user", target_id=email, after={"client": ip}, source="login")
         return JSONResponse(status_code=401, content={"detail": "invalid credentials"})
+    login_limiter.success(email)
     expires = auth._now() + auth.session_ttl()
     plaintext, row = auth.create_token(session, user, name="login session", kind="session", expires_at=expires)
     audit.record(session, actor=user.email, action="login.success", target_type="user", target_id=user.email, after={"token_id": row.id, "expires_at": row.expires_at}, source="login")

@@ -26,7 +26,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais.db import get_session
+from ais import audit
+from ais.db import get_session, session_scope
 from ais.models import ROLE_RANK, ApiToken, Role, User
 
 TOKEN_PREFIX = "ais_"
@@ -150,6 +151,46 @@ def authenticate_token(session: Session, token: str) -> Principal | None:
     return Principal(user=user, token=row, role=role)
 
 
+def bad_token_reason(session: Session, token: str) -> tuple[str, str, str]:
+    """``(reason, actor, target_id)`` for a presented token that did not authenticate.
+    ``target_id`` is the token row id when the token is known, else the display prefix
+    for ``ais_`` tokens; anything else (a pasted password?) is never recorded."""
+    row = session.scalar(select(ApiToken).where(ApiToken.token_hash == hash_token(token)))
+    if row is None:
+        shown = token[: len(TOKEN_PREFIX) + 6] if token.startswith(TOKEN_PREFIX) else "(not an ais_ token)"
+        return "unknown", "anonymous", shown
+    user = session.get(User, row.user_id)
+    actor = user.email if user is not None else "anonymous"
+    if row.revoked_at is not None:
+        reason = "revoked"
+    elif user is None or not user.is_active:
+        reason = "inactive user"
+    else:
+        reason = "expired"
+    return reason, actor, str(row.id)
+
+
+def audit_bad_token(session: Session, token: str, request: Request) -> None:
+    """One ``token.rejected`` audit row per request that presented a bad bearer token.
+
+    Written in its own transaction and committed before the 401 is raised: the raise
+    rolls back the request's session, which would take the row with it. Requests with
+    no token at all are not recorded (that is every anonymous probe of the API).
+    """
+    reason, actor, target_id = bad_token_reason(session, token)
+    client = request.client.host if request.client else "unknown"
+    with session_scope() as own:
+        audit.record(
+            own,
+            actor=actor,
+            action="token.rejected",
+            target_type="token",
+            target_id=target_id,
+            after={"reason": reason, "client": client, "method": request.method, "path": request.url.path},
+            source=audit.current_source(),
+        )
+
+
 def authenticate_password(session: Session, email: str, password: str) -> User | None:
     user = session.scalar(select(User).where(User.email == email.strip().lower()))
     if user is None or not user.is_active or user.auth_source != "local":
@@ -173,6 +214,7 @@ def current_principal(
         raise HTTPException(401, "bearer token required", headers={"WWW-Authenticate": "Bearer"})
     principal = authenticate_token(session, creds.credentials)
     if principal is None:
+        audit_bad_token(session, creds.credentials, request)
         raise HTTPException(401, "invalid, expired or revoked token", headers={"WWW-Authenticate": "Bearer"})
     request.state.principal = principal
     return principal
