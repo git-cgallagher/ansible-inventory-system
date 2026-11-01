@@ -15,7 +15,7 @@ description:
   - Idempotent, with check and diff mode. Variables listed in O(vars) are set; others are left alone
     unless O(purge_vars) is true. Creating a node needs its parent to exist already.
   - A node's kind cannot change in place and the root C(all) can be neither created nor deleted;
-    renames and moves are C(POST /api/v1/nodes/{id}/move) on the server (no module yet).
+    renames and moves are M(git_cgallagher.inventory.node_move).
 options:
   path:
     description: Full path of the node, for example C(all.commercial.prod.dc1.cache).

@@ -8,3 +8,5 @@ action_groups:
     - variable_definition
     - host
     - render_info
+    - node_move
+    - import

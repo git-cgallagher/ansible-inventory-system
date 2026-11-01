@@ -27,7 +27,11 @@ options:
     description: Free text.
     type: str
   json_schema:
-    description: JSON schema stored with the declaration (not yet enforced by the server).
+    description:
+      - JSON Schema (Draft 2020-12 unless it names another C($schema)) that every stored value of the variable must
+        match. The server enforces it on every write of the key and refuses a schema that is invalid or that a value
+        already stored somewhere in the tree violates (the task then fails with the offending paths).
+      - It checks each node's own value, not the folded result of C(merge)/C(append) variables.
     type: dict
   state:
     description: Whether the declaration must exist.

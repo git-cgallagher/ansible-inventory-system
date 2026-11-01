@@ -24,12 +24,13 @@ def test_dry_run_then_real_then_noop(editor, viewer, session, seeded):
     assert dry.json() == {"revision": rev, "changed": True, "dry_run": True, "nodes_created": 2, "variables_set": 2, "definitions": ["queue_size"]}
     assert current_rev(editor) == rev and viewer.get("/api/v1/nodes/all.commercial.prod.dc1.mq").status_code == 404
     real = editor.post("/api/v1/import", json={"tree": TREE}, if_match=rev)
-    assert real.status_code == 201 and real.json() == {**dry.json(), "revision": rev + 1, "dry_run": False}
+    new = real.json()["revision"]  # > rev; on PostgreSQL the dry run used up a sequence value
+    assert real.status_code == 201 and new > rev and real.json() == {**dry.json(), "revision": new, "dry_run": False}
     before = _audits(session)
-    again = editor.post("/api/v1/import", json={"tree": TREE}, if_match=rev + 1)
+    again = editor.post("/api/v1/import", json={"tree": TREE}, if_match=new)
     assert again.status_code == 200
-    assert again.json() == {"revision": rev + 1, "changed": False, "dry_run": False, "nodes_created": 0, "variables_set": 0, "definitions": []}
-    assert current_rev(editor) == rev + 1 and _audits(session) == before
+    assert again.json() == {"revision": new, "changed": False, "dry_run": False, "nodes_created": 0, "variables_set": 0, "definitions": []}
+    assert current_rev(editor) == new and _audits(session) == before
     assert editor.post("/api/v1/import", json={"tree": TREE, "dry_run": True}).json()["changed"] is False
 
 

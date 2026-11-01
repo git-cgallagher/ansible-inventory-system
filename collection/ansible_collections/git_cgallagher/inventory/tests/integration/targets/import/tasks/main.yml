@@ -1,0 +1,107 @@
+---
+# import: check mode (server dry run), real, repeat, schema refusal, kind refusal, cleanup.
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  vars:
+    it_tree:
+      variables:
+        it_import_port: {merge_strategy: replace, json_schema: {type: integer, minimum: 1}}
+      all:
+        children:
+          it_import:
+            vars: {it_import_port: 7000}
+            children:
+              prod:
+                children:
+                  dc1:
+                    hosts:
+                      it-import01: {ansible_host: 10.77.0.1}
+  block:
+    - name: Import in check mode
+      git_cgallagher.inventory.import:
+        tree: "{{ it_tree }}"
+      check_mode: true
+      diff: true
+      register: chk
+    - name: Nothing was written
+      git_cgallagher.inventory.node_info:
+        path: all.it_import
+      register: after_chk
+    - ansible.builtin.assert:
+        that:
+          - chk is changed
+          - chk.nodes_created == 4
+          - chk.variables_set == 2
+          - chk.definitions == ['it_import_port']
+          - chk.diff.after.nodes_created == 4
+          - not after_chk.exists
+
+    - name: Import
+      git_cgallagher.inventory.import:
+        tree: "{{ it_tree }}"
+        revision_message: integration import
+      register: imported
+    - name: Import again
+      git_cgallagher.inventory.import:
+        tree: "{{ it_tree }}"
+      register: again
+    - name: Check mode on a matching tree
+      git_cgallagher.inventory.import:
+        tree: "{{ it_tree }}"
+      check_mode: true
+      register: chk_again
+    - name: The host landed with its var
+      git_cgallagher.inventory.node_info:
+        path: all.it_import.prod.dc1.it-import01
+      register: host
+    - ansible.builtin.assert:
+        that:
+          - imported is changed
+          - imported.nodes_created == 4
+          - again is not changed
+          - again.revision == imported.revision
+          - again.nodes_created == 0
+          - chk_again is not changed
+          - host.exists
+          - host.node.vars.ansible_host == '10.77.0.1'
+
+    - name: A value its json_schema rejects
+      git_cgallagher.inventory.import:
+        tree:
+          all:
+            children:
+              it_import:
+                vars: {it_import_port: "seven thousand"}
+      register: bad_value
+      ignore_errors: true
+    - name: A kind that does not fit
+      git_cgallagher.inventory.import:
+        tree:
+          all:
+            children:
+              it_import:
+                kind: tier
+      register: bad_kind
+      ignore_errors: true
+    - name: Nothing changed
+      git_cgallagher.inventory.node_info:
+        path: all.it_import
+      register: unchanged
+    - ansible.builtin.assert:
+        that:
+          - bad_value is failed
+          - "'json_schema' in bad_value.msg"
+          - bad_kind is failed
+          - bad_kind.status == 422
+          - unchanged.node.vars.it_import_port == 7000
+  always:
+    - name: Cleanup the subtree
+      git_cgallagher.inventory.node:
+        path: all.it_import
+        state: absent
+    - name: Cleanup the definition
+      git_cgallagher.inventory.variable_definition:
+        name: it_import_port
+        state: absent
