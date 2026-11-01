@@ -52,3 +52,38 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the API image
         run: docker build -f deploy/Dockerfile -t ais:ci .
+
+  collection:
+    name: collection
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install the server (brings ansible-core and ansible-test)
+        run: python -m pip install -e './server[test]'
+      - name: ansible-test sanity
+        working-directory: collection/ansible_collections/git_cgallagher/inventory
+        run: ansible-test sanity --requirements --python 3.12 --color no
+      - name: Serve the seed tree and mint an editor token for the modules
+        working-directory: examples
+        env:
+          AIS_DATABASE_URL: sqlite:///./ci-collection.db
+        run: |
+          ais import seed.yml
+          ais user create it@example.com --role editor --no-password
+          AIS_TOKEN="$(ais token create --user it@example.com --name integration)"
+          test "$(printf %s "$AIS_TOKEN" | wc -c)" -gt 20
+          printf 'ais_url: http://127.0.0.1:8000\nais_token: %s\n' "$AIS_TOKEN" \
+            > ../collection/ansible_collections/git_cgallagher/inventory/tests/integration/integration_config.yml
+          ais serve --port 8000 & echo $! > /tmp/ais-collection.pid
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8000/healthz >/dev/null && break; sleep 0.5; done
+          curl -sf http://127.0.0.1:8000/healthz
+      - name: ansible-test integration (every module - check, real, repeat, failure)
+        working-directory: collection/ansible_collections/git_cgallagher/inventory
+        run: ansible-test integration --requirements --python 3.12 --color no
+      - name: Stop the server
+        if: always()
+        run: test -f /tmp/ais-collection.pid && kill "$(cat /tmp/ais-collection.pid)" || true
