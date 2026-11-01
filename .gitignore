@@ -11,3 +11,5 @@ examples/ais.db
 dist/
 build/
 .env
+collection/ansible_collections/git_cgallagher/inventory/tests/integration/integration_config.yml
+collection/ansible_collections/git_cgallagher/inventory/tests/output/
