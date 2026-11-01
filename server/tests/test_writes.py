@@ -125,8 +125,8 @@ def test_tags_never_carry_vars(editor, session, seeded):
     assert editor.put("/api/v1/tags/canary/vars/x", json={"value": 1}, if_match=rev).status_code in (404, 405)
     assert editor.post("/api/v1/tags", json={"name": "t", "vars": {"x": 1}}, if_match=rev).status_code in (404, 405)
     assert not hasattr(Tag, "variables") and not hasattr(Tag, "vars")
-    assert editor.get("/api/v1/export").json()["tags"] == {k: v for k, v in editor.get("/api/v1/export").json()["tags"].items()}  # lists of hosts only
-    assert all(isinstance(v, list) for v in editor.get("/api/v1/export").json()["tags"].values())
+    tags = editor.get("/api/v1/export").json()["tags"]
+    assert tags and all(isinstance(v, list) for v in tags.values())  # hosts only, never vars
 
 
 def test_import_requires_precondition_and_records_actor(editor, viewer, seeded):

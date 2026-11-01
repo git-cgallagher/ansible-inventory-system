@@ -43,6 +43,8 @@
   deleted node can be recreated.
 - Node names are restricted to letters, digits, `_` and `-` (valid `ltree` labels).
 - CI: the plugin smoke step mints a token; jobs have `timeout-minutes`.
+
+### Added (phase 0)
 - Public GitHub repo with the standard baseline: `SECURITY.md`, CI (`test` + `image`), Dependabot,
   CodeQL default setup, secret scanning + push protection, rulesets.
 - Phase-0 spike: strict-tree data model with temporal variables and revisions;

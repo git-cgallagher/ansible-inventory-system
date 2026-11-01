@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 
 from ais import auth
+from ais.api import app
 from ais.models import Role
 from tests.conftest import AuthClient, current_rev
 
@@ -19,7 +20,7 @@ def test_anonymous_is_401(anon, seeded):
 
 
 def test_garbage_token_is_401(engine, seeded):
-    assert AuthClient(engine and __import__("ais.api", fromlist=["app"]).app, "ais_nope").get("/api/v1/export").status_code == 401
+    assert AuthClient(app, "ais_nope").get("/api/v1/export").status_code == 401
 
 
 def test_viewer_reads_but_cannot_write(viewer, seeded):

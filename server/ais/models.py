@@ -32,6 +32,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 PATH_SEP = "."
@@ -253,6 +254,6 @@ class HostSnapshot(Base):
     host_node_id: Mapped[int] = mapped_column(ForeignKey("node.id", ondelete="CASCADE"))
     host_name: Mapped[str] = mapped_column(String(255), index=True)
     revision: Mapped[int] = mapped_column(ForeignKey("revision.id"))
-    resolved: Mapped[dict] = mapped_column(JSON)
+    resolved: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
     resolved_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)

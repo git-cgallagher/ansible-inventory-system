@@ -7,7 +7,8 @@ Revises: 0001
   ``created_rev`` = always existed). The unique constraints on ``path`` and
   ``(parent_id, name)`` become partial unique indexes over live rows only, so a
   deleted node can be recreated under the same name.
-* ``user_account``, ``api_token``, ``host_snapshot`` are new.
+* ``user_account``, ``api_token``, ``host_snapshot`` are new (``host_snapshot.resolved``
+  is ``jsonb`` on PostgreSQL, ``json`` elsewhere).
 * On PostgreSQL, ``node.path_ltree`` is a stored generated ``ltree`` column
   (``text2ltree(path)``) with a GiST index. The resolver keeps using ``path``
   (text prefix matching), so semantics are unchanged; the column exists for
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "0002"
 down_revision = "0001"
@@ -70,7 +72,7 @@ def upgrade() -> None:
         sa.Column("host_node_id", sa.Integer, sa.ForeignKey("node.id", ondelete="CASCADE", name="fk_snapshot_node"), nullable=False),
         sa.Column("host_name", sa.String(255), nullable=False),
         sa.Column("revision", sa.Integer, sa.ForeignKey("revision.id", name="fk_snapshot_revision"), nullable=False),
-        sa.Column("resolved", sa.JSON, nullable=False),
+        sa.Column("resolved", sa.JSON().with_variant(postgresql.JSONB, "postgresql"), nullable=False),
         sa.Column("resolved_hash", sa.String(64), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("host_node_id", "revision", name="uq_snapshot_host_rev"),
