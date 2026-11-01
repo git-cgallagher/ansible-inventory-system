@@ -43,6 +43,9 @@ def test_asset_paths_cannot_escape(anon, built_ui):
     assert anon.get("/assets/../secret.txt").status_code == 404
     assert anon.get("/assets/%2e%2e/secret.txt").status_code == 404
     assert anon.get("/assets/missing.js").status_code == 404
+    # nested and encoded-separator names never match a flat asset name
+    assert anon.get("/assets/sub/index-abc123.js").status_code == 404
+    assert anon.get("/assets/%2Fetc%2Fpasswd").status_code == 404
 
 
 def test_missing_build_is_a_404_not_a_crash(anon, tmp_path, monkeypatch):

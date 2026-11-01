@@ -326,11 +326,21 @@ def ui_index() -> FileResponse:
     return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
 
+def ui_assets() -> dict[str, pathlib.Path]:
+    """The built assets by file name. Vite writes them flat into ``assets/``."""
+    root = web_dir() / "assets"
+    if not root.is_dir():
+        return {}
+    return {p.name: p for p in root.iterdir() if p.is_file()}
+
+
 @app.get("/assets/{name:path}", include_in_schema=False)
 def ui_asset(name: str) -> FileResponse:
-    root = (web_dir() / "assets").resolve()
-    target = (root / name).resolve()
-    if not target.is_relative_to(root) or not target.is_file():
+    # Look the request up by exact name in the directory listing instead of joining it
+    # onto a path: no file path is ever built from the URL, so ``..``, encoded
+    # separators and symlink tricks have nothing to act on.
+    target = ui_assets().get(name)
+    if target is None:
         raise HTTPException(404, "not found")
     # Vite content-hashes asset names, so they never change under one URL.
     return FileResponse(target, headers={"Cache-Control": "public, max-age=31536000, immutable"})
