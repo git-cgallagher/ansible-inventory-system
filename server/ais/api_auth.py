@@ -6,11 +6,12 @@ import datetime as dt
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais import auth
+from ais import audit, auth
 from ais.auth import Principal, current_principal, require
 from ais.db import get_session
 from ais.models import ApiToken, Role, User
@@ -54,19 +55,24 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/auth/login")
-def login(req: LoginRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
-    user = auth.authenticate_password(session, req.email, req.password)
+def login(req: LoginRequest, session: Session = Depends(get_session)) -> Any:
+    email = req.email.strip().lower()
+    user = auth.authenticate_password(session, email, req.password)
     if user is None:
-        raise HTTPException(401, "invalid credentials")
+        # Returned, not raised: raising would roll back the session and lose the audit row.
+        audit.record(session, actor=email, action="login.failure", target_type="user", target_id=email, source="login")
+        return JSONResponse(status_code=401, content={"detail": "invalid credentials"})
     expires = auth._now() + auth.session_ttl()
     plaintext, row = auth.create_token(session, user, name="login session", kind="session", expires_at=expires)
+    audit.record(session, actor=user.email, action="login.success", target_type="user", target_id=user.email, after={"token_id": row.id, "expires_at": row.expires_at}, source="login")
     return {"token": plaintext, "expires_at": row.expires_at, "role": user.role.value, "email": user.email}
 
 
 @router.post("/auth/logout", status_code=204)
-def logout(principal: Principal = Depends(current_principal)) -> None:
-    if principal.token is not None:
+def logout(principal: Principal = Depends(current_principal), session: Session = Depends(get_session)) -> None:
+    if principal.token is not None and principal.token.revoked_at is None:
         principal.token.revoked_at = auth._now()
+        audit.record(session, actor=principal.actor, action="logout", target_type="token", target_id=principal.token.id, before=_token_out(principal.token), source="login")
 
 
 @router.get("/auth/me")
@@ -98,6 +104,7 @@ def create_token(req: TokenCreate, principal: Principal = Depends(current_princi
         plaintext, row = auth.create_token(session, user, name=req.name, role=req.role, expires_at=expires)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    audit.record(session, actor=principal.actor, action="token.create", target_type="token", target_id=row.id, after=_token_out(row))
     return {"token": plaintext, **_token_out(row)}
 
 
@@ -118,7 +125,9 @@ def revoke_token(token_id: int, principal: Principal = Depends(current_principal
     if row is None or (row.user_id != principal.user.id and not principal.has(Role.admin)):
         raise HTTPException(404, "unknown token")
     if row.revoked_at is None:
+        before = _token_out(row)
         row.revoked_at = auth._now()
+        audit.record(session, actor=principal.actor, action="token.revoke", target_type="token", target_id=row.id, before=before, after=_token_out(row))
 
 
 # ---------------------------------------------------------------------- users
@@ -143,20 +152,22 @@ def list_users(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     return [_user_out(u) for u in session.scalars(select(User).order_by(User.id))]
 
 
-@router.post("/users", status_code=201, dependencies=[Depends(require(Role.admin))])
-def create_user(req: UserCreate, session: Session = Depends(get_session)) -> dict[str, Any]:
+@router.post("/users", status_code=201)
+def create_user(req: UserCreate, principal: Principal = Depends(require(Role.admin)), session: Session = Depends(get_session)) -> dict[str, Any]:
     try:
         user = auth.create_user(session, str(req.email), role=req.role, password=req.password, display_name=req.display_name)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    audit.record(session, actor=principal.actor, action="user.create", target_type="user", target_id=user.email, after=_user_out(user))
     return _user_out(user)
 
 
-@router.patch("/users/{user_id}", dependencies=[Depends(require(Role.admin))])
-def patch_user(user_id: int, req: UserPatch, session: Session = Depends(get_session)) -> dict[str, Any]:
+@router.patch("/users/{user_id}")
+def patch_user(user_id: int, req: UserPatch, principal: Principal = Depends(require(Role.admin)), session: Session = Depends(get_session)) -> dict[str, Any]:
     user = session.get(User, user_id)
     if user is None:
         raise HTTPException(404, "unknown user")
+    before = _user_out(user)
     if req.role is not None:
         user.role = req.role
     if req.is_active is not None:
@@ -166,4 +177,6 @@ def patch_user(user_id: int, req: UserPatch, session: Session = Depends(get_sess
     if req.display_name is not None:
         user.display_name = req.display_name
     session.flush()
+    after = {**_user_out(user), "password_changed": req.password is not None}
+    audit.record(session, actor=principal.actor, action="user.update", target_type="user", target_id=user.email, before=before, after=after)
     return _user_out(user)

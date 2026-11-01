@@ -18,6 +18,7 @@ from fastapi import Header, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from ais.audit import current_source
 from ais.models import Revision
 from ais.resolver import current_revision
 
@@ -62,10 +63,11 @@ def check_precondition(session: Session, if_match: str | None) -> int:
     return current
 
 
-def begin_write(session: Session, if_match: str | None, *, actor: str, source: str = "api", message: str | None = None) -> Revision:
-    """Lock, check the precondition, open a new revision. Call first in a write."""
+def begin_write(session: Session, if_match: str | None, *, actor: str, source: str | None = None, message: str | None = None) -> Revision:
+    """Lock, check the precondition, open a new revision. Call first in a write.
+    ``source`` defaults to what the request claimed (``X-AIS-Source``) or ``api``."""
     check_precondition(session, if_match)
-    rev = Revision(actor=actor, source=source, message=message)
+    rev = Revision(actor=actor, source=source or current_source(), message=message)
     session.add(rev)
     session.flush()
     return rev
