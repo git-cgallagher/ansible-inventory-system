@@ -1,5 +1,7 @@
 # Ansible Inventory System
 
+[![CI](https://github.com/git-cgallagher/ansible-inventory-system/actions/workflows/ci.yml/badge.svg)](https://github.com/git-cgallagher/ansible-inventory-system/actions/workflows/ci.yml)
+
 An authoritative, database-backed Ansible inventory with a **strict tree hierarchy**
 (`all → business → tier → datacenter → group → … → host`), a long precedence chain,
 per-variable merge strategies, revision history, and a render endpoint that shows what

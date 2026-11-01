@@ -21,6 +21,15 @@ the server only folds declared merge/append variables. **Phase-0 spike** as of
   `deleted_rev` and insert a new one under a new `Revision`.
 - Never read `*.db` test artefacts into docs; never commit `examples/ais.db`.
 
+## Repo and CI
+Public repo `git-cgallagher/ansible-inventory-system` (created 2026-11-01; full new-public-repo
+baseline from `~/Code/AGENTS.md`). CI `ci.yml`: job `test` (pytest incl. parity, Python 3.12 +
+3.14, plus an `ansible-inventory --graph` smoke) and job `image` (docker build). Both are required
+by the "main protection" ruleset; the "external contributor review" ruleset means your own PRs merge
+with `gh pr merge --admin` once every check is green. Work on branches, never push to `main`.
+**Several sessions may share this checkout**: never switch branches in the shared folder for side
+work; use `git worktree add` in the scratchpad instead.
+
 ## Commands
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e './server[test]'
@@ -60,5 +69,4 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac).
 - Phase 2: modules `node`, `variable`, `variable_definition`, `host`, `*_info`, `import`;
   audit log; ansible-test sanity/integration on the shared Molecule driver.
 - Phase 3: web UI (tree, editor, render real/mock, diff, audit).
-- Phase 4: RBAC roles, backups, CI, release; GitHub repo + public-repo baseline
-  (visibility undecided; owner go needed before creating the repo).
+- Phase 4: RBAC roles, backups, release automation.
