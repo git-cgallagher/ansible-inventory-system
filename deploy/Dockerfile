@@ -7,7 +7,7 @@ COPY web/ ./
 RUN npm run build
 
 # Stage 2: the API, with the built UI baked into the package (served at /).
-FROM python:3.12-slim
+FROM python:3.15-slim
 WORKDIR /app
 COPY server/ /app/server/
 COPY --from=web /src/server/ais/static /app/server/ais/static
