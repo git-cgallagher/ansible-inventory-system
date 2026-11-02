@@ -3,6 +3,8 @@ importer whose depth is bounded by that check rather than Python's recursion lim
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from ais.importer import MAX_PATH_BYTES, ImportError_, import_tree
@@ -37,6 +39,10 @@ def test_default_limit_allows_32_and_refuses_33(session):
         import_tree(session, _chain(29))
 
 
+@pytest.mark.skipif(
+    (os.environ.get("AIS_TEST_DATABASE_URL") or "").startswith("postgresql"),
+    reason="lifts the path cap, so on PostgreSQL it hits the ltree index limit the cap exists for",
+)
 def test_deep_import_is_not_bounded_by_recursion(session, monkeypatch):
     # The recursive importer died near depth 1000; the explicit stack does not. Lift both
     # limits so this tests the walk alone (in practice the path cap binds first).
