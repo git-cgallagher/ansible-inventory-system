@@ -17,7 +17,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ais.models import HostSnapshot, NodeKind, Revision
-from ais.resolver import Snapshot, load_snapshot, resolve
+from ais.resolver import Snapshot, load_chain, resolve
+
+# PostgreSQL allows 65,535 bind parameters per statement; a 100k-host export exceeded it
+# in one IN list (docs/scale.md). Chunk lookups and inserts well below that.
+_CHUNK = 1000
 
 # Present in every resolved set and different at every revision by construction.
 _IGNORED_KEYS = {"inventory_revision"}
@@ -44,14 +48,13 @@ def materialize(session: Session, snap: Snapshot, hosts: list[str] | None = None
     wanted = [host_nodes[h] for h in (hosts if hosts is not None else host_nodes) if h in host_nodes]
     if not wanted:
         return 0
-    existing = set(
-        session.scalars(
-            select(HostSnapshot.host_node_id).where(
-                HostSnapshot.revision == snap.revision,
-                HostSnapshot.host_node_id.in_([n.id for n in wanted]),
-            )
-        )
-    )
+    existing: set[int] = set()
+    stmt = select(HostSnapshot.host_node_id).where(HostSnapshot.revision == snap.revision)
+    if hosts is None:  # every host: one scan of the revision, no id list at all
+        existing.update(session.scalars(stmt))
+    else:
+        for i in range(0, len(wanted), _CHUNK):
+            existing.update(session.scalars(stmt.where(HostSnapshot.host_node_id.in_([n.id for n in wanted[i : i + _CHUNK]]))))
     rows = []
     for node in wanted:
         if node.id in existing:
@@ -66,9 +69,9 @@ def materialize(session: Session, snap: Snapshot, hosts: list[str] | None = None
                 "resolved_hash": resolved_hash(resolved),
             }
         )
-    if rows:
-        insert = _insert(session)
-        session.execute(insert(HostSnapshot).values(rows).on_conflict_do_nothing(index_elements=["host_node_id", "revision"]))
+    insert = _insert(session)
+    for i in range(0, len(rows), _CHUNK):
+        session.execute(insert(HostSnapshot).values(rows[i : i + _CHUNK]).on_conflict_do_nothing(index_elements=["host_node_id", "revision"]))
     return len(rows)
 
 
@@ -83,8 +86,9 @@ def get_snapshot(session: Session, host: str, revision: int, *, create: bool = T
         return row
     if session.get(Revision, revision) is None:
         return None
-    snap = load_snapshot(session, revision)
-    if not any(n.kind is NodeKind.host and n.name == host for n in snap.nodes.values()):
+    try:
+        snap = load_chain(session, revision, host=host)
+    except KeyError:
         return None
     materialize(session, snap, [host])
     return session.scalar(select(HostSnapshot).where(HostSnapshot.host_name == host, HostSnapshot.revision == revision))

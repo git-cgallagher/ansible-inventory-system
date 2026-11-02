@@ -238,6 +238,13 @@ cp tests/integration/integration_config.yml.template tests/integration/integrati
 ../../../../.venv/bin/ansible-test integration --python 3.14
 ```
 
+## Scale
+
+`docs/scale.md` has the numbers for 100,000 hosts on PostgreSQL (full export 3.6 s, or 18.5 s
+the first time at a revision because it writes every host's snapshot; subtree export 0.10 s;
+render 0.01 s; `ansible-inventory --graph` 4.5 s with a warm ETag store), what still costs,
+and how to rerun them (`bench/generate.py`, `bench/benchmark.py`).
+
 ## Layout
 
 | Path | What |
@@ -247,4 +254,5 @@ cp tests/integration/integration_config.yml.template tests/integration/integrati
 | `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
 | `web/` | React + TypeScript UI (Vite; builds into `server/ais/static`), Playwright smoke in `e2e/` |
 | `examples/` | `seed.yml` tree, `inventory.yml`, `ansible.cfg` |
+| `bench/`, `docs/scale.md` | synthetic 100k-host generator, benchmark, compose overlay; results |
 | `deploy/` | `compose.yml` + `Dockerfile` (PostgreSQL + API; the image builds the UI in a Node stage) |

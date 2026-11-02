@@ -3,6 +3,22 @@
 ## Unreleased
 
 ### Added
+- **Phase 4 — scale proof.** `bench/generate.py` (100k hosts, ~10k groups, depth 8, straight
+  into the database), `bench/benchmark.py` and `bench/compose.override.yml`; results in
+  `docs/scale.md`.
+
+### Fixed
+- Full export of a large tree: `Snapshot.children()` scanned every node per node (12k nodes:
+  24 s, now 0.3 s); children/host indexes and a per-snapshot cache of emitted variables.
+- Full export at 100k hosts was an HTTP 500 on PostgreSQL (65,535 bind-parameter limit in the
+  snapshot lookup and insert); both are chunked.
+- Subtree export filters in SQL (`path_ltree` GiST index on PostgreSQL); render, diffs of a
+  missing snapshot and the snapshot list's host check load only the host's ancestor chain.
+  100k hosts: render 2.4 s → 0.01 s, subtree export 2.5 s → 0.10 s.
+- Plugin: `AIS_ETAG_STORE=""` wrote the export into the current directory instead of
+  disabling the store (`etag_store` was `type: path`; it is `str` now).
+
+### Added (earlier phases)
 - **Phase 4 — UI write gaps.** From the node page an editor adds a child, moves/renames a node
   with its subtree and deletes a subtree (all with `If-Match` from the page; the tree reloads
   because ids change). New pages: **Variables** (declare merge strategy, description, JSON

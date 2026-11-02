@@ -36,7 +36,9 @@ options:
     description:
       - Directory where the last export and its ETag are kept per source, for
         C(If-None-Match) revalidation. Empty string disables it.
-    type: path
+      - A C(str), not a C(path), on purpose. Ansible turns an empty C(path) into the current
+        directory, which silently wrote the export there instead of disabling the store.
+    type: str
     default: ~/.cache/ais
     env:
       - name: AIS_ETAG_STORE

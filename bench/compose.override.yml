@@ -1,0 +1,10 @@
+# Scale benchmark overlay (docs/scale.md): publishes PostgreSQL on 127.0.0.1:55434 so
+# bench/generate.py can load the tree from the host, and moves the API to 127.0.0.1:8813.
+#   docker compose -p ais-scale -f deploy/compose.yml -f bench/compose.override.yml up -d --build
+services:
+  db:
+    ports:
+      - "127.0.0.1:55434:5432"
+  api:
+    ports: !override
+      - "127.0.0.1:8813:8000"

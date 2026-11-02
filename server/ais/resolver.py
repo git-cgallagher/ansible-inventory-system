@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ansible.utils.vars import combine_vars
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session
 
 from ais.models import (
@@ -82,7 +82,13 @@ def fold(strategy: MergeStrategy, acc: Any, value: Any) -> Any:
 
 @dataclass
 class Snapshot:
-    """Everything the exporter needs, read as of one revision."""
+    """Everything the exporter needs, read as of one revision.
+
+    Read-only once loaded: ``children``/``host`` build indexes on first use and
+    ``_emitted`` caches each node's emitted variables, shared between every caller. Nothing
+    may mutate what those return; ``build_export`` only serializes the cached dicts and
+    ``resolve`` deep-copies the result it hands out. Add a mutation and you corrupt every
+    other host of the same export."""
 
     revision: int
     nodes: dict[int, Node]
@@ -90,9 +96,27 @@ class Snapshot:
     vars_by_node: dict[int, dict[str, Any]]
     strategies: dict[str, MergeStrategy]
     tags: dict[str, list[int]] = field(default_factory=dict)  # tag name -> node ids
+    # Indexes built on first use; a snapshot is read-only once loaded. Without them the
+    # exporter scanned every node once per node (quadratic: 24 s for 12k nodes, docs/scale.md).
+    _children: dict[int, list[Node]] | None = field(default=None, repr=False)
+    _hosts: dict[str, Node] | None = field(default=None, repr=False)
+    _emitted: dict[int, dict[str, Any]] = field(default_factory=dict, repr=False)
 
     def children(self, node: Node) -> list[Node]:
-        return sorted((n for n in self.nodes.values() if n.parent_id == node.id), key=lambda n: n.name)
+        if self._children is None:
+            index: dict[int, list[Node]] = {}
+            for n in self.nodes.values():
+                if n.parent_id is not None:
+                    index.setdefault(n.parent_id, []).append(n)
+            for kids in index.values():
+                kids.sort(key=lambda n: n.name)
+            self._children = index
+        return list(self._children.get(node.id, ()))
+
+    def host(self, name: str) -> Node | None:
+        if self._hosts is None:
+            self._hosts = {n.name: n for n in self.nodes.values() if n.kind is NodeKind.host}
+        return self._hosts.get(name)
 
     def chain(self, node: Node) -> list[Node]:
         """Root-first list of nodes from ``all`` down to ``node``."""
@@ -107,31 +131,48 @@ def current_revision(session: Session) -> int:
     return rev or 0
 
 
-def load_snapshot(session: Session, revision: int | None = None, subtree: str | None = None) -> Snapshot:
+def _live_at(model, rev: int):
+    created = model.created_rev <= rev if model is NodeVariable else (Node.created_rev.is_(None)) | (Node.created_rev <= rev)
+    return and_(created, (model.deleted_rev.is_(None)) | (model.deleted_rev > rev))
+
+
+def _under(session: Session, path: str):
+    """SQL filter: strictly below ``path``. PostgreSQL uses the GiST-indexed generated
+    ``path_ltree`` column (migration-only, not in the ORM model); elsewhere an escaped
+    prefix match (``_`` is a LIKE wildcard and legal in names)."""
+    if session.get_bind().dialect.name == "postgresql":
+        return and_(text("node.path_ltree <@ CAST(:ais_under AS ltree)").bindparams(ais_under=path), Node.path != path)
+    return Node.path.startswith(path + PATH_SEP, autoescape=True)
+
+
+def load_snapshot(
+    session: Session,
+    revision: int | None = None,
+    subtree: str | None = None,
+    *,
+    paths: list[str] | None = None,
+) -> Snapshot:
+    """The tree as of ``revision`` (default: current). ``subtree`` keeps that node, its
+    ancestors and everything below it; ``paths`` keeps exactly those nodes (a host's chain
+    for a render). Both filter in SQL, so a 100k-host tree is not read for one host."""
     rev = revision if revision is not None else current_revision(session)
-    stmt_nodes = select(Node).where(
-        (Node.created_rev.is_(None)) | (Node.created_rev <= rev),
-        (Node.deleted_rev.is_(None)) | (Node.deleted_rev > rev),
-    )
+    node_filter = None
+    if subtree:
+        root = session.scalar(select(Node).where(Node.path == subtree, _live_at(Node, rev)))
+        if root is None:
+            raise KeyError(f"subtree {subtree!r} does not exist")
+        node_filter = or_(Node.path.in_(root.ancestors_paths()), _under(session, subtree))
+    elif paths is not None:
+        node_filter = Node.path.in_(paths)
+    stmt_nodes = select(Node).where(_live_at(Node, rev))
+    if node_filter is not None:
+        stmt_nodes = stmt_nodes.where(node_filter)
     nodes = {n.id: n for n in session.scalars(stmt_nodes).all()}
     by_path = {n.path: n for n in nodes.values()}
 
-    if subtree:
-        root = by_path.get(subtree)
-        if root is None:
-            raise KeyError(f"subtree {subtree!r} does not exist")
-        keep_paths = set(root.ancestors_paths())
-        prefix = root.path + PATH_SEP
-        selected = {
-            n.id: n for n in nodes.values() if n.path in keep_paths or n.path.startswith(prefix)
-        }
-        nodes = selected
-        by_path = {n.path: n for n in nodes.values()}
-
-    stmt = select(NodeVariable).where(
-        NodeVariable.created_rev <= rev,
-        (NodeVariable.deleted_rev.is_(None)) | (NodeVariable.deleted_rev > rev),
-    )
+    stmt = select(NodeVariable).where(_live_at(NodeVariable, rev))
+    if node_filter is not None:
+        stmt = stmt.join(Node, Node.id == NodeVariable.node_id).where(_live_at(Node, rev), node_filter)
     vars_by_node: dict[int, dict[str, Any]] = {}
     for nv in session.scalars(stmt):
         if nv.node_id in nodes:
@@ -145,6 +186,31 @@ def load_snapshot(session: Session, revision: int | None = None, subtree: str | 
             tags.setdefault(tag.name, []).append(member.node_id)
 
     return Snapshot(rev, nodes, by_path, vars_by_node, strategies, tags)
+
+
+def host_path(session: Session, host: str, revision: int) -> str | None:
+    """Path of the host named ``host`` as of ``revision``, or None."""
+    return session.scalar(select(Node.path).where(Node.kind == NodeKind.host, Node.name == host, _live_at(Node, revision)))
+
+
+def load_chain(session: Session, revision: int | None = None, *, host: str | None = None, path: str | None = None) -> Snapshot:
+    """The snapshot ``resolve`` needs for one real or mock host: just its ancestor chain.
+    A host's emitted variables depend only on its ancestors (the fold runs down the chain),
+    so this resolves exactly like the full tree. KeyError when the host/path is unknown."""
+    rev = revision if revision is not None else current_revision(session)
+    if host is not None:
+        anchor = host_path(session, host, rev)
+        if anchor is None:
+            raise KeyError(f"unknown host {host!r}")
+    elif path is not None:
+        anchor = path
+    else:
+        raise ValueError("host or path is required")
+    parts = anchor.split(PATH_SEP)
+    snap = load_snapshot(session, rev, paths=[PATH_SEP.join(parts[: i + 1]) for i in range(len(parts))])
+    if anchor not in snap.by_path:
+        raise KeyError(f"unknown path {path!r}")
+    return snap
 
 
 # ----------------------------------------------------------------------- naming
@@ -173,6 +239,15 @@ def tag_group_name(node: Node, sep: str = GROUP_SEP) -> str:
 def emitted_vars(snap: Snapshot, node: Node) -> dict[str, Any]:
     """Variables to emit on this node: own replace-vars as-is, fold-vars as the
     cumulative fold from the root to this node (only when this node contributes)."""
+    return copy.deepcopy(_emitted(snap, node))
+
+
+def _emitted(snap: Snapshot, node: Node) -> dict[str, Any]:
+    """``emitted_vars``, computed once per node and snapshot. Shared: never mutate it
+    (``build_export`` only serializes it; ``resolve`` copies what it hands out)."""
+    cached = snap._emitted.get(node.id)
+    if cached is not None:
+        return cached
     own = snap.vars_by_node.get(node.id, {})
     out: dict[str, Any] = {}
     chain = snap.chain(node)
@@ -186,6 +261,7 @@ def emitted_vars(snap: Snapshot, node: Node) -> dict[str, Any]:
             if key in snap.vars_by_node.get(anc.id, {}):
                 acc = fold(strategy, acc, snap.vars_by_node[anc.id][key])
         out[key] = acc
+    snap._emitted[node.id] = out
     return out
 
 
@@ -198,7 +274,7 @@ def build_export(snap: Snapshot, *, sep: str = GROUP_SEP, emit_tags: bool = True
         if node.kind is NodeKind.host:
             if node.name in hosts:
                 raise ValueError(f"duplicate host name {node.name!r}")
-            hosts[node.name] = {"path": node.path, "vars": emitted_vars(snap, node)}
+            hosts[node.name] = {"path": node.path, "vars": _emitted(snap, node)}
             continue
         gname = group_name(node, sep)
         if gname in seen_groups and seen_groups[gname] != node.path:
@@ -209,14 +285,24 @@ def build_export(snap: Snapshot, *, sep: str = GROUP_SEP, emit_tags: bool = True
             "path": node.path,
             "children": [group_name(k, sep) for k in kids if k.kind is not NodeKind.host],
             "hosts": [k.name for k in kids if k.kind is NodeKind.host],
-            "vars": emitted_vars(snap, node),
+            "vars": _emitted(snap, node),
         }
 
     tags: dict[str, list[str]] = {}
     if emit_tags:
+        # Hosts under each node that needs them (tagged kinds, tag members), in one pass over
+        # the hosts and their ancestor paths instead of one scan of every node per tag.
+        wanted = {n.path for n in snap.nodes.values() if n.kind in TAGGED_KINDS}
+        wanted.update(snap.nodes[nid].path for ids in snap.tags.values() for nid in ids)
+        under: dict[str, list[str]] = {}
+        for h in snap.nodes.values():
+            if h.kind is NodeKind.host:
+                for anc in h.ancestors_paths()[:-1]:
+                    if anc in wanted:
+                        under.setdefault(anc, []).append(h.name)
+
         def hosts_under(n: Node) -> list[str]:
-            prefix = n.path + PATH_SEP
-            return sorted(h.name for h in snap.nodes.values() if h.kind is NodeKind.host and h.path.startswith(prefix))
+            return sorted(under.get(n.path, ()))
 
         for node in snap.nodes.values():
             if node.kind in TAGGED_KINDS:
@@ -253,7 +339,7 @@ def resolve(
     playbook sees. ``overrides`` are applied last as if they were host vars.
     """
     if host is not None:
-        node = next((n for n in snap.nodes.values() if n.kind is NodeKind.host and n.name == host), None)
+        node = snap.host(host)
         if node is None:
             raise KeyError(f"unknown host {host!r}")
         chain = snap.chain(node)
@@ -270,7 +356,7 @@ def resolve(
         "inventory_revision": [{"path": "all", "group": "all", "strategy": "replace", "value": snap.revision}]
     }
     for node in chain:
-        emitted = emitted_vars(snap, node)
+        emitted = _emitted(snap, node)
         result = combine_vars(result, emitted)
         for key in emitted:
             provenance.setdefault(key, []).append(
@@ -293,6 +379,6 @@ def resolve(
         "host": host,
         "path": chain[-1].path,
         "chain": [group_name(n, sep) if n.kind is not NodeKind.host else n.name for n in chain],
-        "resolved": result,
+        "resolved": copy.deepcopy(result),  # values come from the shared per-node cache
         "provenance": provenance,
     }
