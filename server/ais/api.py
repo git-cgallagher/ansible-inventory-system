@@ -31,13 +31,19 @@ from ais.locking import check_precondition, etag
 from ais.models import AuditLog, Node, Revision, Role, VariableDefinition
 from ais.render import MOCK_HOSTNAME, render_templates
 from ais.resolver import GROUP_SEP, build_export, current_revision, host_path, load_chain, load_snapshot, resolve
-from ais.snapshots import diff, get_snapshot, list_snapshots, materialize
+from ais import snapshots
+from ais.snapshots import diff, get_snapshot, list_snapshots
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     init_db()
-    yield
+    if snapshots.enabled():
+        snapshots.worker.start()  # catches up at once, then after every write
+    try:
+        yield
+    finally:
+        snapshots.worker.stop()
 
 
 app = FastAPI(title="Ansible Inventory System", version=__version__, lifespan=_lifespan)
@@ -114,7 +120,6 @@ def export(
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    materialize(session, snap)
     # Serialized here: the export is plain JSON already, and FastAPI's jsonable_encoder
     # walks it in Python (0.7 s of a 3.5 s export at 100k hosts, docs/scale.md).
     return Response(json.dumps(data, separators=(",", ":")), media_type="application/json", headers={"ETag": tag})
@@ -133,8 +138,6 @@ def render(req: RenderRequest, principal: Principal = viewer, session: Session =
         out = resolve(snap, host=req.host, path=req.path, overrides=req.overrides, sep=req.group_separator)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
-    if req.host:
-        materialize(session, snap, [req.host])
     if req.template:
         hostname = req.host or req.mock_hostname
         out["rendered"], out["errors"] = render_templates(out["resolved"], facts=req.facts, hostname=hostname, chain=out["chain"])
@@ -283,10 +286,26 @@ def host_snapshots(name: str, principal: Principal = viewer, session: Session = 
 
 @app.get("/api/v1/hosts/{name}/snapshots/{revision}")
 def host_snapshot(name: str, revision: int, principal: Principal = viewer, session: Session = Depends(get_session)) -> dict[str, Any]:
-    row = get_snapshot(session, name, revision)
-    if row is None:
+    view = get_snapshot(session, name, revision)
+    if view is None:
         raise HTTPException(404, f"host {name!r} does not exist at revision {revision}")
-    return {"host": name, "revision": row.revision, "resolved_hash": row.resolved_hash, "resolved": row.resolved, "created_at": row.created_at}
+    return {
+        "host": name,
+        "revision": view.revision,
+        # the stored row this came from (the last change at or before ``revision``),
+        # or null when it was computed on demand
+        "stored_revision": view.stored_revision,
+        "resolved_hash": view.resolved_hash,
+        "resolved": view.resolved,
+        "created_at": view.created_at,
+    }
+
+
+@app.get("/api/v1/snapshots/status")
+def snapshot_status(principal: Principal = viewer, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Where the background pass stands: newest revision, newest passed revision, the last
+    pass's numbers and how many rows are stored."""
+    return {**snapshots.status(session), "worker": snapshots.worker.running}
 
 
 @app.get("/api/v1/diff")

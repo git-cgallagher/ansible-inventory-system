@@ -6,7 +6,8 @@ import { href } from "../router";
 import type { DiffResult, RevisionRow, SnapshotRow } from "../types";
 
 /** Resolved variables of one host between two revisions (`GET /diff`). Every revision is
- * offered: the server computes a missing snapshot on demand; ● marks stored ones. */
+ * offered and answered exactly. ● marks the revisions where this host's resolved variables
+ * changed: the background pass stores a snapshot only there (`GET /hosts/{name}/snapshots`). */
 export function DiffView({ params }: { params: URLSearchParams }) {
   const { nodes, error: nodesError } = useAllNodes();
   const [host, setHost] = useState(params.get("host") ?? "");
@@ -68,7 +69,7 @@ export function DiffView({ params }: { params: URLSearchParams }) {
   return (
     <div className="page">
       <h1>Diff</h1>
-      <p className="muted">How one host's resolved variables changed between two revisions. ● = snapshot already stored.</p>
+      <p className="muted">How one host's resolved variables changed between two revisions. ● = this host's variables changed in that revision.</p>
       {nodesError && <Notice kind="error">{nodesError}</Notice>}
       <form className="inline wrap" onSubmit={compare}>
         <label>

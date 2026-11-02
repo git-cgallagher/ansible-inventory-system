@@ -2,8 +2,10 @@
 
 Measures, against ``--url`` with a viewer token (``AIS_TOKEN``):
 
-* full export: the first request at a revision (it also materializes every host's snapshot),
-  a repeat, and a revalidation with ``If-None-Match`` (304);
+* full export: the first request at a revision, a repeat, and a revalidation with
+  ``If-None-Match`` (304);
+* the background snapshot pass (``GET /api/v1/snapshots/status``): the first full pass over
+  every host, and the pass after the write below with how many hosts it stored;
 * subtree export of one datacenter;
 * single-host render (``POST /render {host}``, Jinja on) and a mock render at a path;
 * ``ansible-inventory --graph`` through the real plugin (fetch + parse into Ansible's
@@ -12,7 +14,7 @@ Measures, against ``--url`` with a viewer token (``AIS_TOKEN``):
   (vars plugins, ``host_vars`` globs, a JSON dump of everything). A playbook never does this;
   it is listed because it is the obvious thing people time.
 * with ``--editor-token`` (``AIS_EDITOR_TOKEN``), one variable write (lock + revision +
-  the exporter check every write runs).
+  the exporter check every write runs), then the export and the snapshot pass after it.
 
 Prints a Markdown table (wall-clock seconds, median of ``--repeat`` runs where repeating
 means something). Not part of CI; results go in ``docs/scale.md``.
@@ -99,10 +101,27 @@ def main(argv: list[str] | None = None) -> int:
         rows.append((name, seconds, note))
         print(f"{name}: {seconds:.3f} s {note}", file=sys.stderr)
 
+    def wait_for_pass(revision: int | None = None, timeout: float = 600.0) -> dict:
+        """Block until the background pass has passed ``revision`` (default: the newest)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            _dt, status, raw, _e = api.call("GET", "/api/v1/snapshots/status")
+            assert status == 200, raw[:200]
+            st = json.loads(raw)
+            target = revision if revision is not None else st["revision"]
+            if target and st["passed"] >= target and st["last_pass"] is not None:
+                return st
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"snapshot pass stuck at {st['passed']} < {target}")
+            time.sleep(0.5)
+
     dt, status, raw, etag = api.call("GET", "/api/v1/export")
     assert status == 200, (status, raw[:200])
     data = json.loads(raw)
-    row("full export, first at this revision", dt, f"{len(raw) / 1e6:.1f} MB, {len(data['hosts'])} hosts, {len(data['groups'])} groups (materializes snapshots)")
+    row("full export, first at this revision", dt, f"{len(raw) / 1e6:.1f} MB, {len(data['hosts'])} hosts, {len(data['groups'])} groups")
+    st = wait_for_pass()
+    lp = st["last_pass"]
+    row("snapshot pass, first (background)", lp["seconds"], f"{lp['hosts_checked']} hosts checked, {lp['rows_written']} stored")
     med, _ = timed(lambda: (lambda r: (r[0], r))(api.call("GET", "/api/v1/export")), args.repeat)
     row("full export, repeat", med)
     med, last = timed(lambda: (lambda r: (r[0], r))(api.call("GET", "/api/v1/export", headers={"If-None-Match": etag})), args.repeat)
@@ -130,8 +149,11 @@ def main(argv: list[str] | None = None) -> int:
         dt, status, raw, _e = ed.call("PUT", f"/api/v1/nodes/{node_id}/vars/bench_marker", {"value": time.time()}, headers={"If-Match": f'"{rev}"'})
         assert status == 200, raw[:200]
         row("variable write (PUT, includes the exporter check)", dt)
+        new_rev = json.loads(raw)["revision"]
         dt, _s, raw, _e = api.call("GET", "/api/v1/export")
-        row("full export, first after that write", dt, "(materializes snapshots again)")
+        row("full export, first after that write", dt)
+        lp = wait_for_pass(new_rev)["last_pass"]
+        row("snapshot pass after that write (background)", lp["seconds"], f"{lp['hosts_checked']} hosts checked, {lp['rows_written']} stored")
 
     if not args.skip_ansible:
         for mode, note in (("--graph", "plugin fetch + parse"), ("--list", "plus ansible-core computing and dumping every host's vars")):

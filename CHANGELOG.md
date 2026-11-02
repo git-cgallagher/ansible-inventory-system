@@ -7,6 +7,19 @@
   a 422 on import, create and move. Before this, a path near 2,000 bytes on PostgreSQL failed
   with a 500 from the ltree index.
 
+### Changed
+- Host snapshots are stored only where a host's resolved variables changed, by a background
+  pass in the API process, instead of one row per host on every export and render. Export and
+  render no longer write. Every revision still answers exactly (a revision the pass skipped is
+  computed on demand). `GET /hosts/{name}/snapshots` now lists the revisions where the host
+  changed; the single-snapshot response adds `stored_revision`. Migration `0005` adds
+  `snapshot_pass` and drops stored rows that repeat the same host's previous row.
+- The Diff view's ● now means "this host changed in that revision".
+
+### Added
+- `GET /api/v1/snapshots/status` and `ais snapshots run|status`; `AIS_SNAPSHOTS=off` and
+  `AIS_SNAPSHOT_POLL_SECONDS` configure the worker.
+
 ### Fixed
 - The importer no longer recurses, so very deep trees fail on the depth limit instead of
   Python's recursion limit (near depth 1,000).
