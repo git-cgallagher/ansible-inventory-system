@@ -1,4 +1,4 @@
-# Scale proof (2026-11-01)
+# Scale proof (2026-11-01, updated the same day for snapshots on change)
 
 Can the server and the plugin carry an inventory of 100,000 hosts? This page has the answer,
 the numbers behind it and how to reproduce them. Not part of CI: rerun it by hand after
@@ -6,15 +6,14 @@ changes to the resolver, the exporter, snapshots or the plugin.
 
 ## What still costs, worst first
 
-1. **The first full export after every write materializes a snapshot for every host**, which
-   takes ~15 s on top of the 3.6 s export and ~78 MB of `host_snapshot` per exported revision
-   (157 MB after two). The first `ansible-playbook` after any edit pays that 15 s, and
-   storage grows with every write that is followed by an export. This is the phase-1 design
-   (snapshots as the hot-read store, `●` in the Diff view). The fix is the owner's call:
-   either stop materializing on export (render and diff already compute a missing snapshot
-   on demand), or implement the plan's "dedup by hash" (store a host's resolved set only when
-   it differs from its previous one). Both need a schema or behaviour change, so neither is
-   in this PR.
+1. **The background snapshot pass re-resolves every host after each write or burst of
+   writes**: 7.1 s of CPU at 100k hosts, off the request path but in the API process. With
+   one uvicorn worker it shares that process with requests for those seconds; the export
+   right after a write measured 4.1 s instead of 3.3 s while the pass ran. It stores only the
+   hosts that changed (12 rows for the benchmark's write). The very first pass on a tree, or
+   after upgrading to this design, stores every host once (14.3 s, ~80 MB). If the pass ever
+   needs to be cheaper, resolve only the hosts under the nodes a revision touched instead of
+   all of them.
 2. **Every write re-runs the exporter over the whole tree** (`check_export`, the guard
    against group-name and tag collisions): 3.3 s per write at 100k hosts, most of it loading
    the tree. That is fine for UI edits and modules, slow for a loop of thousands of module
@@ -32,23 +31,27 @@ changes to the resolver, the exporter, snapshots or the plugin.
 
 | Operation | Seconds | Notes |
 |---|---:|---|
-| full export, first at this revision | 18.54 | 18.9 MB, 100,000 hosts, 9,917 groups (materializes 100k snapshots) |
-| full export, repeat | 3.63 | |
+| full export, first at this revision | 3.46 | 18.9 MB, 100,000 hosts, 9,917 groups |
+| snapshot pass, first (background) | 14.26 | 100,000 hosts checked, 100,000 stored (once per tree) |
+| full export, repeat | 3.34 | |
 | full export, `If-None-Match` (304) | 0.00 | |
-| subtree export (`all.b0.prod.dc0`) | 0.10 | 312 kB, 1,680 hosts |
-| render host `h012345` (Jinja on) | 0.01 | |
+| subtree export (`all.b0.prod.dc0`) | 0.06 | 312 kB, 1,680 hosts |
+| render host `h012345` (Jinja on) | 0.02 | |
 | render mock path (the node page's read) | 0.00 | |
-| variable write (`PUT`, includes the exporter check) | 3.28 | |
-| full export, first after that write | 18.89 | materializes snapshots again |
-| `ansible-inventory --graph`, no ETag store | 8.16 | plugin fetch + parse |
-| `ansible-inventory --graph`, ETag store warm (304) | 4.49 | plugin parse only |
-| `ansible-inventory --list`, no ETag store | 27.28 | plus ansible-core computing and dumping every host's vars |
-| `ansible-inventory --list`, ETag store warm (304) | 23.42 | same |
+| variable write (`PUT`, includes the exporter check) | 3.29 | |
+| full export, first after that write | 4.14 | while the background pass ran |
+| snapshot pass after that write (background) | 7.06 | 100,000 hosts checked, 12 stored |
+| `ansible-inventory --graph`, no ETag store | 7.96 | plugin fetch + parse |
+| `ansible-inventory --graph`, ETag store warm (304) | 4.48 | plugin parse only |
+| `ansible-inventory --list`, no ETag store | 26.44 | plus ansible-core computing and dumping every host's vars |
+| `ansible-inventory --list`, ETag store warm (304) | 22.86 | same |
 
 Wall-clock seconds from the benchmark client on the same machine. Repeated reads are the
-median of 5 runs, the `ansible-inventory` lines of 3. Memory after the run: API container
-291 MiB, PostgreSQL 204 MiB; database 268 MB, of which `host_snapshot` is 157 MB (200,000 rows,
-two exported revisions).
+median of 5 runs, the `ansible-inventory` lines of 3; the two pass lines are the pass's own
+timing from `GET /api/v1/snapshots/status`. Memory after the run: API container 379 MiB,
+PostgreSQL 200 MiB; database 191 MB, of which `host_snapshot` is 81 MB (100,012 rows: the first
+pass, then 12 for the write). Measured 2026-11-01 after the snapshots-on-change change; the
+earlier run stored 78 MB more on every export after a write.
 
 **Tree** (`bench/generate.py --hosts 100000`): depth 8 (`all` → 4 businesses → 3 tiers → 5
 datacenters → three nested `group` levels of 4 × 5 × 7 → hosts). That is 109,917 nodes:
@@ -66,13 +69,19 @@ The client and `ansible-inventory` run on the host (Python 3.14, ansible-core 2.
 | | before | after |
 |---|---:|---|
 | full export, 11,917 nodes (2,000 hosts) on SQLite | 24 s (48 s under the profiler) | 0.3 s |
-| full export, 100k hosts on PostgreSQL | HTTP 500 | 3.6 s (18.5 s first at a revision) |
+| full export, 100k hosts on PostgreSQL | HTTP 500 | 3.6 s (18.5 s first at a revision), then 3.3–3.5 s at every revision once snapshots moved to the background |
+| first full export after a write, 100k hosts | 18.9 s (wrote 100k snapshots) | 4.1 s |
+| snapshot rows stored for one write, 100k hosts | 100,000 (~78 MB), per export | only the changed hosts (12 here), once |
 | render one host, 100k hosts | 2.41 s | 0.01 s |
 | render a mock path (node page), 100k hosts | 2.45 s | 0.00 s |
 | subtree export of one datacenter, 100k hosts | 2.49 s | 0.10 s |
 | repeat full export, 100k hosts | 3.55 s (with the index fixes) | 3.63 s; 0.7 s of encoding saved, within noise |
 
 What changed (`server/ais/resolver.py`, `snapshots.py`, `api.py`):
+
+- **Snapshots moved off the export and render path** (the later change): a background pass
+  per revision stores a host's resolved variables only where they changed. A revision the
+  pass skipped is computed on demand, so every lookup and diff stays exact.
 
 - **`Snapshot.children()` scanned every node for every node** (quadratic: 238 million
   attribute reads for 12k nodes). There is now a children index, a host-name index, and a

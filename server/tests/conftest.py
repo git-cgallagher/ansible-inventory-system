@@ -20,6 +20,10 @@ from ais.api import app
 from ais.importer import import_file
 from ais.models import Role
 
+# The background snapshot worker would race the tests' own sessions; tests run passes
+# explicitly (``snapshots.run_pass``), and one test drives the worker on purpose.
+os.environ.setdefault("AIS_SNAPSHOTS", "off")
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SEED = ROOT / "examples" / "seed.yml"
 COLLECTION_PATH = ROOT / "collection"

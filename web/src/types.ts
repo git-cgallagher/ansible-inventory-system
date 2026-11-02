@@ -60,6 +60,7 @@ export interface RevisionRow {
   message: string | null;
 }
 
+/** A revision where a host's resolved variables changed (`GET /hosts/{name}/snapshots`). */
 export interface SnapshotRow {
   revision: number;
   resolved_hash: string;

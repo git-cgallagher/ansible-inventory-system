@@ -24,6 +24,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -274,12 +275,15 @@ class AuditLog(Base):
 
 
 class HostSnapshot(Base):
-    """Materialized resolved vars of one host at one revision (written on
-    render/export, deduplicated per host+revision; ``resolved_hash`` lets diffs
-    short-circuit)."""
+    """A host's resolved vars, stored only at the revisions where they changed (the
+    background pass in ``ais.snapshots``). ``resolved_hash`` ignores ``inventory_revision``,
+    so it compares across revisions; history is keyed by ``host_name`` (moves change ids)."""
 
     __tablename__ = "host_snapshot"
-    __table_args__ = (UniqueConstraint("host_node_id", "revision", name="uq_snapshot_host_rev"),)
+    __table_args__ = (
+        UniqueConstraint("host_node_id", "revision", name="uq_snapshot_host_rev"),
+        Index("ix_host_snapshot_name_rev", "host_name", "revision"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     host_node_id: Mapped[int] = mapped_column(ForeignKey("node.id", ondelete="CASCADE"))
@@ -288,3 +292,18 @@ class HostSnapshot(Base):
     resolved: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
     resolved_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SnapshotPass(Base):
+    """One finished background pass: every live host at ``revision`` was compared with
+    its latest stored snapshot, and a row written where it differed. For a revision listed
+    here, a host's latest row at or before it *is* its state there; for any other revision
+    the state is computed on demand and never stored (``ais.snapshots.get_snapshot``)."""
+
+    __tablename__ = "snapshot_pass"
+
+    revision: Mapped[int] = mapped_column(ForeignKey("revision.id", name="fk_snapshot_pass_revision"), primary_key=True)
+    finished_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    hosts_checked: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    rows_written: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    seconds: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")

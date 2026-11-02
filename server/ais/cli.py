@@ -42,6 +42,9 @@ def main(argv: list[str] | None = None) -> int:
     ren.add_argument("--revision", type=int)
     ren.add_argument("--facts", help="JSON object of mock facts")
     ren.add_argument("--no-template", action="store_true")
+    snp = sub.add_parser("snapshots", help="per-host snapshot history").add_subparsers(dest="snap_cmd", required=True)
+    snp.add_parser("run", help="run background passes now until the newest revision is passed")
+    snp.add_parser("status", help="newest revision, newest passed revision, last pass")
     srv = sub.add_parser("serve", help="run the API with uvicorn")
     srv.add_argument("--host", default="127.0.0.1")
     srv.add_argument("--port", type=int, default=8000)
@@ -91,6 +94,16 @@ def main(argv: list[str] | None = None) -> int:
                 out["rendered"], out["errors"] = render_templates(out["resolved"], facts=facts, hostname=args.host or MOCK_HOSTNAME, chain=out["chain"])
             json.dump(out, sys.stdout, indent=2, default=str)
         print()
+        return 0
+    if args.cmd == "snapshots":
+        from ais import snapshots
+
+        init_db()
+        if args.snap_cmd == "run":
+            for r in snapshots.catch_up():
+                print(f"revision {r.revision}: {r.hosts_checked} hosts checked, {r.rows_written} changed, {r.seconds:.2f}s")
+        with session_scope() as s:
+            print(json.dumps(snapshots.status(s), indent=2, default=str))
         return 0
     if args.cmd == "serve":
         import uvicorn

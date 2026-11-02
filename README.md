@@ -54,6 +54,12 @@ to work on it.
   token itself); failed logins are limited per e-mail and per client address (429 with
   `Retry-After`; `AIS_LOGIN_MAX_FAILURES`, `AIS_LOGIN_MAX_FAILURES_PER_IP`,
   `AIS_LOGIN_WINDOW_SECONDS`).
+- **Per-host history**: a background pass in the API process stores a host's resolved
+  variables only in revisions where they changed, so storage grows with real changes, not with
+  exports, and nothing is written on the export or render path. Every revision still answers
+  exactly: a revision the pass skipped (writes arriving in a burst are passed once) is computed
+  on demand. `ais snapshots run` runs a pass by hand; `AIS_SNAPSHOTS=off` turns the worker off,
+  `AIS_SNAPSHOT_POLL_SECONDS` (default 10) sets how often it checks for missed writes.
 - **Depth and path limits**: groups nest freely below a datacenter, up to a node depth of 32
   (`all` is 0, a business 1, a tier 2, a datacenter 3; `AIS_MAX_DEPTH` raises it), and a node's
   path may be at most 1,500 bytes. Both are refused with a 422 naming the limit, on import,
@@ -216,7 +222,7 @@ docker compose -f deploy/compose.yml exec api ais token create --user admin@exam
 |---|---|---|
 | Export / render | `GET /api/v1/export` (ETag, `If-None-Match` → 304), `POST /api/v1/render` (`host` or mock `path`, `overrides`, `facts`, `revision`) | viewer |
 | Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions` | viewer |
-| Snapshots | `GET /api/v1/hosts/{name}/snapshots[/{revision}]`, `GET /api/v1/diff?host=&from=&to=` | viewer |
+| Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
 | Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH/DELETE /nodes/{id}`, `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`) | editor |
 | Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had | editor |
@@ -261,9 +267,9 @@ cp tests/integration/integration_config.yml.template tests/integration/integrati
 
 ## Scale
 
-`docs/scale.md` has the numbers for 100,000 hosts on PostgreSQL (full export 3.6 s, or 18.5 s
-the first time at a revision because it writes every host's snapshot; subtree export 0.10 s;
-render 0.01 s; `ansible-inventory --graph` 4.5 s with a warm ETag store), what still costs,
+`docs/scale.md` has the numbers for 100,000 hosts on PostgreSQL (full export 3.3–3.5 s at any
+revision; subtree export 0.06 s; render 0.02 s; the background snapshot pass 7 s after a write,
+storing only changed hosts; `ansible-inventory --graph` 4.5 s with a warm ETag store), what still costs,
 and how to rerun them (`bench/generate.py`, `bench/benchmark.py`).
 
 ## Layout

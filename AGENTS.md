@@ -34,6 +34,13 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   (`resolver.emitted_vars`), the host included when the host itself contributes. Nodes that
   do not contribute emit nothing for the key. Never only at the deepest node.
 - **Group names are qualified** from the path with `_`; collisions are an export error.
+- **Snapshots are written only by the background pass, only on change** (`ais.snapshots`).
+  Export and render never write. A host's state at revision R is: the row stored exactly at R;
+  else, if R has a `snapshot_pass` row, the host's latest row at or before R; else computed on
+  demand and **never stored** (storing it would make rule 2 lie for later passes). Passes only
+  ever write at a revision higher than every earlier pass. History is keyed by `host_name`.
+  The worker runs in every API process (`AIS_SNAPSHOTS=off` disables it; tests set that and call
+  `run_pass`); a PostgreSQL advisory lock keeps two processes off the same pass.
 - **Every new or relocated node goes through `importer.check_position`** (depth ≤
   `AIS_MAX_DEPTH`, default 32; path ≤ `MAX_PATH_BYTES` = 1,500). Import, `POST /nodes` and move
   call it; a new write path that creates or re-paths nodes must too. The importer walks with an
@@ -95,8 +102,8 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
 - **UI writes carry `If-Match` = the revision the page shows** (from the render that loaded the
   values), never a revision fetched just before the write, which would defeat the lock. A stale
   409 reloads the values and keeps the user's text; the UI sends `X-AIS-Source: ui`.
-- **Node detail reads through `POST /render {path, template: false}`**, also for hosts: a path
-  render has no side effects, a host render materializes a snapshot row on every click. Own vars
+- **Node detail reads through `POST /render {path, template: false}`**, also for hosts, so the
+  page shows exactly what a mock host at that path would get. (Renders write nothing.) Own vars
   are the provenance entries whose `path` is the node's; ids go in no URL (a move changes them).
 - **Structure writes reset the tree.** After a create, move or delete the tree view drops every
   cached node (ids changed) and reveals the path to show next; never patch cached ids in place.
@@ -192,7 +199,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   Not in CI.
 - `server/ais/render.py` — `render_templates(resolved, facts, hostname, chain)` → Templar
   over trusted strings, `(rendered, errors)`.
-- `server/ais/snapshots.py` — `materialize`, `get_snapshot` (on demand), `diff`.
+- `server/ais/snapshots.py` — the background pass (`run_pass`, `catch_up`, `SnapshotWorker`,
+  `worker`), `get_snapshot` (the three-way lookup), `list_snapshots` (change points), `diff`,
+  `status`. `resolver.resolved_vars` is the pass's provenance-free `resolve`.
 - `server/ais/auth.py` (hashing, tokens, `Principal`, `require(role)`, `audit_bad_token`),
   `server/ais/oidc.py` (stub), `server/ais/locking.py` (`If-Match`, advisory lock, `begin_write`),
   `server/ais/ratelimit.py` (`login_limiter`: failed logins per e-mail and per client address in
@@ -347,9 +356,7 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   ~375 kB bundle, no code splitting; tree children have no count, so every non-host node shows
   an expander until opened; no user management page (admins use `POST/PATCH /users` or the CLI);
   the node page does not list the tags a node belongs to (the Tags page does).
-- Scale (`docs/scale.md`): the first full export after every write materializes 100k host
-  snapshots (~15 s, ~78 MB per revision); stop materializing on export or dedup by hash (owner
-  decision). Every write re-runs the exporter over the whole tree (3.3 s at 100k). Loading the
+- Scale (`docs/scale.md`): every write re-runs the exporter over the whole tree (3.3 s at 100k). Loading the
   tree as ORM objects is 2.4 s. `GET /nodes` without `subtree` returns everything, and the UI's
   Render page host picker calls it.
 - Release: `GALAXY_API_KEY` is not set yet (Chris), so 0.2.0 is tagged but not on Galaxy; no

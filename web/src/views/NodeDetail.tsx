@@ -19,7 +19,7 @@ type Msg = { kind: "ok" | "warn" | "error"; text: string } | null;
 
 /** One node: its own variables and everything it inherits, all read from one
  * `POST /render {path, template: false}` so values and the revision shown are consistent
- * (a path render has no side effects; a host render would materialize a snapshot). */
+ * (renders are read-only; snapshots are written by the server's background pass). */
 export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: (path: string, message: string) => void }) {
   const { session, defs } = useApp();
   const editable = canEdit(session.role);

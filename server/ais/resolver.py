@@ -324,6 +324,17 @@ def build_export(snap: Snapshot, *, sep: str = GROUP_SEP, emit_tags: bool = True
 # ---------------------------------------------------------------------- resolve
 
 
+def resolved_vars(snap: Snapshot, node: Node) -> dict[str, Any]:
+    """``resolve(snap, host=...)["resolved"]`` without provenance or the defensive deep
+    copy, for the background snapshot pass (100k hosts). The result shares values with
+    the snapshot's per-node cache: read it, hash it, serialize it, never mutate it.
+    ``tests/test_snapshots.py`` pins it equal to ``resolve``."""
+    result: dict[str, Any] = {"inventory_revision": snap.revision}
+    for anc in snap.chain(node):
+        result = combine_vars(result, _emitted(snap, anc))
+    return result
+
+
 def resolve(
     snap: Snapshot,
     *,
