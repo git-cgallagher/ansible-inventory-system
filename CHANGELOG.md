@@ -22,6 +22,8 @@
   release). It no longer publishes to Ansible Galaxy, and the `galaxy` environment is gone.
 - CI's `image` job starts the built image and requires `/healthz` and the UI, not just a build.
 - Dependabot ignores python >= 3.15 for the deploy image: ansible-core 2.21 does not import there.
+- Deploy image: Python 3.12 → 3.14 and the UI build stage Node 22 → 26; `@types/node` 26
+  (Dependabot PRs 15, 6 and 7, verified by the `image` boot check on main).
 
 ### Fixed
 - The importer no longer recurses, so very deep trees fail on the depth limit instead of

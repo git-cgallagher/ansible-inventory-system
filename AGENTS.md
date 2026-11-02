@@ -358,6 +358,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   tree as ORM objects is 2.4 s. `GET /nodes` without `subtree` returns everything, and the UI's
   Render page host picker calls it.
 - Release: no container image is published (compose builds from the checkout).
-- The deploy image stays on Python 3.12: ansible-core 2.21 does not import on 3.15 (Dependabot
-  ignores python >= 3.15 in `.github/dependabot.yml`; lift that with a supporting ansible-core).
+- The deploy image runs Python 3.14 and builds the UI on Node 26 (Dependabot PRs 15 and 6,
+  2026-11-02; CI's `web` job and local builds still use Node 22). Never Python 3.15 while on
+  ansible-core 2.21: it does not import there, and `.github/dependabot.yml` ignores python >= 3.15
+  (lift that with a supporting ansible-core). CI's `image` job boots the image, so a base bump
+  that builds but cannot start fails there.
 - Out of phase 4's scope: RBAC beyond admin/editor/viewer, backups.
