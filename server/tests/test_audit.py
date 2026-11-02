@@ -138,3 +138,26 @@ def test_source_header_is_recorded_on_revision_and_audit(editor, viewer, seeded)
     assert editor.get("/api/v1/audit", params={"limit": 1}).json()[0]["source"] == "module"
     r = editor.post("/api/v1/nodes", json={"parent_path": "all.commercial.prod.dc1", "name": "n"}, if_match=rev + 1, headers={"X-AIS-Source": "evil"})
     assert r.status_code == 201 and viewer.get("/api/v1/revisions", params={"limit": 1}).json()[0]["source"] == "api"
+
+
+def test_node_history_survives_moves(editor, seeded):
+    """GET /audit?node=<path>&key= follows node.move rows back through every id the node had,
+    including moves of an ancestor (which change the ids of the whole subtree)."""
+    rev = current_rev(editor)
+    web = _node_id(editor, "all.commercial.prod.dc1.web")
+    rev = editor.put(f"/api/v1/nodes/{web}/vars/http_port", json={"value": 9001}, if_match=rev).json()["revision"]
+    rev = editor.post(f"/api/v1/nodes/{web}/move", json={"name": "www"}, if_match=rev).json()["revision"]
+    www = _node_id(editor, "all.commercial.prod.dc1.www")
+    rev = editor.put(f"/api/v1/nodes/{www}/vars/http_port", json={"value": 9002}, if_match=rev).json()["revision"]
+    dc1 = _node_id(editor, "all.commercial.prod.dc1")
+    rev = editor.post(f"/api/v1/nodes/{dc1}/move", json={"name": "dc9"}, if_match=rev).json()["revision"]
+    www2 = _node_id(editor, "all.commercial.prod.dc9.www")
+    rev = editor.put(f"/api/v1/nodes/{www2}/vars/http_port", json={"value": 9003}, if_match=rev).json()["revision"]
+    assert len({web, www, www2}) == 3
+
+    rows = editor.get("/api/v1/audit", params={"node": "all.commercial.prod.dc9.www", "key": "http_port"}).json()
+    assert [r["after"]["value"] for r in rows] == [9003, 9002, 9001]
+    everything = editor.get("/api/v1/audit", params={"node": "all.commercial.prod.dc9.www"}).json()
+    assert [r["action"] for r in everything] == ["variable.set", "variable.set", "node.move", "variable.set"]
+    assert editor.get("/api/v1/audit", params={"key": "http_port"}).status_code == 422
+    assert editor.get("/api/v1/audit", params={"node": "all.nowhere"}).status_code == 404

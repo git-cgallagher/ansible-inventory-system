@@ -6,6 +6,7 @@ import { href } from "../router";
 import type { InvNode, RenderResult, WriteResult } from "../types";
 import { SYNTHETIC_KEYS, canEdit } from "../types";
 import { same } from "../value";
+import { NodeActions } from "./NodeActions";
 import { VarEditor } from "./VarEditor";
 
 interface Editing {
@@ -19,7 +20,7 @@ type Msg = { kind: "ok" | "warn" | "error"; text: string } | null;
 /** One node: its own variables and everything it inherits, all read from one
  * `POST /render {path, template: false}` so values and the revision shown are consistent
  * (a path render has no side effects; a host render would materialize a snapshot). */
-export function NodeDetail({ node }: { node: InvNode }) {
+export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: (path: string, message: string) => void }) {
   const { session, defs } = useApp();
   const editable = canEdit(session.role);
   const [data, setData] = useState<RenderResult | null>(null);
@@ -110,8 +111,14 @@ export function NodeDetail({ node }: { node: InvNode }) {
           <a className="button secondary" href={href("render", node.kind === "host" ? { host: node.name } : { path: node.path })}>
             Render
           </a>
+          {editable && (
+            <a className="button secondary" href={href("audit", { node: node.path })} title="Changes to this node and its variables, across moves">
+              History
+            </a>
+          )}
         </div>
       </header>
+      {editable && <NodeActions node={node} revision={data.revision} onDone={onStructure} onError={onWriteError} />}
 
       {msg && (
         <Notice kind={msg.kind} onClose={() => setMsg(null)}>
@@ -184,7 +191,7 @@ export function NodeDetail({ node }: { node: InvNode }) {
                               Remove
                             </button>
                           )}
-                          <a className="small" href={href("audit", { target_type: "node_variable", target_id: `${node.id}/${k}` })} title="Who changed this key (audit log)">
+                          <a className="small" href={href("audit", { node: node.path, key: k })} title="Who changed this key here (audit log, across moves and renames)">
                             history
                           </a>
                         </>

@@ -18,7 +18,8 @@ provenance, JSON/YAML variable editor with `If-Match`, render (host or mock path
 revision and audit browsers. Playwright smoke in CI (job `web`). **Phase 4 (in progress,
 2026-11-01)**: tag write API (`/api/v1/tags`), `node_move` and `import` modules, `json_schema`
 enforced at write time, bad-token requests audited (`token.rejected`), failed-login limiter
-(429), idempotent `POST /import` with `dry_run`.
+(429), idempotent `POST /import` with `dry_run`; the UI creates, moves and deletes nodes, declares
+variables, manages tags and API tokens, and its history links follow a node across moves.
 
 ## Invariants (do not break)
 - **Parity test is load-bearing.** `server/tests/test_parity.py` must keep passing:
@@ -80,8 +81,8 @@ enforced at write time, bad-token requests audited (`token.rejected`), failed-lo
 - Never read `*.db` test artefacts into docs; never commit `examples/ais.db`.
 - **The UI is just another API client.** It calls `/api/v1` with the bearer token like the
   plugin and the modules; it never gets a private endpoint or a cookie session. The server adds
-  only `GET /` (index, `no-cache`) and `GET /assets/{path}` (hashed files, `immutable`,
-  traversal-guarded). Routing is by hash (`#/tree?path=…`), so there is **no SPA catch-all**:
+  only `GET /` (index, `no-cache`) and `GET /assets/{path}` (hashed files, `immutable`; a
+  flat, exact-name lookup in the `assets/` listing, so no file path is ever built from the URL). Routing is by hash (`#/tree?path=…`), so there is **no SPA catch-all**:
   unknown paths stay 404 and no API route can be shadowed (`server/tests/test_web.py`).
   A missing build makes `/` a 404 and nothing else (the `test` job runs without one).
 - **UI writes carry `If-Match` = the revision the page shows** (from the render that loaded the
@@ -90,6 +91,14 @@ enforced at write time, bad-token requests audited (`token.rejected`), failed-lo
 - **Node detail reads through `POST /render {path, template: false}`**, also for hosts: a path
   render has no side effects, a host render materializes a snapshot row on every click. Own vars
   are the provenance entries whose `path` is the node's; ids go in no URL (a move changes them).
+- **Structure writes reset the tree.** After a create, move or delete the tree view drops every
+  cached node (ids changed) and reveals the path to show next; never patch cached ids in place.
+  Pages whose values carry no revision of their own (Variables, Tags) read `GET /revisions?limit=1`
+  *together with* the list and send that as `If-Match`. Tokens are not inventory writes (no
+  `If-Match`); revoking the token the page runs on signs the user out.
+- **History links go by path, not id**: `#/audit?node=<path>&key=<key>`. The server
+  (`GET /audit?node=&key=`, `audit.node_lineage`) walks the `node.move` rows back through every
+  id the node had (its own moves and its ancestors'), so the history survives moves and renames.
 
 ## Repo and CI
 Public repo `git-cgallagher/ansible-inventory-system` (created 2026-11-01; full new-public-repo
@@ -189,8 +198,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - `web/` — Vite + React 19 + TypeScript, no component library (deps: `react`, `react-dom`,
   `yaml`). `src/api.ts` (fetch wrapper: bearer, `If-Match`, `X-AIS-Source: ui`, `ApiError.stale`
   for the 409 body `{error, expected, current}`, any 401 → login), `src/router.ts` (hash routes),
-  `src/views/` (`Login`, `Tree` (lazy children, ARIA tree keys), `NodeDetail`, `VarEditor`,
-  `Render`, `Diff`, `Revisions`, `Audit`), `src/styles.css` (tokens, dark via
+  `src/views/` (`Login`, `Tree` (lazy children, ARIA tree keys), `NodeDetail`, `NodeActions`
+  (add child, move/rename, delete), `VarEditor`, `Render`, `Diff`, `Revisions`, `Audit`,
+  `Variables` (definitions: strategy, description, JSON Schema), `Tags`, `Tokens`), `src/styles.css` (tokens, dark via
   `prefers-color-scheme`). `vite.config.ts` sets `outDir: ../server/ais/static`.
   `e2e/smoke.spec.ts` + `e2e/serve.sh` + `playwright.config.ts`.
 - `server/tests/conftest.py` — `engine` (SQLite or `AIS_TEST_DATABASE_URL`), role tokens,
@@ -246,7 +256,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   must re-resolve by path; the modules always look up by path.
 - **The build output is generated and gitignored** (`server/ais/static/`); `pyproject.toml`
   package-data (`static/*`, `static/assets/*`) is what puts it into the wheel, and the Dockerfile
-  asserts `ais/static/index.html` exists after `pip install`. A new asset subfolder needs a glob.
+  asserts `ais/static/index.html` exists after `pip install`. Vite must keep writing assets flat:
+  the asset route serves only files directly in `assets/` (a subfolder would 404 at runtime, and
+  would also need a package-data glob).
 - **React state updaters run later, after a loop has moved on.** `setExpanded(s => s.add(node.id))`
   inside a `for` loop over ancestors expanded only the last node (deep links opened a collapsed
   tree). Copy the value into a `const` first. Learned 2026-11-01 from the screenshot check.
@@ -283,10 +295,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - Alembic autogenerate reports two spike-era nullability diffs (`node.meta`,
   `node_variable.value` are NOT NULL in the models, nullable in `0001`); harmless, fix in a
   `0004` when the next model change comes.
-- Phase 3 leftovers: the OIDC button and `ui_handoff` are as unverified as the rest of OIDC; the
-  UI cannot create, move or delete nodes, declare variables or manage tags (the API exists now)
-  or API tokens (plan §7 lists token management; the endpoints exist); "history" links on a key
-  filter the audit log by `<node id>/<key>`, so they miss rows from before a move (ids change);
-  one ~350 kB bundle, no code splitting; tree children have no count, so every non-host node shows
-  an expander until opened.
+- Phase 3 leftovers: the OIDC button and `ui_handoff` are as unverified as the rest of OIDC; one
+  ~375 kB bundle, no code splitting; tree children have no count, so every non-host node shows
+  an expander until opened; no user management page (admins use `POST/PATCH /users` or the CLI);
+  the node page does not list the tags a node belongs to (the Tags page does).
 - Phase 4: RBAC roles, backups, release automation (Galaxy publish of the collection).

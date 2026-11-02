@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Added
+- **Phase 4 — UI write gaps.** From the node page an editor adds a child, moves/renames a node
+  with its subtree and deletes a subtree (all with `If-Match` from the page; the tree reloads
+  because ids change). New pages: **Variables** (declare merge strategy, description, JSON
+  Schema; undeclare), **Tags** (create, edit members by path, delete) and **Tokens** (mint with a
+  role cap and expiry, secret shown once; revoke; admins can list everyone's).
+- `GET /api/v1/audit?node=<id or path>[&key=]`: a node's rows and its variables' rows under every
+  id the node had, following `node.move` records (its own moves and its ancestors'). The UI's
+  "history" links use it with the path, so they no longer lose the rows from before a move.
 - **Phase 4 — write gaps.** Tag write API: `GET /api/v1/tags[/{name}]` (viewer),
   `PUT /api/v1/tags/{name}` (declarative: `description`, `members` as node paths; an unchanged
   tag is `changed: false` without a revision) and `DELETE /api/v1/tags/{name}` (editor,

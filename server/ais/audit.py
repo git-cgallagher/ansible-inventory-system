@@ -20,6 +20,7 @@ import uuid
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ais.models import AuditLog
@@ -117,6 +118,21 @@ def audit_out(row: AuditLog) -> dict[str, Any]:
         "request_id": row.request_id,
         "revision": row.revision,
     }
+
+
+def node_lineage(session: Session, node_id: int) -> list[int]:
+    """Every id the node has had: ``node_id`` and, walking ``node.move`` rows backwards
+    (their ``after.moved`` maps ``old_id`` → ``id`` for the whole moved subtree), the ids
+    before each move of the node or of an ancestor. Moves are rare, so this reads them all."""
+    previous: dict[int, int] = {}
+    for after in session.scalars(select(AuditLog.after).where(AuditLog.action == "node.move")):
+        for m in (after or {}).get("moved", []):
+            if isinstance(m, dict) and "id" in m and "old_id" in m:
+                previous[int(m["id"])] = int(m["old_id"])
+    out = [node_id]
+    while out[-1] in previous and previous[out[-1]] not in out:
+        out.append(previous[out[-1]])
+    return out
 
 
 def as_utc(value: dt.datetime | None) -> dt.datetime | None:

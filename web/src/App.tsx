@@ -10,14 +10,20 @@ import { RenderView } from "./views/Render";
 import { DiffView } from "./views/Diff";
 import { RevisionsView } from "./views/Revisions";
 import { AuditView } from "./views/Audit";
+import { VariablesView } from "./views/Variables";
+import { TagsView } from "./views/Tags";
+import { TokensView } from "./views/Tokens";
 import { Notice } from "./components";
 
 const VIEWS: { id: string; label: string; editorOnly?: boolean }[] = [
   { id: "tree", label: "Tree" },
   { id: "render", label: "Render" },
+  { id: "variables", label: "Variables" },
+  { id: "tags", label: "Tags" },
   { id: "diff", label: "Diff" },
   { id: "revisions", label: "Revisions" },
   { id: "audit", label: "Audit", editorOnly: true },
+  { id: "tokens", label: "Tokens" },
 ];
 
 export default function App() {
@@ -25,6 +31,12 @@ export default function App() {
   const [defs, setDefs] = useState<Map<string, Definition>>(new Map());
   const [error, setError] = useState("");
   const route = useRoute();
+
+  const reloadDefs = useCallback(() => {
+    api<Definition[]>("/api/v1/variables")
+      .then((rows) => setDefs(new Map(rows.map((d) => [d.name, d]))))
+      .catch((e) => setError(errorText(e)));
+  }, []);
 
   useEffect(() => setUnauthorizedHandler(() => setSess(null)), []);
 
@@ -41,12 +53,15 @@ export default function App() {
         if (me.role !== session.role || me.user.email !== session.email) signIn({ ...session, role: me.role, email: me.user.email });
       })
       .catch((e) => setError(errorText(e)));
-    api<Definition[]>("/api/v1/variables")
-      .then((rows) => setDefs(new Map(rows.map((d) => [d.name, d]))))
-      .catch((e) => setError(errorText(e)));
+    reloadDefs();
   }, [session?.token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!session) return <Login onLogin={signIn} />;
+
+  const forget = () => {
+    setSession(null);
+    setSess(null);
+  };
 
   const signOut = async () => {
     try {
@@ -73,12 +88,21 @@ export default function App() {
     case "audit":
       body = <AuditView params={route.params} />;
       break;
+    case "variables":
+      body = <VariablesView />;
+      break;
+    case "tags":
+      body = <TagsView />;
+      break;
+    case "tokens":
+      body = <TokensView onSignedOut={forget} />;
+      break;
     default:
       body = <TreeView path={route.params.get("path")} />;
   }
 
   return (
-    <AppContext.Provider value={{ session, defs }}>
+    <AppContext.Provider value={{ session, defs, reloadDefs }}>
       <header className="topbar">
         <a className="brand" href={href("tree")}>
           Ansible Inventory

@@ -96,3 +96,37 @@ export const SYNTHETIC_KEYS = new Set(["inventory_revision"]);
 export function canEdit(role: Role | undefined): boolean {
   return role === "editor" || role === "admin";
 }
+
+export interface TagRow {
+  name: string;
+  description: string | null;
+  members: string[];
+}
+
+export interface TokenRow {
+  id: number;
+  user_id: number;
+  name: string;
+  prefix: string;
+  kind: "personal" | "session";
+  role: Role | null;
+  expires_at: string | null;
+  last_used: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface MoveResult extends WriteResult {
+  node: InvNode;
+  moved: { old_id: number; id: number; from: string; to: string }[];
+}
+
+export const STRATEGIES: Strategy[] = ["replace", "merge", "append", "unique_append"];
+export const CHILD_KINDS: InvNode["kind"][] = ["business", "tier", "datacenter", "group", "host"];
+
+/** The latest revision, for pages whose values have no revision of their own (definitions,
+ * tags): writes from them carry the revision read together with the values on screen. */
+export interface Revisioned<T> {
+  revision: number;
+  rows: T;
+}

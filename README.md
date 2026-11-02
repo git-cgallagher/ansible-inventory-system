@@ -106,8 +106,15 @@ npm run dev                            # or: hot reload on :5173, API proxied to
   else wrote first, the page says so, reloads the values and keeps your text to re-apply.
 - **Render**: a real host, or a mock host at any path, with optional overrides and facts;
   shows each resolved value, where it came from, the Jinja result and per-key template errors.
+- **Structure** (editor role): add a child, move or rename a node with its subtree, delete a
+  subtree, from the node page.
+- **Variables**: declare a variable's merge strategy, description and JSON Schema.
+- **Tags**: create, edit and delete tags and their member paths.
+- **Tokens**: mint API tokens for the plugin and the modules (capped role, expiry; the secret is
+  shown once) and revoke them.
 - **Diff** a host between any two revisions, and browse **revisions** and the **audit log**
-  (editor role), including "history" links from a key.
+  (editor role), including "history" links from a node or a key that follow it across moves and
+  renames.
 
 ### Managing the inventory from Ansible
 
@@ -191,7 +198,7 @@ docker compose -f deploy/compose.yml exec api ais token create --user admin@exam
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots[/{revision}]`, `GET /api/v1/diff?host=&from=&to=` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
 | Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH/DELETE /nodes/{id}`, `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`) | editor |
-| Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&since=&until=&limit=&before=` | editor |
+| Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |
 | Open | `GET /healthz` (`status`, `version`, `oidc`), `GET /` + `/assets/…` (the built web UI, static files only) | none |
 
@@ -213,7 +220,8 @@ limiter), locking (428/409), temporal writes, move/rename, tags, schema enforcem
 revalidation.
 
 The web UI has a Playwright smoke test (sign in, keyboard tree, inherited values, an edit
-that hits and recovers from a 409, render, diff, audit, a deep link) against a throwaway
+that hits and recovers from a 409, render, diff, audit, a deep link; then add, move and delete
+a node with the key history surviving the move, a schema-checked definition, a tag, a token) against a throwaway
 server on the seed tree; CI runs it in the `web` job:
 
 ```bash
