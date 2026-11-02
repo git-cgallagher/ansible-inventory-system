@@ -107,7 +107,7 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
 Public repo `git-cgallagher/ansible-inventory-system` (created 2026-11-01; full new-public-repo
 baseline from `~/Code/AGENTS.md`). CI `ci.yml`: job `test` (pytest incl. parity, Python 3.12 +
 3.14, plus an `ansible-inventory --graph` smoke), job `image` (docker build) and job `collection`
-(`ansible-test sanity` + the six module integration targets against a live `ais serve` on SQLite,
+(`ansible-test sanity` + the eight module integration targets against a live `ais serve` on SQLite,
 Python 3.12; the step mints an editor token into the gitignored `integration_config.yml`) and job
 `web` (`npm ci`, `npm run build` = `tsc` + Vite, then the Playwright smoke against `e2e/serve.sh`;
 the report is uploaded on failure). The `image` job builds the UI too (Node stage in the
@@ -117,10 +117,22 @@ Dockerfile). All are required by the "main protection" ruleset (id `26318946`; `
 **Several sessions may share this checkout**: never switch branches in the shared folder for side
 work; use `git worktree add` in the scratchpad instead.
 
+**Release** (`release.yml`, since 0.2.0): every push to `main` asks Galaxy whether it has the
+version in the collection's `galaxy.yml`; if not, it builds the collection, publishes it with
+`GALAXY_API_KEY` from the **main-only `galaxy` environment** (the key is set by Chris, never by an
+agent), and creates the GitHub release `v<version>` with the tarball. Without the key the publish
+step warns and stops; re-run the workflow (`workflow_dispatch`) after it is set. One version for
+everything: `server/pyproject.toml`, `ais.__version__`, `galaxy.yml` and `web/package.json` move
+together, and a release PR bumps all four plus `CHANGELOG.md`. After the merge, tag the merge
+commit `v<version>` (annotated) if the workflow did not. The workflow refuses to publish when the
+collection changed since an existing `v<version>` tag (bump instead). `v0.2.0` was tagged by hand
+before the key existed, so its GitHub release appears when the first publish runs. Merge one
+release PR at a time and wait for its run.
+
 ## Commands
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e './server[test,postgres,oidc]'
-cd server && ../.venv/bin/python -m pytest -q          # 66 tests, ~10 s (SQLite)
+cd server && ../.venv/bin/python -m pytest -q          # 73 tests, ~10 s (SQLite)
 cd examples && export AIS_DATABASE_URL=sqlite:///./ais.db
 ../.venv/bin/ais import seed.yml                       # also runs the migrations
 ../.venv/bin/ais user create me@example.com --role admin   # prompts; --no-password for token-only
@@ -145,7 +157,7 @@ npm run dev                                            # Vite on :5173, proxies 
 npx playwright install chromium                        # once per machine
 npx playwright test                                    # smoke: starts e2e/serve.sh on :8799 (seed tree, e2e@example.com)
 E2E_BASE_URL=http://127.0.0.1:8000 npx playwright test # against a server you run (seed imported, e2e user created)
-# schema drift check (should print only the two known spike-era nullable diffs, see TODO):
+# schema drift check (prints [] on SQLite; `tests/test_migrations.py` asserts it on both databases):
 AIS_DATABASE_URL=sqlite:////tmp/drift.db ../.venv/bin/ais init-db && ../.venv/bin/python -c "from alembic.autogenerate import compare_metadata; from alembic.migration import MigrationContext; from ais.db import make_engine; from ais.models import Base; c=make_engine('sqlite:////tmp/drift.db').connect(); print(compare_metadata(MigrationContext.configure(c, opts={'compare_type': True}), Base.metadata))"
 ```
 The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). CI also runs
@@ -158,7 +170,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   level schema; `group` may nest; `TAGGED_KINDS` get auto tag groups; `NAME_RE` = ltree-safe node names.
 - `server/ais/migrations/` — Alembic (`env.py` takes a connection from
   `ais.db.init_db`; `0001` = spike schema, `0002` = phase 1 incl. the PostgreSQL ltree
-  branch, `0003` = `audit_log`). `server/alembic.ini` is for hand use only.
+  branch, `0003` = `audit_log`, `0004` = `node.meta` / `node_variable.value` NOT NULL). On SQLite
+  `init_db` migrates with `PRAGMA foreign_keys=OFF` and runs `PRAGMA foreign_key_check` before
+  turning them back on. `server/alembic.ini` is for hand use only.
 - `server/ais/audit.py` — `RequestIdMiddleware` (`X-Request-ID` in/out, `X-AIS-Source` →
   `source`, both as context variables), `record(session, …)`, `audit_out`, `as_utc` (query
   datetimes: naive = UTC, so `since`/`until` work on SQLite's naive strings and PostgreSQL's
@@ -295,6 +309,10 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   directory: `AIS_ETAG_STORE=""` wrote the export into the cwd until the option became `str`.
 - **`bench/compose.override.yml` uses `!override`** (Compose >= 2.24) to replace the API's
   port list; without it the ports merge and :8000 is published too.
+- **SQLite batch migrations with foreign keys on delete data.** Batch mode rebuilds a table (copy,
+  `DROP`, rename); the `DROP` of `node` cascaded and emptied `node_variable` (found by
+  `test_0004_fills_spike_nulls`). `PRAGMA foreign_keys` is a no-op inside a transaction, so
+  `init_db` sets it on the connection before `begin()`. Any new batch migration relies on that.
 - **Revision ids are increasing, not contiguous on PostgreSQL.** A refused write, a no-op
   `POST /import` and an import `dry_run` roll back a `Revision` insert, which still uses up a
   sequence value. Never assume `next == current + 1` in a test (SQLite reuses the id, so a
@@ -315,9 +333,6 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   four `AIS_OIDC_*`/`AIS_SECRET_KEY` vars and test before relying on it); no `tag` module (the API exists); the login limiter is per process (a
   multi-worker deployment multiplies the limits); `token.rejected` rows are not rate limited, so
   a client retrying a revoked token every second writes a row a second.
-- Alembic autogenerate reports two spike-era nullability diffs (`node.meta`,
-  `node_variable.value` are NOT NULL in the models, nullable in `0001`); harmless, fix in a
-  `0004` when the next model change comes.
 - Phase 3 leftovers: the OIDC button and `ui_handoff` are as unverified as the rest of OIDC; one
   ~375 kB bundle, no code splitting; tree children have no count, so every non-host node shows
   an expander until opened; no user management page (admins use `POST/PATCH /users` or the CLI);
@@ -327,4 +342,6 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   decision). Every write re-runs the exporter over the whole tree (3.3 s at 100k). Loading the
   tree as ORM objects is 2.4 s. `GET /nodes` without `subtree` returns everything, and the UI's
   Render page host picker calls it.
-- Phase 4: RBAC roles, backups, release automation (Galaxy publish of the collection).
+- Release: `GALAXY_API_KEY` is not set yet (Chris), so 0.2.0 is tagged but not on Galaxy; no
+  container image is published (compose builds from the checkout).
+- Out of phase 4's scope: RBAC beyond admin/editor/viewer, backups.

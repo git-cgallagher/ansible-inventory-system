@@ -6,7 +6,7 @@ from __future__ import annotations
 DOCUMENTATION = r"""
 name: db
 short_description: Ansible Inventory System (database-backed strict tree)
-version_added: "0.1.0"
+version_added: "0.2.0"
 author: Chris Gallagher (@git-cgallagher)
 description:
   - Builds the inventory from the Ansible Inventory System export API.
