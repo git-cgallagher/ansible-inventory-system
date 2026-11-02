@@ -81,3 +81,18 @@ def test_plugin_end_to_end_uses_304(server, inventory_file, tmp_path):
     # and the server really does answer 304 for that tag
     r = httpx.get(f"{server}/api/v1/export", params={"group_separator": "_", "emit_tags": "true"}, headers={"Authorization": f"Bearer {__import__('os').environ['AIS_TOKEN']}", "If-None-Match": etag})
     assert r.status_code == 304
+
+
+def test_empty_etag_store_disables_it(server, inventory_file, tmp_path, monkeypatch):
+    """AIS_ETAG_STORE="" must disable the store. As a ``path`` option Ansible expanded "" to
+    the current directory and wrote the whole export there (found by the scale benchmark)."""
+    import os
+    import subprocess
+
+    from tests.conftest import COLLECTION_PATH, _ansible_inventory_bin
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    env = dict(os.environ, AIS_ETAG_STORE="", ANSIBLE_COLLECTIONS_PATH=str(COLLECTION_PATH), ANSIBLE_INVENTORY_UNPARSED_FAILED="1")
+    subprocess.run([_ansible_inventory_bin(), "-i", str(inventory_file), "--graph"], check=True, capture_output=True, env=env, cwd=cwd)
+    assert list(cwd.iterdir()) == []

@@ -20,6 +20,9 @@ revision and audit browsers. Playwright smoke in CI (job `web`). **Phase 4 (in p
 enforced at write time, bad-token requests audited (`token.rejected`), failed-login limiter
 (429), idempotent `POST /import` with `dry_run`; the UI creates, moves and deletes nodes, declares
 variables, manages tags and API tokens, and its history links follow a node across moves.
+**Scale proof** (`docs/scale.md`, `bench/`): 100k hosts on PostgreSQL. Full export 3.6 s (18.5 s
+the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-inventory --graph`
+4.5 s with a warm ETag store.
 
 ## Invariants (do not break)
 - **Parity test is load-bearing.** `server/tests/test_parity.py` must keep passing:
@@ -160,8 +163,15 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `source`, both as context variables), `record(session, …)`, `audit_out`, `as_utc` (query
   datetimes: naive = UTC, so `since`/`until` work on SQLite's naive strings and PostgreSQL's
   timestamptz alike).
-- `server/ais/resolver.py` — `fold`, `load_snapshot(revision, subtree)` (revision-aware for
-  nodes and vars), `build_export`, `resolve(host|path, overrides)`.
+- `server/ais/resolver.py` — `fold`, `load_snapshot(revision, subtree, paths=)` (revision-aware
+  for nodes and vars; subtree and paths filter in SQL, the subtree through `path_ltree` on
+  PostgreSQL), `load_chain(revision, host=|path=)` (just the ancestor chain, which is all
+  `resolve` needs), `build_export`, `resolve(host|path, overrides)`. `Snapshot` indexes children
+  and hosts on first use and caches each node's emitted vars (`_emitted`): shared, never mutate.
+- `bench/` — `generate.py` (synthetic tree straight into the DB: 100k hosts, ~10k groups, depth
+  8), `benchmark.py` (export, subtree, render, write, `ansible-inventory --graph/--list`),
+  `compose.override.yml` (publishes PostgreSQL on 55434, API on 8813). Results: `docs/scale.md`.
+  Not in CI.
 - `server/ais/render.py` — `render_templates(resolved, facts, hostname, chain)` → Templar
   over trusted strings, `(rendered, errors)`.
 - `server/ais/snapshots.py` — `materialize`, `get_snapshot` (on demand), `diff`.
@@ -232,6 +242,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   serialize on the 5 s busy timeout; that is fine for dev, not a deployment target.
 - A refused write (409/422) rolls back its `Revision` with the request: never commit before
   `check_export`.
+- `/export` returns a ready-made JSON `Response` (FastAPI's `jsonable_encoder` walked 19 MB in
+  Python); its `ETag` is set on that response, not on an injected `response`.
 - The export `ETag` includes a digest of `subtree` / `group_separator` / `emit_tags`, so a
   tag is only valid for the same parameters; the plugin's store is keyed per URL.
 - `~/.cache/ais/export-*.json` (the plugin's ETag store) holds a full inventory copy per
@@ -271,6 +283,18 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - **Node lookups by path need the `GET /nodes/{ref}` route declared with `ref: str`**: FastAPI
   would 422 `all.commercial` against an `int` path parameter. Digits = id, anything else = path.
 
+- **Never scan `snap.nodes` per node or per host.** `Snapshot.children()` used to, and a 12k-node
+  export took 24 s (110k nodes: unbounded). Use the indexes (`children`, `host`) or one pass.
+- **PostgreSQL caps a statement at 65,535 bind parameters.** A 100k-element `IN` list or a
+  100k-row `insert().values()` fails ("number of parameters must be between 0 and 65535"; the
+  full export was a 500). Chunk (`snapshots._CHUNK`), or filter without an id list.
+- **`_under()` names `node.path_ltree` as raw SQL** (the column is migration-only, not in the
+  ORM model). It breaks if `Node` is ever aliased in that query; on SQLite it is an escaped
+  `startswith` (`_` in a name is a LIKE wildcard).
+- **An empty `path` option is not empty.** Ansible expands `type: path` `""` to the current
+  directory: `AIS_ETAG_STORE=""` wrote the export into the cwd until the option became `str`.
+- **`bench/compose.override.yml` uses `!override`** (Compose >= 2.24) to replace the API's
+  port list; without it the ports merge and :8000 is published too.
 - **Revision ids are increasing, not contiguous on PostgreSQL.** A refused write, a no-op
   `POST /import` and an import `dry_run` roll back a `Revision` insert, which still uses up a
   sequence value. Never assume `next == current + 1` in a test (SQLite reuses the id, so a
@@ -288,8 +312,7 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 
 ## TODO (phase 4 and leftovers, see the plan)
 - Phase 1/2 leftovers: OIDC is a stub that has never run against a real provider (set the
-  four `AIS_OIDC_*`/`AIS_SECRET_KEY` vars and test before relying on it); the resolver does not
-  use `path_ltree` yet; no `tag` module (the API exists); the login limiter is per process (a
+  four `AIS_OIDC_*`/`AIS_SECRET_KEY` vars and test before relying on it); no `tag` module (the API exists); the login limiter is per process (a
   multi-worker deployment multiplies the limits); `token.rejected` rows are not rate limited, so
   a client retrying a revoked token every second writes a row a second.
 - Alembic autogenerate reports two spike-era nullability diffs (`node.meta`,
@@ -299,4 +322,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   ~375 kB bundle, no code splitting; tree children have no count, so every non-host node shows
   an expander until opened; no user management page (admins use `POST/PATCH /users` or the CLI);
   the node page does not list the tags a node belongs to (the Tags page does).
+- Scale (`docs/scale.md`): the first full export after every write materializes 100k host
+  snapshots (~15 s, ~78 MB per revision); stop materializing on export or dedup by hash (owner
+  decision). Every write re-runs the exporter over the whole tree (3.3 s at 100k). Loading the
+  tree as ORM objects is 2.4 s. `GET /nodes` without `subtree` returns everything, and the UI's
+  Render page host picker calls it.
 - Phase 4: RBAC roles, backups, release automation (Galaxy publish of the collection).
