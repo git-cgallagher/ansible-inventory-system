@@ -106,4 +106,89 @@ test("login, keyboard tree, inherited vars, locked edit with a conflict, render,
   await expect(edge).toBeVisible();
   await expect(edge).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("heading", { level: 1, name: "fed-edge01" })).toBeVisible();
+
+});
+
+// Runs after the first test on the same server (one worker, file order): it asserts no revision
+// numbers, so it does not care what the first one wrote.
+test("structure, definitions, tags and tokens from the UI; history follows a move", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill(EMAIL);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  // --- add a child under dc1, give it a variable
+  await page.goto("/#/tree?path=all.commercial.prod.dc1");
+  await expect(page.getByRole("heading", { level: 1, name: "dc1" })).toBeVisible();
+  await page.getByRole("button", { name: "Add child" }).click();
+  await page.getByRole("textbox", { name: "Child name" }).fill("e2e_cache");
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "e2e_cache" })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Created all.commercial.prod.dc1.e2e_cache (group)");
+  await expect(page.getByRole("treeitem", { name: "e2e_cache", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Add variable" }).click();
+  await page.getByRole("combobox", { name: "Key" }).fill("redis_port");
+  await page.getByRole("textbox", { name: "Value" }).fill("6379");
+  await page.getByRole("button", { name: "Save" }).click();
+  const own = page.locator("table.vars:not(.inherited)");
+  await expect(own.locator('tr[data-key="redis_port"]')).toContainText("6379");
+
+  // --- move and rename it: ids change, the tree and the URL follow
+  await page.getByRole("button", { name: "Move / rename" }).click();
+  await page.getByRole("textbox", { name: "New parent path" }).fill("all.commercial.lab.dc1");
+  await page.getByRole("textbox", { name: "New name" }).fill("e2e_cache2");
+  await page.getByRole("button", { name: "Move", exact: true }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "e2e_cache2" })).toBeVisible();
+  await expect(page).toHaveURL(/path=all\.commercial\.lab\.dc1\.e2e_cache2/);
+  await expect(page.getByRole("status")).toContainText("Moved all.commercial.prod.dc1.e2e_cache");
+  await expect(own.locator('tr[data-key="redis_port"]')).toContainText("6379");
+
+  // --- the key's history link still finds the write made before the move
+  await own.locator('tr[data-key="redis_port"]').getByRole("link", { name: "history" }).click();
+  await expect(page).toHaveURL(/#\/audit\?node=all\.commercial\.lab\.dc1\.e2e_cache2&key=redis_port/);
+  await expect(page.locator("table.audit tbody tr")).toHaveCount(1);
+  await expect(page.locator("table.audit tbody tr").first()).toContainText("variable.set");
+
+  // --- delete the subtree: back at the parent
+  await page.goto("/#/tree?path=all.commercial.lab.dc1.e2e_cache2");
+  await page.getByRole("button", { name: "Delete" }).click();
+  await page.getByRole("button", { name: "Delete subtree" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "dc1" })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Deleted 1 node(s)");
+  await expect(page.getByRole("treeitem", { name: "e2e_cache2", exact: true })).toHaveCount(0);
+
+  // --- declare a variable with a schema; a value it rejects is refused
+  await page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Variables" }).click();
+  await page.getByRole("button", { name: "Declare a variable" }).click();
+  await page.getByRole("textbox", { name: "Variable name" }).fill("e2e_port");
+  await page.getByRole("combobox", { name: "Merge strategy" }).selectOption("replace");
+  await page.getByRole("textbox", { name: "JSON Schema" }).fill('{"type": "integer"}');
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("status")).toContainText("Saved e2e_port");
+  await expect(page.locator('tr[data-name="e2e_port"]')).toContainText("integer");
+  await page.goto("/#/tree?path=all.commercial.prod");
+  await page.getByRole("button", { name: "Add variable" }).click();
+  await page.getByRole("combobox", { name: "Key" }).fill("e2e_port");
+  await page.getByRole("textbox", { name: "Value" }).fill('"eighty"');
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("alert")).toContainText("json_schema");
+
+  // --- a tag over a group
+  await page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Tags" }).click();
+  await page.getByRole("button", { name: "New tag" }).click();
+  await page.getByRole("textbox", { name: "Tag name" }).fill("canary");
+  await page.getByRole("textbox", { name: "Members" }).fill("all.commercial.prod.dc1.web");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("status")).toContainText("Saved tag canary");
+  await expect(page.locator('tr[data-name="canary"]')).toContainText("all.commercial.prod.dc1.web");
+
+  // --- mint a token (shown once), then revoke it
+  await page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Tokens" }).click();
+  await page.getByRole("textbox", { name: "Token name" }).fill("e2e-ci");
+  await page.getByRole("button", { name: "Create token" }).click();
+  await expect(page.getByLabel("New token", { exact: true }).locator("xpath=self::code")).toHaveText(/^ais_/);
+  const row = page.locator('tr[data-name="e2e-ci"]');
+  await row.getByRole("button", { name: "Revoke e2e-ci" }).click();
+  await row.getByRole("button", { name: "Confirm revoking e2e-ci" }).click();
+  await expect(row).toContainText("revoked");
 });

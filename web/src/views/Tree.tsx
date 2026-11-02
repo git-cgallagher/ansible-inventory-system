@@ -19,6 +19,8 @@ export function TreeView({ path }: { path: string | null }) {
   const [rootId, setRootId] = useState<number | null>(null);
   const [focusId, setFocusId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [generation, setGeneration] = useState(0);
   const nodesRef = useRef(nodes);
   const kidsRef = useRef(kids);
   const itemRefs = useRef(new Map<number, HTMLLIElement>());
@@ -105,7 +107,21 @@ export function TreeView({ path }: { path: string | null }) {
         if (n && n.kind === "all") setOpen(n.id, true);
       })
       .catch((e) => setError(`${selectedPath}: ${errorText(e)}`));
-  }, [selectedPath, reveal, setOpen]);
+  }, [selectedPath, reveal, setOpen, generation]);
+
+  /** After a create/move/delete: drop every cached node (ids changed) and show `path`. */
+  const onStructure = useCallback((next: string, message: string) => {
+    nodesRef.current = new Map();
+    kidsRef.current = new Map();
+    setNodes(nodesRef.current);
+    setKids(kidsRef.current);
+    setExpanded(new Set());
+    setRootId(null);
+    setNotice(message);
+    // A new path reveals itself through the hash change; the same path needs a nudge.
+    if (next === selectedPath) setGeneration((g) => g + 1);
+    else navigate("tree", { path: next });
+  }, [selectedPath]);
 
   useEffect(() => {
     if (moveFocus.current && focusId !== null) {
@@ -244,7 +260,12 @@ export function TreeView({ path }: { path: string | null }) {
       </aside>
       <section className="detail-pane">
         {error && <Notice kind="error">{error}</Notice>}
-        {selected && <NodeDetail key={selected.id} node={selected} />}
+        {notice && (
+          <Notice kind="ok" onClose={() => setNotice("")}>
+            {notice}
+          </Notice>
+        )}
+        {selected && <NodeDetail key={selected.id} node={selected} onStructure={onStructure} />}
       </section>
     </div>
   );

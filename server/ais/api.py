@@ -19,7 +19,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ais import __version__, api_auth, api_tags, api_write, audit, oidc
@@ -220,11 +220,31 @@ def audit_log(
     until: dt.datetime | None = None,
     limit: int = Query(50, ge=1, le=1000),
     before: int | None = Query(None, description="Only rows with an id below this (paging, newest first)"),
+    node: str | None = Query(None, description="A node by id or live path: its rows and its variables' rows under every id it had (moves change ids)"),
+    key: str | None = Query(None, description="With node: only that variable's rows"),
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Audit rows, newest first. Editor or admin; viewers get 403."""
     stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+    if key is not None and node is None:
+        raise HTTPException(422, "key needs node")
+    if node is not None:
+        n = session.get(Node, int(node)) if node.isdigit() else live_node_by_path(session, node)
+        if n is None:
+            raise HTTPException(404, f"node {node!r} does not exist")
+        ids = audit.node_lineage(session, n.id)
+        if key is not None:
+            stmt = stmt.where(AuditLog.target_type == "node_variable", AuditLog.target_id.in_([f"{i}/{key}" for i in ids]))
+        else:
+            # A variable's target_id is "<node id>/<key>"; the prefix is digits and "/" only.
+            var_rows = or_(*[AuditLog.target_id.like(f"{i}/%") for i in ids])
+            stmt = stmt.where(
+                or_(
+                    and_(AuditLog.target_type == "node", AuditLog.target_id.in_([str(i) for i in ids])),
+                    and_(AuditLog.target_type == "node_variable", var_rows),
+                )
+            )
     if actor is not None:
         stmt = stmt.where(AuditLog.actor == actor)
     if action is not None:

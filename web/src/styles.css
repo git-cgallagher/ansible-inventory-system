@@ -190,3 +190,7 @@ tr.synthetic { color: var(--muted); }
 .chain { font-size: 13px; }
 .list td { white-space: nowrap; }
 .audit td details { white-space: normal; }
+
+.node-actions { margin-top: 0.5rem; }
+label.check { flex-direction: row; align-items: center; margin: 0.5rem 0; }
+code.secret { user-select: all; word-break: break-all; }
