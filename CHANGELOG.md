@@ -6,6 +6,8 @@
 - Depth and path limits: node depth ≤ 32 (`AIS_MAX_DEPTH`) and path ≤ 1,500 bytes, refused with
   a 422 on import, create and move. Before this, a path near 2,000 bytes on PostgreSQL failed
   with a 500 from the ltree index.
+- `GET /api/v1/snapshots/status` and `ais snapshots run|status`; `AIS_SNAPSHOTS=off` and
+  `AIS_SNAPSHOT_POLL_SECONDS` configure the worker.
 
 ### Changed
 - Host snapshots are stored only where a host's resolved variables changed, by a background
@@ -15,10 +17,11 @@
   changed; the single-snapshot response adds `stored_revision`. Migration `0005` adds
   `snapshot_pass` and drops stored rows that repeat the same host's previous row.
 - The Diff view's ● now means "this host changed in that revision".
-
-### Added
-- `GET /api/v1/snapshots/status` and `ais snapshots run|status`; `AIS_SNAPSHOTS=off` and
-  `AIS_SNAPSHOT_POLL_SECONDS` configure the worker.
+- Releases go to GitHub only: `release.yml` builds the collection and creates the GitHub
+  release `v<version>` with the tarball (from the existing tag's tree when the tag predates the
+  release). It no longer publishes to Ansible Galaxy, and the `galaxy` environment is gone.
+- CI's `image` job starts the built image and requires `/healthz` and the UI, not just a build.
+- Dependabot ignores python >= 3.15 for the deploy image: ansible-core 2.21 does not import there.
 
 ### Fixed
 - The importer no longer recurses, so very deep trees fail on the depth limit instead of

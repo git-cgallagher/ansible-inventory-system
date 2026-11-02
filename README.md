@@ -9,8 +9,8 @@ any real or hypothetical host resolves to.
 
 **Status: 0.2.0, first release (2026-11-01).** Phase 4 closed the write gaps (tags, `node_move`
 and `import` modules, enforced JSON Schemas, bad-token audit, login limiter), gave the UI node,
-variable, tag and token management, proved 100k hosts (`docs/scale.md`) and added Galaxy release
-automation for the collection. Before that, phase 3 added the web UI on top of phase 1 (bearer-token auth with
+variable, tag and token management, proved 100k hosts (`docs/scale.md`) and added release
+automation for the collection (GitHub releases; it is not published to Ansible Galaxy). Before that, phase 3 added the web UI on top of phase 1 (bearer-token auth with
 roles, locked write endpoints, Jinja render with mock facts, per-host snapshots and diffs,
 Alembic migrations, an ETag-revalidating inventory plugin) and phase 2 (an **audit log** of
 every write and auth event, **node move/rename** with history, and the collection's
@@ -198,13 +198,23 @@ Tags have an API (`PUT /api/v1/tags/{name}`) but no module yet.
 
 ### Install the collection
 
-Once 0.2.0 is on Galaxy (the release workflow publishes it once the owner sets its key):
+The collection is **not on Ansible Galaxy**. Each version is a GitHub release with the built
+tarball attached; install it from there:
 
 ```bash
-ansible-galaxy collection install git_cgallagher.inventory     # or: ==0.2.0
+ansible-galaxy collection install \
+  https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.2.0/git_cgallagher-inventory-0.2.0.tar.gz
 ```
 
-Until then, install it from a checkout: `ansible-galaxy collection install
+or pin it in a `requirements.yml`:
+
+```yaml
+collections:
+  - name: https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.2.0/git_cgallagher-inventory-0.2.0.tar.gz
+    type: url
+```
+
+From a checkout: `ansible-galaxy collection install
 ./collection/ansible_collections/git_cgallagher/inventory` (or point `collections_path` at
 `collection/`, as `examples/ansible.cfg` does). The collection and the server share a version.
 

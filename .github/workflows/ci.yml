@@ -52,6 +52,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the API image
         run: docker build -f deploy/Dockerfile -t ais:ci .
+      # A build alone passed with python:3.15-slim while the API could not start (ansible-core
+      # 2.21 does not import on 3.15). Start the image on SQLite and require /healthz and the UI.
+      - name: Start the image and check it serves
+        run: |
+          docker run -d --name ais-ci -p 127.0.0.1:8000:8000 -e AIS_DATABASE_URL=sqlite:////tmp/ci.db ais:ci
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8000/healthz >/dev/null && break; sleep 1; done
+          if ! curl -sf http://127.0.0.1:8000/healthz; then docker logs ais-ci; exit 1; fi
+          curl -sf http://127.0.0.1:8000/ | grep -q '<div id="root">'
+          docker exec ais-ci ais snapshots status
 
   collection:
     name: collection

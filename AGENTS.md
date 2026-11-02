@@ -128,17 +128,15 @@ Dockerfile). All are required by the "main protection" ruleset (id `26318946`; `
 **Several sessions may share this checkout**: never switch branches in the shared folder for side
 work; use `git worktree add` in the scratchpad instead.
 
-**Release** (`release.yml`, since 0.2.0): every push to `main` asks Galaxy whether it has the
-version in the collection's `galaxy.yml`; if not, it builds the collection, publishes it with
-`GALAXY_API_KEY` from the **main-only `galaxy` environment** (the key is set by Chris, never by an
-agent), and creates the GitHub release `v<version>` with the tarball. Without the key the publish
-step warns and stops; re-run the workflow (`workflow_dispatch`) after it is set. One version for
+**Release** (`release.yml`): **never published to Ansible Galaxy** (Chris, 2026-11-01; there is
+no `galaxy` environment or key). Every push to `main` reads the collection's `galaxy.yml` version;
+when no GitHub release `v<version>` exists it builds the collection and creates that release with
+the tarball, tagging the merge commit for a new version or building from the existing tag's
+tree when the tag already exists. A merge that changes the collection without a bump is a no-op
+(with a notice). One version for
 everything: `server/pyproject.toml`, `ais.__version__`, `galaxy.yml` and `web/package.json` move
-together, and a release PR bumps all four plus `CHANGELOG.md`. After the merge, tag the merge
-commit `v<version>` (annotated) if the workflow did not. The workflow refuses to publish when the
-collection changed since an existing `v<version>` tag (bump instead). `v0.2.0` was tagged by hand
-before the key existed, so its GitHub release appears when the first publish runs. Merge one
-release PR at a time and wait for its run.
+together, and a release PR bumps all four plus `CHANGELOG.md`. Merge one release PR at a time
+and wait for its run.
 
 ## Commands
 ```bash
@@ -359,6 +357,7 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - Scale (`docs/scale.md`): every write re-runs the exporter over the whole tree (3.3 s at 100k). Loading the
   tree as ORM objects is 2.4 s. `GET /nodes` without `subtree` returns everything, and the UI's
   Render page host picker calls it.
-- Release: `GALAXY_API_KEY` is not set yet (Chris), so 0.2.0 is tagged but not on Galaxy; no
-  container image is published (compose builds from the checkout).
+- Release: no container image is published (compose builds from the checkout).
+- The deploy image stays on Python 3.12: ansible-core 2.21 does not import on 3.15 (Dependabot
+  ignores python >= 3.15 in `.github/dependabot.yml`; lift that with a supporting ansible-core).
 - Out of phase 4's scope: RBAC beyond admin/editor/viewer, backups.
