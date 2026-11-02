@@ -19,15 +19,15 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais import __version__, api_auth, api_write, audit, oidc
+from ais import __version__, api_auth, api_tags, api_write, audit, oidc
 from ais.auth import Principal, require
 from ais.db import get_session, init_db
-from ais.importer import ImportError_, import_tree, live_node_by_path
+from ais.importer import ImportError_, import_tree_report, live_node_by_path
 from ais.locking import check_precondition, etag
-from ais.models import AuditLog, Node, NodeKind, NodeVariable, Revision, Role, VariableDefinition
+from ais.models import AuditLog, Node, NodeKind, Revision, Role, VariableDefinition
 from ais.render import MOCK_HOSTNAME, render_templates
 from ais.resolver import GROUP_SEP, build_export, current_revision, load_snapshot, resolve
 from ais.snapshots import diff, get_snapshot, list_snapshots, materialize
@@ -47,6 +47,7 @@ if oidc.configured():  # the OIDC login flow keeps its state in a signed cookie
 app.add_middleware(audit.RequestIdMiddleware)
 app.include_router(api_auth.router)
 app.include_router(api_write.router)
+app.include_router(api_tags.router)
 app.include_router(oidc.router)
 
 viewer = Depends(require(Role.viewer))
@@ -67,6 +68,7 @@ class RenderRequest(BaseModel):
 class ImportRequest(BaseModel):
     tree: dict[str, Any]
     message: str | None = None
+    dry_run: bool = Field(default=False, description="Run the import and roll it back: report what it would change, write nothing")
 
 
 @app.get("/healthz")
@@ -280,7 +282,7 @@ def diff_(
 # --------------------------------------------------------------------- import
 
 
-@app.post("/api/v1/import", status_code=201)
+@app.post("/api/v1/import")
 def import_(
     req: ImportRequest,
     response: Response,
@@ -288,21 +290,31 @@ def import_(
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    check_precondition(session, if_match)  # the importer opens its own revision
+    """Additive bulk import under one revision. 201 when it changed something; 200 with
+    ``changed: false`` (and no revision, no audit row) when the tree already matched;
+    ``dry_run`` reports the same counts and rolls back (no ``If-Match`` needed)."""
+    if not req.dry_run:
+        check_precondition(session, if_match)  # the importer opens its own revision
     try:
-        rev = import_tree(session, req.tree, actor=principal.actor, message=req.message)
+        result = import_tree_report(session, req.tree, actor=principal.actor, message=req.message)
     except ImportError_ as exc:
         raise HTTPException(422, str(exc)) from exc
     api_write.check_export(session)
     summary = {
-        "revision": rev.id,
-        "nodes_created": session.scalar(select(func.count()).select_from(Node).where(Node.created_rev == rev.id)) or 0,
-        "variables_set": session.scalar(select(func.count()).select_from(NodeVariable).where(NodeVariable.created_rev == rev.id)) or 0,
-        "definitions": sorted((req.tree.get("variables") or {}).keys()),
+        "nodes_created": result.nodes_created,
+        "variables_set": result.variables_set,
+        "definitions": result.definitions_changed,
     }
-    audit.record(session, actor=principal.actor, action="import", target_type="tree", target_id="all", after=summary, source="import", revision=rev.id)
+    if req.dry_run or not result.changed:
+        session.rollback()
+        rev_now = current_revision(session)
+        response.headers["ETag"] = etag(rev_now)
+        return {"revision": rev_now, "changed": result.changed, "dry_run": req.dry_run, **summary}
+    rev = result.revision
+    audit.record(session, actor=principal.actor, action="import", target_type="tree", target_id="all", after={"revision": rev.id, **summary}, source="import", revision=rev.id)
+    response.status_code = 201
     response.headers["ETag"] = etag(rev.id)
-    return {"revision": rev.id, **{k: v for k, v in summary.items() if k != "revision"}}
+    return {"revision": rev.id, "changed": True, "dry_run": False, **summary}
 
 
 # --------------------------------------------------------------------- web UI

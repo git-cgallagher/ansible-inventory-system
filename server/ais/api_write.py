@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais import audit
+from ais import audit, schema
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.importer import ImportError_, check_kind, check_name, infer_kind, live_node_by_path
@@ -110,6 +110,13 @@ def _set_var(session: Session, node: Node, key: str, value: Any, rev: Revision) 
     return True
 
 
+def _check_value(session: Session, key: str, value: Any, path: str) -> None:
+    try:
+        schema.check_value(session, key, value, path)
+    except schema.SchemaViolation as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def _resolve_parent(session: Session, parent_id: int | None, parent_path: str | None) -> Node:
     if parent_id is not None:
         return get_live_node(session, parent_id)
@@ -180,6 +187,8 @@ def create_node(
     path = f"{parent.path}{PATH_SEP}{req.name}"
     if live_node_by_path(session, path) is not None:
         raise HTTPException(409, f"node {path} already exists")
+    for key, value in req.vars.items():
+        _check_value(session, key, value, path)
     node = Node(
         parent_id=parent.id,
         kind=kind,
@@ -371,6 +380,7 @@ def put_var(
         rev_now = current_revision(session)
         response.headers["ETag"] = etag(rev_now)
         return {"revision": rev_now, "changed": False, "node_id": node.id, "key": key, "value": req.value}
+    _check_value(session, key, req.value, node.path)
     rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"set {key} on {node.path}")
     _set_var(session, node, key, req.value, rev)
     session.flush()
@@ -427,6 +437,11 @@ def put_definition(
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    if req.json_schema is not None:
+        try:
+            schema.check_schema(req.json_schema)
+        except schema.SchemaViolation as exc:
+            raise HTTPException(422, str(exc)) from exc
     definition = session.get(VariableDefinition, name)
     before = definition_out(definition) if definition is not None else None
     wanted = {"name": name, "merge_strategy": req.merge_strategy.value, "description": req.description, "json_schema": req.json_schema}
@@ -441,6 +456,10 @@ def put_definition(
     definition.json_schema = req.json_schema
     session.add(definition)
     session.flush()
+    try:
+        schema.check_live(session, keys={name})  # a new schema must accept every live value
+    except schema.SchemaViolation as exc:
+        raise HTTPException(422, str(exc)) from exc
     out = definition_out(definition)
     _audit(session, principal, rev, "definition.set", "variable_definition", name, before, out)
     return _finish(response, rev, {"definition": out})

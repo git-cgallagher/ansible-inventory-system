@@ -30,7 +30,9 @@ ansible-inventory -i inventory.yml --host web01
 | `node` | create / converge (vars, meta, inventory_name, purge) / delete a node and its subtree | editor |
 | `host` | create / converge / delete a host (`ansible_host`, `ansible_port`, `ansible_user`, vars) | editor |
 | `variable` | set or remove one variable at a node | editor |
-| `variable_definition` | declare a variable's merge strategy (`replace`, `merge`, `append`, `unique_append`) | editor |
+| `variable_definition` | declare a variable's merge strategy (`replace`, `merge`, `append`, `unique_append`) and `json_schema` (enforced on every write) | editor |
+| `node_move` | move and/or rename a node with its subtree (`path` → `new_path`; ids change) | editor |
+| `import` | bulk-import a tree (the `ais import` format) under one revision; additive; check mode is a server dry run | editor |
 | `node_info` | a node with its variables and children (missing is not an error) | viewer |
 | `render_info` | effective variables of a real host or a mock host at a path, with provenance and Jinja render | viewer |
 
@@ -69,8 +71,7 @@ the revision.
       register: dc1
 ```
 
-Not yet modules: renames/moves (`POST /api/v1/nodes/{id}/move`) and bulk import
-(`POST /api/v1/import`, `ais import`).
+Not yet a module: tags (`PUT /api/v1/tags/{name}` with member paths).
 
 ## Testing
 

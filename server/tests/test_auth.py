@@ -95,3 +95,53 @@ def test_password_hashing_roundtrip():
     assert not auth.verify_password("wrong", h)
     assert not auth.verify_password("x", None)
     assert not auth.verify_password("x", "garbage")
+
+
+def test_bad_tokens_are_audited_without_the_secret(admin, anon, session, seeded):
+    from sqlalchemy import select
+
+    from ais.models import AuditLog
+
+    assert anon.get("/api/v1/export").status_code == 401  # no token at all: not recorded
+    assert AuthClient(app, "ais_nopenopenope").get("/api/v1/export").status_code == 401
+    assert AuthClient(app, "hunter2-password").get("/api/v1/nodes").status_code == 401
+    minted = admin.post("/api/v1/tokens", json={"name": "short"}).json()
+    assert admin.delete(f"/api/v1/tokens/{minted['id']}").status_code == 204
+    assert AuthClient(app, minted["token"]).get("/api/v1/export").status_code == 401
+    rows = session.scalars(select(AuditLog).where(AuditLog.action == "token.rejected").order_by(AuditLog.id)).all()
+    assert [(r.actor, r.target_id, r.after["reason"]) for r in rows] == [
+        ("anonymous", "ais_nopeno", "unknown"),
+        ("anonymous", "(not an ais_ token)", "unknown"),
+        ("admin@example.com", str(minted["id"]), "revoked"),
+    ]
+    assert rows[0].after["path"] == "/api/v1/export" and rows[0].after["method"] == "GET"
+    dumped = repr([(r.target_id, r.before, r.after) for r in rows])
+    assert "hunter2" not in dumped and minted["token"] not in dumped
+
+
+def test_login_rate_limit(admin, anon, session, monkeypatch):
+    from sqlalchemy import select
+
+    from ais.models import AuditLog
+
+    monkeypatch.setenv("AIS_LOGIN_MAX_FAILURES", "3")
+    good = {"email": "admin@example.com", "password": "admin-pass-example"}
+    bad = {"email": "admin@example.com", "password": "wrong"}
+    for _ in range(3):
+        assert anon.post("/api/v1/auth/login", json=bad).status_code == 401
+    r = anon.post("/api/v1/auth/login", json=good)  # even the right password waits
+    assert r.status_code == 429 and int(r.headers["Retry-After"]) >= 1
+    actions = [a.action for a in session.scalars(select(AuditLog).where(AuditLog.action.like("login.%")).order_by(AuditLog.id))]
+    assert actions == ["login.failure"] * 3 + ["login.throttled"]
+    # another e-mail from the same client is still allowed (per-address limit is 20)
+    assert anon.post("/api/v1/auth/login", json={"email": "other@example.com", "password": "x"}).status_code == 401
+    # the window passing lets the user in, and success clears the e-mail's count
+    from ais.ratelimit import login_limiter
+
+    login_limiter.reset()
+    assert anon.post("/api/v1/auth/login", json=good).status_code == 200
+    monkeypatch.setenv("AIS_LOGIN_MAX_FAILURES_PER_IP", "2")
+    monkeypatch.setenv("AIS_LOGIN_MAX_FAILURES", "0")  # 0 = off
+    for email in ("a@example.com", "b@example.com"):
+        assert anon.post("/api/v1/auth/login", json={"email": email, "password": "x"}).status_code == 401
+    assert anon.post("/api/v1/auth/login", json={"email": "c@example.com", "password": "x"}).status_code == 429

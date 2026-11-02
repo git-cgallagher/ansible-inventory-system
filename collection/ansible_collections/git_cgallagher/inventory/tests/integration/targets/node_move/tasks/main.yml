@@ -1,0 +1,105 @@
+---
+# node_move: check mode, move, repeat (already moved), rename, refusals, cleanup.
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: A group with a host to move
+      git_cgallagher.inventory.node:
+        path: all.commercial.prod.dc1.it_move
+        vars: {it_move_var: 1}
+    - name: Its host
+      git_cgallagher.inventory.host:
+        name: it-move01
+        parent_path: all.commercial.prod.dc1.it_move
+        ansible_host: 10.78.0.1
+
+    - name: Move in check mode
+      git_cgallagher.inventory.node_move:
+        path: all.commercial.prod.dc1.it_move
+        new_path: all.commercial.lab.dc1.it_move
+      check_mode: true
+      diff: true
+      register: chk
+    - name: Nothing moved
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.prod.dc1.it_move
+      register: after_chk
+    - ansible.builtin.assert:
+        that:
+          - chk is changed
+          - chk.diff.after.path == 'all.commercial.lab.dc1.it_move'
+          - after_chk.exists
+
+    - name: Move
+      git_cgallagher.inventory.node_move:
+        path: all.commercial.prod.dc1.it_move
+        new_path: all.commercial.lab.dc1.it_move
+        revision_message: integration move
+      register: moved
+    - name: Move again (already there)
+      git_cgallagher.inventory.node_move:
+        path: all.commercial.prod.dc1.it_move
+        new_path: all.commercial.lab.dc1.it_move
+      register: again
+    - name: The host came along
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.lab.dc1.it_move.it-move01
+      register: host
+    - ansible.builtin.assert:
+        that:
+          - moved is changed
+          - moved.moved | length == 2
+          - moved.moved[0].to == 'all.commercial.lab.dc1.it_move'
+          - moved.moved[0].id != moved.moved[0].old_id
+          - moved.node.vars.it_move_var == 1
+          - again is not changed
+          - again.revision == moved.revision
+          - host.exists
+
+    - name: Rename
+      git_cgallagher.inventory.node_move:
+        path: all.commercial.lab.dc1.it_move
+        new_path: all.commercial.lab.dc1.it_moved
+      register: renamed
+    - ansible.builtin.assert:
+        that:
+          - renamed is changed
+          - renamed.node.name == 'it_moved'
+
+    - name: Neither path exists
+      git_cgallagher.inventory.node_move:
+        path: all.commercial.lab.dc1.it_nowhere
+        new_path: all.commercial.lab.dc1.it_nowhere2
+      register: missing
+      ignore_errors: true
+    - name: Under its own subtree
+      git_cgallagher.inventory.node_move:
+        path: all.commercial.lab.dc1.it_moved
+        new_path: all.commercial.lab.dc1.it_moved.inner
+      register: own
+      ignore_errors: true
+    - name: A host cannot take children
+      git_cgallagher.inventory.node_move:
+        path: all.commercial.lab.dc1.it_moved
+        new_path: all.commercial.lab.dc1.web.lab-web01.it_moved
+      register: under_host
+      ignore_errors: true
+    - ansible.builtin.assert:
+        that:
+          - missing is failed
+          - "'neither' in missing.msg"
+          - own is failed
+          - own.status == 422
+          - under_host is failed
+          - under_host.status == 422
+  always:
+    - name: Cleanup (wherever it ended up)
+      git_cgallagher.inventory.node:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - all.commercial.prod.dc1.it_move
+        - all.commercial.lab.dc1.it_move
+        - all.commercial.lab.dc1.it_moved

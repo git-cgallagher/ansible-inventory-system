@@ -3,6 +3,28 @@
 ## Unreleased
 
 ### Added
+- **Phase 4 — write gaps.** Tag write API: `GET /api/v1/tags[/{name}]` (viewer),
+  `PUT /api/v1/tags/{name}` (declarative: `description`, `members` as node paths; an unchanged
+  tag is `changed: false` without a revision) and `DELETE /api/v1/tags/{name}` (editor,
+  `If-Match`, audited as `tag.set` / `tag.delete`). Tags never carry variables; names are
+  `[A-Za-z0-9_]` and may not start with `business_`, `tier_` or `datacenter_` (the automatic tag
+  groups).
+- Modules `git_cgallagher.inventory.node_move` (move/rename a node with its subtree; done when only
+  the new path is live) and `git_cgallagher.inventory.import` (bulk tree import; additive,
+  idempotent, check mode = server dry run), each with an ansible-test integration target.
+- `json_schema` on variable definitions is enforced (`jsonschema` is a new server dependency):
+  `PUT /nodes/{id}/vars/{key}`, `POST /nodes` vars, the importer and `ais import` refuse values
+  the schema rejects (422); `PUT /variables/{name}` refuses an invalid schema or one that a live
+  value of the key violates.
+- Requests that present a bad bearer token leave a `token.rejected` audit row (reason, client,
+  method, path; the token's id or display prefix only). Failed logins are limited per e-mail (5)
+  and per client address (20) in a 5-minute window: 429 with `Retry-After`, audited as
+  `login.throttled`; `login.failure` rows now record the client address.
+
+- **Behaviour change:** `POST /api/v1/import` answers **200 `changed: false`** and writes nothing (no revision, no audit
+  row) when the tree already matches, and 201 with `changed: true` otherwise; `dry_run: true`
+  reports the same counts and rolls back. `definitions` in the response now lists only the
+  definitions the import created or changed.
 - **Phase 3 — web UI.** React + TypeScript single-page app in `web/` (Vite, no component
   library; `react`, `react-dom`, `yaml`), built into `server/ais/static` and served by the API
   at `GET /` and `GET /assets/…` (`AIS_WEB_DIR` overrides the folder; a missing build is a 404 on

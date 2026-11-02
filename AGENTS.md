@@ -15,7 +15,10 @@ done 2026-11-01**: React + TypeScript (Vite) single-page app in `web/`, built in
 `server/ais/static` and served by FastAPI at `/` (same origin, bearer token from the login):
 login (SSO button when OIDC is configured), lazy keyboard tree with own vs inherited vars and
 provenance, JSON/YAML variable editor with `If-Match`, render (host or mock path), host diff,
-revision and audit browsers. Playwright smoke in CI (job `web`).
+revision and audit browsers. Playwright smoke in CI (job `web`). **Phase 4 (in progress,
+2026-11-01)**: tag write API (`/api/v1/tags`), `node_move` and `import` modules, `json_schema`
+enforced at write time, bad-token requests audited (`token.rejected`), failed-login limiter
+(429), idempotent `POST /import` with `dry_run`.
 
 ## Invariants (do not break)
 - **Parity test is load-bearing.** `server/tests/test_parity.py` must keep passing:
@@ -30,8 +33,18 @@ revision and audit browsers. Playwright smoke in CI (job `web`).
 - **Nodes and variables are temporal rows**; never UPDATE a value in place or hard-delete —
   close the row with `deleted_rev` and insert a new one under a new `Revision`. `DELETE
   /nodes/{id}` closes the whole subtree and its live variables. A pinned revision therefore
-  sees exactly the tree of that moment. (`inventory_name`, `meta` and variable *definitions*
-  are the documented exceptions: not temporal, changes apply to every revision's export.)
+  sees exactly the tree of that moment. (`inventory_name`, `meta`, variable *definitions* and
+  **tags** (`tag`, `tag_member`) are the documented exceptions: not temporal, changes apply to
+  every revision's export. Tag writes still lock, need `If-Match` and open a revision.)
+- **Tags are var-less and named by path.** `PUT /tags/{name}` is declarative (`description`
+  replaced, `members` = the complete set of node *paths* when given; ids never, a move changes
+  them). Names are `[A-Za-z0-9_]`; `business_`/`tier_`/`datacenter_` prefixes and `all` are
+  reserved (the automatic tag groups would silently absorb such a tag); a name equal to a
+  hierarchy group is the exporter's 409. A tag with no live members is not emitted.
+- **`json_schema` is enforced on every value write** (`ais.schema`): `PUT …/vars/{key}`,
+  `POST /nodes` vars, the importer (CLI too) and `PUT /variables/{name}`, which validates the
+  schema itself and re-checks every live value of the key. The schema checks each node's stored
+  contribution, not the folded result. Invariant: every live value satisfies its definition.
 - **Every write needs `If-Match: "<revision>"`** (`ais.locking.begin_write`: lock → compare
   with `current_revision` → new `Revision`). 428 without, 409 when stale. Never add a write
   route that skips it.
@@ -44,7 +57,12 @@ revision and audit browsers. Playwright smoke in CI (job `web`).
   leaves none, and a no-op (`PUT` of an unchanged var or definition) leaves none either. The one
   deliberate exception to "raise to refuse": a failed login *returns* its 401 so the row commits.
   `before`/`after` never contain a secret (token plaintext, password hash). New write routes call
-  `_audit` (or `audit.record`) or they are wrong.
+  `_audit` (or `audit.record`) or they are wrong. A request that **presents** a bearer token
+  that does not authenticate leaves one `token.rejected` row (reason, client, method, path),
+  written in its own transaction by `auth.audit_bad_token` before the 401 is raised; its
+  `target_id` is the token id, the `ais_xxxxxx` display prefix, or `(not an ais_ token)`, never
+  more. Requests with no token are not recorded. A throttled login is `login.throttled` (429,
+  returned like the 401).
 - **Move/rename never updates `path` in place.** `POST /nodes/{id}/move` closes the whole subtree
   and reopens it under the new revision: **node ids change** (the response's `moved` list maps
   old → new), variables and tag memberships are copied to the new rows, host snapshots survive by
@@ -90,7 +108,7 @@ work; use `git worktree add` in the scratchpad instead.
 ## Commands
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e './server[test,postgres,oidc]'
-cd server && ../.venv/bin/python -m pytest -q          # 51 tests, ~8 s (SQLite)
+cd server && ../.venv/bin/python -m pytest -q          # 66 tests, ~10 s (SQLite)
 cd examples && export AIS_DATABASE_URL=sqlite:///./ais.db
 ../.venv/bin/ais import seed.yml                       # also runs the migrations
 ../.venv/bin/ais user create me@example.com --role admin   # prompts; --no-password for token-only
@@ -138,13 +156,20 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - `server/ais/render.py` — `render_templates(resolved, facts, hostname, chain)` → Templar
   over trusted strings, `(rendered, errors)`.
 - `server/ais/snapshots.py` — `materialize`, `get_snapshot` (on demand), `diff`.
-- `server/ais/auth.py` (hashing, tokens, `Principal`, `require(role)`), `server/ais/oidc.py`
-  (stub), `server/ais/locking.py` (`If-Match`, advisory lock, `begin_write`).
+- `server/ais/auth.py` (hashing, tokens, `Principal`, `require(role)`, `audit_bad_token`),
+  `server/ais/oidc.py` (stub), `server/ais/locking.py` (`If-Match`, advisory lock, `begin_write`),
+  `server/ais/ratelimit.py` (`login_limiter`: failed logins per e-mail and per client address in
+  a sliding window, in process memory; `AIS_LOGIN_MAX_FAILURES` 5, `AIS_LOGIN_MAX_FAILURES_PER_IP`
+  20, `AIS_LOGIN_WINDOW_SECONDS` 300, 0 = off), `server/ais/schema.py` (`check_schema`,
+  `check_value`, `check_live`; Draft 2020-12, `format` not asserted).
+- `server/ais/api_tags.py` — `GET /tags[/{name}]`, `PUT /tags/{name}`, `DELETE /tags/{name}`.
 - `server/ais/api.py` (reads incl. `GET /nodes/{id-or-path}`, export, render, snapshots,
   `GET /audit`, import), `api_write.py` (locked writes incl. `move`), `api_auth.py` (login,
   tokens, users; all audited), `cli.py` (`user`/`token` commands audit with `source=cli`).
 - `server/ais/importer.py` — YAML tree → nodes/vars under one revision; kind inferred
-  from depth unless declared; rejects bad kind order and names.
+  from depth unless declared; rejects bad kind order and names, values their schema rejects.
+  `import_tree_report` returns an `ImportResult` (counts, `changed`); `POST /import` rolls back a
+  no-op (200, `changed: false`, no revision, no audit row) and a `dry_run` (no `If-Match` needed).
 - `collection/.../plugins/inventory/db.py` — the plugin (`fetch_export` does the ETag
   revalidation; `etag_store` option). Accepts `inventory.yml` / `ais.yml` file names.
 - `collection/.../plugins/module_utils/client.py` — `Client` (token/url from options or
@@ -152,8 +177,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `ensure_node`/`remove_node` (shared by `node` and `host`). `doc_fragments/api.py` holds the
   `api` and `api.write` fragments; `meta/runtime.yml` declares the `inventory` action group
   (`module_defaults: group/git_cgallagher.inventory.inventory`).
-- `collection/.../plugins/modules/` — `node`, `host`, `variable`, `variable_definition` (write,
-  check + diff mode), `node_info`, `render_info`. `tests/integration/targets/<module>` = check,
+- `collection/.../plugins/modules/` — `node`, `host`, `variable`, `variable_definition`,
+  `node_move` (path → new_path; done when only new_path is live), `import` (tree dict; check mode =
+  server dry run) (write, check + diff mode), `node_info`, `render_info`. `tests/integration/targets/<module>` = check,
   real, repeat, failure cases with an `always:` cleanup, all against one shared server (unique
   `it_*`/`it-*` names per target). `tests/sanity/ignore-2.*.txt` only waive the GPLv3-header
   check (the collection is MIT).
@@ -233,18 +259,32 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - **Node lookups by path need the `GET /nodes/{ref}` route declared with `ref: str`**: FastAPI
   would 422 `all.commercial` against an `int` path parameter. Digits = id, anything else = path.
 
+- **Revision ids are increasing, not contiguous on PostgreSQL.** A refused write, a no-op
+  `POST /import` and an import `dry_run` roll back a `Revision` insert, which still uses up a
+  sequence value. Never assume `next == current + 1` in a test (SQLite reuses the id, so a
+  test that does passes locally and fails with `AIS_TEST_DATABASE_URL`).
+- **Deleting a `Tag` with `session.delete` on its `TagMember` rows first warns** ("expected to
+  delete 1 row(s); 0 were matched"): the FK cascade removed them already. Bulk
+  `delete(TagMember)` then `session.delete(tag)`.
+- **The login limiter is process-global state.** `conftest.py` resets it around every test
+  (autouse); a new test that logs in badly more than 5 times with one e-mail sets
+  `AIS_LOGIN_MAX_FAILURES` itself. Behind a proxy every client is the proxy's address unless
+  uvicorn runs with `--proxy-headers --forwarded-allow-ips`.
+- **A module named `import` works** (ansible-test sanity and AnsiballZ both load it by path)
+  even though it is a Python keyword; it cannot be imported with a plain `import` statement,
+  which nothing needs.
+
 ## TODO (phase 4 and leftovers, see the plan)
 - Phase 1/2 leftovers: OIDC is a stub that has never run against a real provider (set the
-  four `AIS_OIDC_*`/`AIS_SECRET_KEY` vars and test before relying on it); tags have no write
-  API yet (DB only); no rate limiting on login (failed logins are at least audited now); the
-  resolver does not use `path_ltree` yet; no `move` module and no `import` module/action (the
-  endpoints exist: `POST /nodes/{id}/move`, `POST /import`); bad-token requests are not audited
-  (only failed logins are); `json_schema` on definitions is stored, not enforced.
+  four `AIS_OIDC_*`/`AIS_SECRET_KEY` vars and test before relying on it); the resolver does not
+  use `path_ltree` yet; no `tag` module (the API exists); the login limiter is per process (a
+  multi-worker deployment multiplies the limits); `token.rejected` rows are not rate limited, so
+  a client retrying a revoked token every second writes a row a second.
 - Alembic autogenerate reports two spike-era nullability diffs (`node.meta`,
   `node_variable.value` are NOT NULL in the models, nullable in `0001`); harmless, fix in a
   `0004` when the next model change comes.
 - Phase 3 leftovers: the OIDC button and `ui_handoff` are as unverified as the rest of OIDC; the
-  UI cannot create, move or delete nodes, declare variables or manage tags (no tag write API yet)
+  UI cannot create, move or delete nodes, declare variables or manage tags (the API exists now)
   or API tokens (plan §7 lists token management; the endpoints exist); "history" links on a key
   filter the audit log by `<node id>/<key>`, so they miss rows from before a move (ids change);
   one ~350 kB bundle, no code splitting; tree children have no count, so every non-host node shows

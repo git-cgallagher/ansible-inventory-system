@@ -43,6 +43,14 @@ to work on it.
   target, revision, request id and time, newest first.
 - **Move/rename** (`POST /api/v1/nodes/{id}/move`) rewrites the subtree's paths as new
   temporal rows, so the previous revision still shows the old tree; node ids change.
+- **Tags** (`PUT /api/v1/tags/{name}` with member paths) are extra var-less groups under `all`
+  for targeting (`--limit canary`); a non-host member contributes every host under it.
+- **Variable schemas**: a definition's `json_schema` is enforced on every write of that key
+  (API, import, modules), and a new schema is refused while any live value violates it.
+- **Hardening**: requests with a bad bearer token are audited (`token.rejected`, never the
+  token itself); failed logins are limited per e-mail and per client address (429 with
+  `Retry-After`; `AIS_LOGIN_MAX_FAILURES`, `AIS_LOGIN_MAX_FAILURES_PER_IP`,
+  `AIS_LOGIN_WINDOW_SECONDS`).
 
 ## Quick start
 
@@ -149,15 +157,22 @@ audited with `source=module`. All support check mode and `--diff`.
         path: all.commercial.prod.dc1
       register: dc1
 
+    - name: Move it to another datacenter (ids change; history keeps the old place)
+      git_cgallagher.inventory.node_move:
+        path: all.commercial.prod.dc1.cache
+        new_path: all.commercial.lab.dc1.cache
+
+    - name: Bulk load (additive; a matching tree is not a change; check mode is a server dry run)
+      git_cgallagher.inventory.import:
+        tree: "{{ lookup('ansible.builtin.file', 'seed.yml') | from_yaml }}"
+
     - name: Retire the group (whole subtree)
       git_cgallagher.inventory.node:
-        path: all.commercial.prod.dc1.cache
+        path: all.commercial.lab.dc1.cache
         state: absent
 ```
 
-Renames and moves are an API call for now (`curl -X POST .../nodes/<id>/move -d
-'{"parent_path": "all.federal.prod.dc2", "name": "www"}'` with `If-Match`); bulk loads go
-through `POST /api/v1/import` or `ais import`.
+Tags have an API (`PUT /api/v1/tags/{name}`) but no module yet.
 
 ### PostgreSQL (compose)
 
@@ -174,7 +189,8 @@ docker compose -f deploy/compose.yml exec api ais token create --user admin@exam
 | Export / render | `GET /api/v1/export` (ETag, `If-None-Match` → 304), `POST /api/v1/render` (`host` or mock `path`, `overrides`, `facts`, `revision`) | viewer |
 | Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots[/{revision}]`, `GET /api/v1/diff?host=&from=&to=` | viewer |
-| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH/DELETE /nodes/{id}`, `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` | editor |
+| Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
+| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH/DELETE /nodes/{id}`, `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`) | editor |
 | Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&since=&until=&limit=&before=` | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |
 | Open | `GET /healthz` (`status`, `version`, `oidc`), `GET /` + `/assets/…` (the built web UI, static files only) | none |
@@ -191,9 +207,10 @@ AIS_TEST_DATABASE_URL=postgresql+psycopg://ais:ais@127.0.0.1:55432/ais_test ../.
 
 `tests/test_parity.py` starts the API, points the real plugin at it (bearer token from
 `AIS_TOKEN`) and asserts the server's render equals `ansible-inventory --host` for every
-seeded host. The rest cover the fold, export, auth (401/403), locking (428/409),
-temporal writes, move/rename, the audit log, render errors, snapshots/diff and the
-plugin's 304 revalidation.
+seeded host. The rest cover the fold, export, auth (401/403, bad-token audit, login
+limiter), locking (428/409), temporal writes, move/rename, tags, schema enforcement, import
+(dry run, no-op), the audit log, render errors, snapshots/diff and the plugin's 304
+revalidation.
 
 The web UI has a Playwright smoke test (sign in, keyboard tree, inherited values, an edit
 that hits and recovers from a 409, render, diff, audit, a deep link) against a throwaway
@@ -219,7 +236,7 @@ cp tests/integration/integration_config.yml.template tests/integration/integrati
 |---|---|
 | `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
 | `server/tests/` | fold property tests, export, auth, writes/locking, render, snapshots, plugin ETag, Ansible parity |
-| `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
+| `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
 | `web/` | React + TypeScript UI (Vite; builds into `server/ais/static`), Playwright smoke in `e2e/` |
 | `examples/` | `seed.yml` tree, `inventory.yml`, `ansible.cfg` |
 | `deploy/` | `compose.yml` + `Dockerfile` (PostgreSQL + API; the image builds the UI in a Node stage) |
