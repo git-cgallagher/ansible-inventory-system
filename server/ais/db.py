@@ -87,11 +87,28 @@ def init_db(engine: Engine | None = None) -> None:
 
     engine = engine or get_engine()
     cfg = alembic_config()
-    with engine.begin() as conn:
-        cfg.attributes["connection"] = conn
-        if _is_legacy_spike_db(conn):
-            command.stamp(cfg, BASELINE_REVISION)
-        command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        sqlite = conn.dialect.name == "sqlite"
+        if sqlite:
+            # Batch mode rebuilds a table (copy, DROP, rename). With foreign keys on, that DROP
+            # cascades: rebuilding ``node`` deleted every ``node_variable`` row. The pragma is a
+            # no-op inside a transaction, so it is set before the migration's transaction opens.
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.commit()
+        try:
+            with conn.begin():
+                cfg.attributes["connection"] = conn
+                if _is_legacy_spike_db(conn):
+                    command.stamp(cfg, BASELINE_REVISION)
+                command.upgrade(cfg, "head")
+                if sqlite:
+                    broken = conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+                    if broken:
+                        raise RuntimeError(f"migration left dangling foreign keys: {broken[:5]}")
+        finally:
+            if sqlite:
+                conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+                conn.commit()
 
 
 def schema_revision(engine: Engine | None = None) -> str | None:

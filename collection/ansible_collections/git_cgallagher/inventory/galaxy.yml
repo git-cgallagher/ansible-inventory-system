@@ -13,3 +13,6 @@ tags:
 repository: https://github.com/git-cgallagher/ansible-inventory-system
 build_ignore:
   - tests/output
+  # local ansible-test files: the config holds a real token, the inventory is generated
+  - tests/integration/integration_config.yml
+  - tests/integration/inventory

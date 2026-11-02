@@ -7,7 +7,10 @@ An authoritative, database-backed Ansible inventory with a **strict tree hierarc
 per-variable merge strategies, revision history, and a render endpoint that shows what
 any real or hypothetical host resolves to.
 
-**Status: phase 3, web UI (2026-11-01).** On top of phase 1 (bearer-token auth with
+**Status: 0.2.0, first release (2026-11-01).** Phase 4 closed the write gaps (tags, `node_move`
+and `import` modules, enforced JSON Schemas, bad-token audit, login limiter), gave the UI node,
+variable, tag and token management, proved 100k hosts (`docs/scale.md`) and added Galaxy release
+automation for the collection. Before that, phase 3 added the web UI on top of phase 1 (bearer-token auth with
 roles, locked write endpoints, Jinja render with mock facts, per-host snapshots and diffs,
 Alembic migrations, an ETag-revalidating inventory plugin) and phase 2 (an **audit log** of
 every write and auth event, **node move/rename** with history, and the collection's
@@ -180,6 +183,18 @@ audited with `source=module`. All support check mode and `--diff`.
 ```
 
 Tags have an API (`PUT /api/v1/tags/{name}`) but no module yet.
+
+### Install the collection
+
+Once 0.2.0 is on Galaxy (the release workflow publishes it once the owner sets its key):
+
+```bash
+ansible-galaxy collection install git_cgallagher.inventory     # or: ==0.2.0
+```
+
+Until then, install it from a checkout: `ansible-galaxy collection install
+./collection/ansible_collections/git_cgallagher/inventory` (or point `collections_path` at
+`collection/`, as `examples/ansible.cfg` does). The collection and the server share a version.
 
 ### PostgreSQL (compose)
 

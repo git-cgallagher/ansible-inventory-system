@@ -1,0 +1,124 @@
+name: release
+
+# Publishes the collection (collection/ansible_collections/git_cgallagher/inventory) to Ansible
+# Galaxy from main, the pattern of ansible-collection-orchestration's galaxy-publish. Every push
+# to main asks Galaxy whether it already has the version in galaxy.yml; if not, it builds and
+# publishes it, then creates the GitHub release v<version> (tag included) with the tarball.
+# Galaxy versions are immutable, so a collection change reaches Galaxy only when its PR also
+# bumps `version` in galaxy.yml; merges that don't are a no-op here. Until GALAXY_API_KEY is set
+# in the main-only `galaxy` environment (by the owner), the publish step warns and stops; re-run
+# this workflow (workflow_dispatch) once it is set.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Several times the slowest green run of the same steps elsewhere (build + publish, ~2 min).
+    timeout-minutes: 15
+    # The Galaxy key is an environment secret: only this job, on main, can read it.
+    environment: galaxy
+    permissions:
+      contents: write  # GitHub release (and its tag) after a successful publish
+    defaults:
+      run:
+        working-directory: collection/ansible_collections/git_cgallagher/inventory
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # tags, for the "changed since the tag" guard
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # The ansible-core the collection is developed and sanity-tested with (server venv, CI).
+      - name: Install ansible-core
+        run: python -m pip install 'ansible-core==2.21.5'
+
+      - name: Read namespace, name and version from galaxy.yml
+        id: meta
+        run: |
+          python - >> "$GITHUB_OUTPUT" <<'PY'
+          import yaml
+          with open("galaxy.yml") as f:
+              meta = yaml.safe_load(f)
+          for field in ("namespace", "name", "version"):
+              print(f"{field}={meta[field]}")
+          PY
+
+      - name: Check whether Galaxy already has this version
+        id: check
+        env:
+          NAMESPACE: ${{ steps.meta.outputs.namespace }}
+          NAME: ${{ steps.meta.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          url="https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/${NAMESPACE}/${NAME}/versions/${VERSION}/"
+          status=$(curl -sS -o /dev/null -w '%{http_code}' "$url")
+          case "$status" in
+            200) echo "Galaxy already has ${NAMESPACE}.${NAME} ${VERSION}; nothing to publish."
+                 echo "needed=false" >> "$GITHUB_OUTPUT" ;;
+            404) echo "Galaxy doesn't have ${NAMESPACE}.${NAME} ${VERSION} yet."
+                 echo "needed=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "::error::Galaxy returned HTTP ${status} for ${url}"; exit 1 ;;
+          esac
+
+      # v<version> may already be tagged (v0.2.0 was tagged by hand at the release merge, before
+      # the key existed). Publishing a later main is fine only if the collection is unchanged
+      # since that tag; otherwise Galaxy would get code the tag does not have: bump the version.
+      - name: Refuse a collection that changed since an existing tag
+        if: steps.check.outputs.needed == 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            if ! git diff --quiet "v${VERSION}" HEAD -- .; then
+              echo "::error::the collection changed since tag v${VERSION}; bump version in galaxy.yml instead of publishing ${VERSION} from a different tree"
+              exit 1
+            fi
+          fi
+
+      - name: Build the collection
+        if: steps.check.outputs.needed == 'true'
+        run: ansible-galaxy collection build --output-path dist
+
+      - name: Publish to Galaxy
+        id: publish
+        if: steps.check.outputs.needed == 'true'
+        env:
+          GALAXY_API_KEY: ${{ secrets.GALAXY_API_KEY }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if [ -z "${GALAXY_API_KEY}" ]; then
+            echo "::warning::GALAXY_API_KEY isn't set in the 'galaxy' environment, so ${VERSION} was not published. Add it, then re-run this workflow."
+            exit 0
+          fi
+          # waits for Galaxy's import to finish and fails if the import is rejected
+          ansible-galaxy collection publish dist/*.tar.gz --token "${GALAXY_API_KEY}"
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub release
+        if: steps.publish.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAMESPACE: ${{ steps.meta.outputs.namespace }}
+          NAME: ${{ steps.meta.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # An existing tag is reused (--target only applies when the tag is new).
+          gh release create "v${VERSION}" dist/*.tar.gz \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "v${VERSION}" \
+            --notes "Collection published to Ansible Galaxy: https://galaxy.ansible.com/ui/repo/published/${NAMESPACE}/${NAME}/?version=${VERSION}. Server and UI at the same tag. See CHANGELOG.md."

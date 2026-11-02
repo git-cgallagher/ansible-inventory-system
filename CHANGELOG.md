@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-01
+
+First release. The collection `git_cgallagher.inventory` 0.2.0 goes to Ansible Galaxy through
+`release.yml` once `GALAXY_API_KEY` is set; the server, UI and collection share the version.
+
+### Release
+- `release.yml`: on every push to `main`, publish the collection to Galaxy when Galaxy lacks
+  `galaxy.yml`'s version (main-only `galaxy` environment, `GALAXY_API_KEY`), then create the
+  GitHub release `v<version>` with the tarball; warns and stops while the key is unset; refuses
+  a collection that changed since an existing `v<version>` tag.
+- Versions: server 0.1.0 → 0.2.0, UI package 0.3.0 → 0.2.0, collection 0.2.0 (its first
+  release; the inventory plugin's `version_added` is 0.2.0 too). The collection now ships
+  `LICENSE`, and `build_ignore` keeps a local `integration_config.yml` (a real token) and the
+  generated test inventory out of the tarball.
+- Migration `0004`: `node.meta` and `node_variable.value` NOT NULL, as the models always said
+  (spike-era NULLs become `{}` and JSON `null`). The schema drift check is now a test
+  (`tests/test_migrations.py`).
+
+### Fixed (release)
+- **SQLite migrations no longer delete variables.** Batch mode rebuilt `node` with foreign keys
+  on, and dropping the old table cascaded into `node_variable`; `init_db` now migrates SQLite
+  with `PRAGMA foreign_keys=OFF` and checks `PRAGMA foreign_key_check` afterwards.
+
 ### Added
 - **Phase 4 — scale proof.** `bench/generate.py` (100k hosts, ~10k groups, depth 8, straight
   into the database), `bench/benchmark.py` and `bench/compose.override.yml`; results in
