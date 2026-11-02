@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import os
 import pathlib
 from contextlib import asynccontextmanager
@@ -27,9 +28,9 @@ from ais.auth import Principal, require
 from ais.db import get_session, init_db
 from ais.importer import ImportError_, import_tree_report, live_node_by_path
 from ais.locking import check_precondition, etag
-from ais.models import AuditLog, Node, NodeKind, Revision, Role, VariableDefinition
+from ais.models import AuditLog, Node, Revision, Role, VariableDefinition
 from ais.render import MOCK_HOSTNAME, render_templates
-from ais.resolver import GROUP_SEP, build_export, current_revision, load_snapshot, resolve
+from ais.resolver import GROUP_SEP, build_export, current_revision, host_path, load_chain, load_snapshot, resolve
 from ais.snapshots import diff, get_snapshot, list_snapshots, materialize
 
 
@@ -94,7 +95,6 @@ def export_etag(revision: int, subtree: str | None, sep: str, emit_tags: bool) -
 @app.get("/api/v1/export")
 def export(
     request: Request,
-    response: Response,
     revision: int | None = None,
     subtree: str | None = None,
     group_separator: str = Query(GROUP_SEP, max_length=4),
@@ -115,8 +115,9 @@ def export(
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     materialize(session, snap)
-    response.headers["ETag"] = tag
-    return data
+    # Serialized here: the export is plain JSON already, and FastAPI's jsonable_encoder
+    # walks it in Python (0.7 s of a 3.5 s export at 100k hosts, docs/scale.md).
+    return Response(json.dumps(data, separators=(",", ":")), media_type="application/json", headers={"ETag": tag})
 
 
 # --------------------------------------------------------------------- render
@@ -127,8 +128,8 @@ def render(req: RenderRequest, principal: Principal = viewer, session: Session =
     if not (req.host or req.path):
         raise HTTPException(422, "host or path is required")
     _check_revision(session, req.revision)
-    snap = load_snapshot(session, req.revision)
     try:
+        snap = load_chain(session, req.revision, host=req.host, path=None if req.host else req.path)
         out = resolve(snap, host=req.host, path=req.path, overrides=req.overrides, sep=req.group_separator)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -151,7 +152,10 @@ def nodes(
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
     _check_revision(session, revision)
-    snap = load_snapshot(session, revision)
+    try:
+        snap = load_snapshot(session, revision, subtree)
+    except KeyError:
+        return []
     rows = sorted(snap.nodes.values(), key=lambda n: n.path)
     if subtree:
         rows = [n for n in rows if n.path == subtree or n.path.startswith(subtree + ".")]
@@ -272,7 +276,7 @@ def audit_log(
 @app.get("/api/v1/hosts/{name}/snapshots")
 def host_snapshots(name: str, principal: Principal = viewer, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     rows = list_snapshots(session, name)
-    if not rows and not any(n.kind is NodeKind.host and n.name == name for n in load_snapshot(session).nodes.values()):
+    if not rows and host_path(session, name, current_revision(session)) is None:
         raise HTTPException(404, f"unknown host {name!r}")
     return rows
 
