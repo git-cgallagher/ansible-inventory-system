@@ -22,6 +22,7 @@ Format::
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,37 @@ def check_name(name: str) -> None:
         raise ImportError_(f"invalid node name {name!r}: letters, digits, '_' and '-' only (max 255)")
 
 
+# Hard ceiling on a node's ``path`` in UTF-8 bytes, on every backend. On PostgreSQL the
+# GiST index on ``path_ltree`` stores two whole paths in each internal key and needs two
+# keys per 8 kB page, so long paths fail with "failed to add item to index page" (a 500).
+# Measured 2026-11-01 on PostgreSQL 16: one 2,431-byte path fails; 40 sibling paths of
+# 2,000 bytes fail; 200 of 1,500 and 500 of 1,024 bytes work. 1,500 keeps a margin. The
+# btree indexes on ``path`` (~2,700-byte entries) are never the binding limit.
+MAX_PATH_BYTES = 1500
+DEFAULT_MAX_DEPTH = 32
+
+
+def max_depth() -> int:
+    """Deepest allowed node (``all`` is depth 0, a business 1, a tier 2, a datacenter 3,
+    groups and hosts below). ``AIS_MAX_DEPTH`` overrides the default of 32."""
+    try:
+        value = int(os.environ.get("AIS_MAX_DEPTH", DEFAULT_MAX_DEPTH))
+    except ValueError:
+        return DEFAULT_MAX_DEPTH
+    return max(value, 4)
+
+
+def check_position(path: str, depth: int) -> None:
+    """Refuse a node that would be deeper than ``max_depth()`` or whose path is longer
+    than ``MAX_PATH_BYTES``. The one check behind import, create and move."""
+    limit = max_depth()
+    if depth > limit:
+        raise ImportError_(f"{path}: depth {depth} exceeds the maximum depth {limit} (AIS_MAX_DEPTH)")
+    size = len(path.encode("utf-8"))
+    if size > MAX_PATH_BYTES:
+        raise ImportError_(f"{path[:80]}...: path is {size} bytes, over the {MAX_PATH_BYTES}-byte limit")
+
+
 def live_node_by_path(session: Session, path: str) -> Node | None:
     return session.scalar(select(Node).where(Node.path == path, Node.deleted_rev.is_(None)))
 
@@ -100,6 +132,7 @@ def get_or_create_node(
             raise ImportError_(f"parent {parent.path} is deleted")
         check_kind(parent, kind)
         path, depth = f"{parent.path}{PATH_SEP}{name}", parent.depth + 1
+    check_position(path, depth)
     node = live_node_by_path(session, path)
     if node is None:
         node = Node(
@@ -198,17 +231,30 @@ def import_tree_report(session: Session, data: dict[str, Any], *, actor: str = "
     )
 
 
-def _import_node(session: Session, node: Node, spec: dict[str, Any], rev: Revision) -> None:
-    spec = spec or {}
-    set_variables(session, node, spec.get("vars") or {}, rev)
-    for child_name, child_spec in (spec.get("children") or {}).items():
-        child_spec = child_spec or {}
-        kind = infer_kind(node.depth + 1, child_spec.get("kind"))
-        child = get_or_create_node(session, node, child_name, kind, rev, child_spec.get("inventory_name"))
-        _import_node(session, child, child_spec, rev)
-    for host_name, host_vars in (spec.get("hosts") or {}).items():
-        host = get_or_create_node(session, node, host_name, NodeKind.host, rev)
-        set_variables(session, host, host_vars or {}, rev)
+def _import_node(session: Session, root: Node, spec: dict[str, Any], rev: Revision) -> None:
+    """Walk the tree depth first with an explicit stack, in the same order the recursive
+    version used (a node's vars, then each child subtree in order, then its hosts), so
+    depth is bounded by ``check_position`` and never by Python's recursion limit."""
+    # ("node", node, spec): set the node's vars, then queue its hosts and children.
+    # ("child", parent, (name, spec)): create the child, then handle it as a node.
+    # ("hosts", node, spec): create the node's hosts once every child subtree is done.
+    stack: list[tuple[str, Node, Any]] = [("node", root, spec or {})]
+    while stack:
+        step, node, item = stack.pop()
+        if step == "hosts":
+            for host_name, host_vars in (item.get("hosts") or {}).items():
+                host = get_or_create_node(session, node, host_name, NodeKind.host, rev)
+                set_variables(session, host, host_vars or {}, rev)
+            continue
+        if step == "child":
+            name, child_spec = item
+            kind = infer_kind(node.depth + 1, child_spec.get("kind"))
+            node = get_or_create_node(session, node, name, kind, rev, child_spec.get("inventory_name"))
+            item = child_spec
+        set_variables(session, node, item.get("vars") or {}, rev)
+        stack.append(("hosts", node, item))
+        for child_name, child_spec in reversed(list((item.get("children") or {}).items())):
+            stack.append(("child", node, (child_name, child_spec or {})))
 
 
 def import_file(session: Session, path: str | Path, **kw: Any) -> Revision:
