@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+- Depth and path limits: node depth ≤ 32 (`AIS_MAX_DEPTH`) and path ≤ 1,500 bytes, refused with
+  a 422 on import, create and move. Before this, a path near 2,000 bytes on PostgreSQL failed
+  with a 500 from the ltree index.
+
+### Fixed
+- The importer no longer recurses, so very deep trees fail on the depth limit instead of
+  Python's recursion limit (near depth 1,000).
+
 ## 0.2.0 — 2026-11-01
 
 First release. The collection `git_cgallagher.inventory` 0.2.0 goes to Ansible Galaxy through

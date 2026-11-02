@@ -54,6 +54,12 @@ to work on it.
   token itself); failed logins are limited per e-mail and per client address (429 with
   `Retry-After`; `AIS_LOGIN_MAX_FAILURES`, `AIS_LOGIN_MAX_FAILURES_PER_IP`,
   `AIS_LOGIN_WINDOW_SECONDS`).
+- **Depth and path limits**: groups nest freely below a datacenter, up to a node depth of 32
+  (`all` is 0, a business 1, a tier 2, a datacenter 3; `AIS_MAX_DEPTH` raises it), and a node's
+  path may be at most 1,500 bytes. Both are refused with a 422 naming the limit, on import,
+  create and move (a move checks the whole relocated subtree). The path cap is PostgreSQL's:
+  its ltree index breaks on many paths near 2,000 bytes, so on realistic names the path cap,
+  not the depth cap, is what binds first (about 50 levels at 30-character names).
 
 ## Quick start
 

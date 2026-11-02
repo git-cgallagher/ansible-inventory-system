@@ -34,6 +34,10 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   (`resolver.emitted_vars`), the host included when the host itself contributes. Nodes that
   do not contribute emit nothing for the key. Never only at the deepest node.
 - **Group names are qualified** from the path with `_`; collisions are an export error.
+- **Every new or relocated node goes through `importer.check_position`** (depth ≤
+  `AIS_MAX_DEPTH`, default 32; path ≤ `MAX_PATH_BYTES` = 1,500). Import, `POST /nodes` and move
+  call it; a new write path that creates or re-paths nodes must too. The importer walks with an
+  explicit stack: never make it recursive again (it died near depth 1,000).
 - **Nodes and variables are temporal rows**; never UPDATE a value in place or hard-delete —
   close the row with `deleted_rev` and insert a new one under a new `Revision`. `DELETE
   /nodes/{id}` closes the whole subtree and its live variables. A pinned revision therefore
@@ -240,6 +244,12 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   limited to `[A-Za-z0-9_-]` (ltree labels; hyphens need PostgreSQL 16+). It is migration-only,
   not in the ORM model, or SQLite would break.
 - `hash_behaviour=merge` must stay off on consumers; the server already folds.
+- **Long paths break PostgreSQL's GiST index, not the btree.** `ix_node_path_ltree` holds two
+  whole paths per internal key and needs two keys per 8 kB page: one 2,431-byte path failed
+  with "failed to add item to index page" (a 500), and 40 siblings at 2,000 bytes failed while
+  a single 2,000-byte path passed. 200 at 1,500 and 500 at 1,024 work, hence the 1,500 cap.
+  SQLite has no such limit, so only a PostgreSQL run (compose, or `AIS_TEST_DATABASE_URL`)
+  can catch a regression here. Measured 2026-11-01.
 - **ansible-core 2.19+ only templates strings tagged trusted.** `Templar.template("{{ x }}")`
   on a plain `str` returns it unchanged, silently. `ais.render._trust` wraps every string with
   `trust_as_template` first; catch `AnsibleTemplateError` (covers undefined, syntax,

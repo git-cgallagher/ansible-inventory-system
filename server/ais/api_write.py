@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ais import audit, schema
 from ais.auth import Principal, require
 from ais.db import get_session
-from ais.importer import ImportError_, check_kind, check_name, infer_kind, live_node_by_path
+from ais.importer import ImportError_, check_kind, check_name, check_position, infer_kind, live_node_by_path
 from ais.locking import IfMatch, begin_write, etag
 from ais.models import PATH_SEP, MergeStrategy, Node, NodeKind, NodeVariable, Revision, Role, TagMember, VariableDefinition
 from ais.resolver import build_export, current_revision, load_snapshot
@@ -177,14 +177,15 @@ def create_node(
     rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"create node {req.name}")
     parent = _resolve_parent(session, req.parent_id, req.parent_path)
     kind = req.kind or infer_kind(parent.depth + 1, None)
+    path = f"{parent.path}{PATH_SEP}{req.name}"
     try:
         check_name(req.name)
         check_kind(parent, kind)
+        check_position(path, parent.depth + 1)
     except ImportError_ as exc:
         raise HTTPException(422, str(exc)) from exc
     if kind is NodeKind.host and req.inventory_name:
         raise HTTPException(422, "hosts have no inventory_name")
-    path = f"{parent.path}{PATH_SEP}{req.name}"
     if live_node_by_path(session, path) is not None:
         raise HTTPException(409, f"node {path} already exists")
     for key, value in req.vars.items():
@@ -279,6 +280,12 @@ def move_node(
         raise HTTPException(409, f"node {new_path} already exists")
 
     old_rows = live_subtree(session, node)
+    # Every relocated node must still fit: check the whole subtree before touching a row.
+    try:
+        for n in old_rows:
+            check_position(new_path + n.path[len(node.path) :], new_parent.depth + 1 + (n.depth - node.depth))
+    except ImportError_ as exc:
+        raise HTTPException(422, str(exc)) from exc
     old_ids = [n.id for n in old_rows]
     old_vars = session.scalars(select(NodeVariable).where(NodeVariable.node_id.in_(old_ids), NodeVariable.deleted_rev.is_(None))).all()
     old_members = session.scalars(select(TagMember).where(TagMember.node_id.in_(old_ids))).all()
