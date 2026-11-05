@@ -357,6 +357,8 @@ def test_cli_vars(tmp_path):
     assert out.splitlines()[2:] == ["fed-edge01\t443\tfrom all.federal.prod.dc2.web", "fed-web01\t443\tfrom all.federal.prod.dc2.web"]
     out = _ais(db, "vars", "packages", "--subtree", "all.commercial.prod.dc1.web", "--limit", "1")
     assert out.splitlines()[1:] == ['all\t["vim", "curl"]\t(emits ["vim", "curl"])\t(above the subtree)']
+    out = _ais(db, "vars", "packages", "--hosts", "--subtree", "all.federal")
+    assert out.splitlines()[-1] == 'fed-web01\t["vim", "curl", "aide"]\tfolded from all + all.federal'
     import json
 
     doc = json.loads(_ais(db, "vars", "packages", "--hosts", "--json", "--subtree", "all.federal"))

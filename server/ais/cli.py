@@ -354,7 +354,8 @@ def _vars(args: argparse.Namespace) -> int:
         print(f"{what}: {out['total']} host(s) match, {out['with_key']} have it, {out['without_key']} do not")
         print("values: " + ", ".join(f"{show(v['value'])} x{v['hosts']}" for v in out["values"]) + (" ..." if out["values_truncated"] else ""))
         for r in rows:
-            print(f"{r['host']}\t{show(r['value'])}\tfrom {r['from']}")
+            origin = f"folded from {' + '.join(r['sources'])}" if "sources" in r else f"from {r['from']}"
+            print(f"{r['host']}\t{show(r['value'])}\t{origin}")
     else:
         print(f"{what}: set on {out['total']} node(s)")
         for r in rows:

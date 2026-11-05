@@ -642,8 +642,9 @@ Roles are global: there's no "editor of `all.federal` only" yet.
   changed between two revisions. The UI's Diff page does both.
 - **Who did what:** `GET /api/v1/audit` (editor role) has one row per change and per sign-in,
   token or user event, with before and after values. Filter by actor, action, node (following
-  it across moves and renames), revision or time. In the UI, a node's or variable's "history"
-  link opens it.
+  it across moves and renames), a variable's key on every node, subtree, revision or time. In the
+  UI, a node's or variable's "history" link opens it. To find where a key is set and which hosts
+  have which value, see [Investigate a variable](#investigate-a-variable) below.
 - **Undo** is a new change, not a rewind: `revert` writes the inverse as a new revision
   ([Undo a change](#undo-a-change) below). History is never rewritten.
 - **Deleting a group asks first.** `DELETE /api/v1/nodes/{id}` on a node with anything below
@@ -688,6 +689,76 @@ Roles are global: there's no "editor of `all.federal` only" yet.
   The two-step path still works too, for a restore into another server or an edited copy:
   `ais export-tree --revision 56 --subtree … > dc1.yml`, then `ais import dc1.yml`; but an
   import does not link the old ids, so the audit trail of the old nodes stays with them.
+
+### Investigate a variable
+
+Three questions come up in every incident: where is `gpu_driver` set, which hosts end up with
+which value, and who changed it. Each is one read. On the seed tree:
+
+```bash
+ais vars http_port                       # where is it set? (the nodes that set it themselves)
+# http_port (replace, undeclared) at revision 1: set on 3 node(s)
+# all.commercial.lab.dc1.web    8081
+# all.commercial.prod.dc1.web   8080
+# all.federal.prod.dc2.web      443
+ais vars http_port --hosts --value 443   # which hosts get 443?
+# http_port (replace, undeclared) at revision 1: 2 host(s) match, 5 have it, 1 do not
+# values: 8080 x2, 443 x2, 8081 x1
+# fed-edge01    443     from all.federal.prod.dc2.web
+# fed-web01     443     from all.federal.prod.dc2.web
+ais vars packages --hosts --subtree all.federal
+# fed-edge01    ["vim", "curl", "aide", "haproxy"]      folded from all + all.federal + all.federal.prod.dc2.web.edge
+```
+
+The same through the API (viewer role), the `variable_info` module and the UI's **Search** page
+(also reached from the "where set" link on every variable of the Variables page and of a node
+page, and from the find box above the tree, which searches under the selected node):
+
+```bash
+curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/vars?key=http_port'
+curl -s -H "$H" -G 'http://127.0.0.1:8000/api/v1/vars/hosts' --data-urlencode 'key=gpu_driver' \
+  --data-urlencode 'value="550.90"' --data-urlencode 'subtree=all.commercial.prod'
+curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/audit?key=gpu_driver'     # editor: who changed it, anywhere
+```
+
+```yaml
+- git_cgallagher.inventory.variable_info:
+    key: gpu_driver
+    value: "550.90"
+    subtree: all.commercial.prod
+    hosts: true
+  register: old_driver   # .nodes, .hosts (host, path, value, from), .value_counts, .with_key, .without_key
+```
+
+How to read the answers:
+
+- **Where set** lists only the nodes that set the key **themselves**, sorted by path, with their
+  own value. For a `merge`/`append`/`unique_append` key each node also shows `effective`: the
+  cumulative fold it emits (what its hosts get unless a deeper node adds to it). With `subtree`,
+  the ancestors of the subtree that set the key are listed too (`above_subtree`), because the
+  subtree's hosts inherit from them.
+- **Hosts** gives every host's **resolved** value, exactly what `ais render` and a playbook see,
+  with `from`, the deepest node that sets it (for a fold, `sources`: every contributing node,
+  root first). Hosts without the key are counted (`without_key`), not listed. `values` is the
+  distribution over the whole scope ("20 hosts on 560.35, 10 on 550.90"), the 50 most common.
+- **`value` is JSON, and the type counts.** `550.90` is the number, `"550.90"` the string, so
+  quote a string that looks like a number (on the shell: `--value '"550.90"'`); text that is not
+  valid JSON (`nvidia-550`) is taken as a plain string. Objects match whatever their key order.
+  The UI's value box takes YAML (JSON is YAML) and sends JSON. A node matches on its **own**
+  value; a host on its **whole resolved value**, which for a fold key is the folded result
+  (`["vim", "curl", "aide"]`), not one node's contribution.
+- **Revision and paging.** `revision` searches the tree as it was; the default is the current
+  one. Both lists page by path (`limit` up to 1,000, `offset`); the counts always cover the
+  whole scope. The host values are computed at that revision, not read from the stored host
+  snapshots, so they are never behind a write. Every host's value takes about 1.5 s at 100,000
+  hosts; pass `subtree` to make it a few hundredths of a second ([scale](scale.md)).
+- **Audit by key** (`GET /api/v1/audit?key=`, the Audit page's key filter) returns that key's
+  `variable.set`/`variable.unset` rows on every node, the rows its reverts wrote, and its
+  definition's rows, newest first, across moves (the key is stored on the row). Writes that
+  change many keys in one row are **not** found by key: an `import`, a `node.create` with
+  variables, a delete or a restore of a subtree. Find those with `node=`, `action=` or
+  `revision=`. `subtree=` keeps the rows whose recorded path (at the time of the write) is at or
+  below it.
 
 ### Undo a change
 
