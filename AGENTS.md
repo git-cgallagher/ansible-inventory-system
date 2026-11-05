@@ -197,6 +197,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   PostgreSQL), `load_chain(revision, host=|path=)` (just the ancestor chain, which is all
   `resolve` needs), `build_export`, `resolve(host|path, overrides)`. `Snapshot` indexes children
   and hosts on first use and caches each node's emitted vars (`_emitted`): shared, never mutate.
+- `docs/getting-started.md` — the user guide; `README.md` stays the short reference. A change to
+  commands, settings, limits, roles or deployment updates both. `deploy/compose.prod.yml` —
+  production overrides that guide's section 3 uses.
 - `bench/` — `generate.py` (synthetic tree straight into the DB: 100k hosts, ~10k groups, depth
   8), `benchmark.py` (export, subtree, render, write, `ansible-inventory --graph/--list`),
   `compose.override.yml` (publishes PostgreSQL on 55434, API on 8813). Results: `docs/scale.md`.
@@ -248,6 +251,11 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `AuthClient` (sends the bearer, `if_match=` kwarg), live `server` + real-plugin helpers.
 
 ## ⚠️ Gotchas
+- **Behind a host proxy, the container's peer is Docker's bridge gateway, not 127.0.0.1.** A
+  failed login through `127.0.0.1:8000` was audited as `client: 172.19.0.1`, so
+  `FORWARDED_ALLOW_IPS=127.0.0.1` would never trust the proxy's `X-Forwarded-For`, and the
+  per-address login limit would count every user as one. `compose.prod.yml` sets `*`, which is
+  safe only with the port published on loopback. Measured 2026-11-05.
 - `ansible-inventory` is not on PATH in agent shells; tests resolve it next to
   `sys.executable` (the venv). Run pytest with the venv's python.
 - Subtree export keeps the ancestor chain (`all` → … → subtree root) so inherited vars

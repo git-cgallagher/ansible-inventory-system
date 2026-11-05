@@ -1,0 +1,21 @@
+# Production overrides for compose.yml; see docs/getting-started.md, section 3.
+#   export AIS_DB_PASSWORD="$(your-secret-tool get ais-db-password)"
+#   docker compose -f deploy/compose.yml -f deploy/compose.prod.yml up --build -d
+# The password comes from the environment, never from this file. POSTGRES_PASSWORD only
+# takes effect when the database volume is first created.
+services:
+  db:
+    environment:
+      POSTGRES_PASSWORD: ${AIS_DB_PASSWORD:?set AIS_DB_PASSWORD}
+    restart: unless-stopped
+  api:
+    environment:
+      AIS_DATABASE_URL: postgresql+psycopg://ais:${AIS_DB_PASSWORD:?set AIS_DB_PASSWORD}@db:5432/ais
+      # Trust X-Forwarded-For from any peer. Safe only because the port below is published on
+      # loopback: the API's peer is then always this host (Docker's bridge gateway, not
+      # 127.0.0.1), i.e. your TLS proxy. Without it the login limiter sees every client as the
+      # proxy.
+      FORWARDED_ALLOW_IPS: "*"
+    ports: !override
+      - "127.0.0.1:8000:8000"   # only a TLS proxy on this host reaches it
+    restart: unless-stopped

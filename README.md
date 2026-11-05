@@ -22,6 +22,10 @@ history. Still tested by a golden test that the server's render equals
 `ANSIBLE-INVENTORY-PLAN.md` in `~/Code` for the full plan and `AGENTS.md` here for how
 to work on it.
 
+**New here? Start with [`docs/getting-started.md`](docs/getting-started.md)**: the ideas, a
+first local run, a PostgreSQL deployment with TLS and backups, how to design the tree, every
+way to write to it, secrets, roles and troubleshooting. This README is the short reference.
+
 ## How it works
 
 - **Ansible does the merging.** The plugin emits the real group tree with variables
@@ -229,6 +233,10 @@ docker compose -f deploy/compose.yml exec api ais user create admin@example.com 
 docker compose -f deploy/compose.yml exec api ais token create --user admin@example.com
 ```
 
+That is the development setup (password `ais`, port 8000 on every interface). For a real
+deployment add `-f deploy/compose.prod.yml` (password from `AIS_DB_PASSWORD`, loopback-only
+port for a TLS proxy); see section 3 of the getting-started guide.
+
 ### API overview
 
 | Area | Routes | Role |
@@ -294,5 +302,6 @@ and how to rerun them (`bench/generate.py`, `bench/benchmark.py`).
 | `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
 | `web/` | React + TypeScript UI (Vite; builds into `server/ais/static`), Playwright smoke in `e2e/` |
 | `examples/` | `seed.yml` tree, `inventory.yml`, `ansible.cfg` |
+| `docs/getting-started.md` | the long walk: concepts, deployment, design, operations |
 | `bench/`, `docs/scale.md` | synthetic 100k-host generator, benchmark, compose overlay; results |
-| `deploy/` | `compose.yml` + `Dockerfile` (PostgreSQL + API; the image builds the UI in a Node stage) |
+| `deploy/` | `compose.yml` + `Dockerfile` (PostgreSQL + API; the image builds the UI in a Node stage); `compose.prod.yml` production overrides |

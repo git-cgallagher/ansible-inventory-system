@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `docs/getting-started.md`: a getting-started guide, from the ideas through a PostgreSQL
+  deployment (TLS, backups, upgrades), tree design, every write path, secrets, roles, history,
+  settings, limits and troubleshooting. Each step was run against 0.3.0.
+- `deploy/compose.prod.yml`: production overrides for compose (database password from
+  `AIS_DB_PASSWORD`, API on loopback for a TLS proxy, `FORWARDED_ALLOW_IPS: "*"`, restart
+  policies).
+
 ## 0.3.0 — 2026-11-05
 
 ### Security
