@@ -11,6 +11,7 @@ import { DiffView } from "./views/Diff";
 import { RevisionsView } from "./views/Revisions";
 import { AuditView } from "./views/Audit";
 import { VariablesView } from "./views/Variables";
+import { SearchView } from "./views/Search";
 import { TagsView } from "./views/Tags";
 import { TokensView } from "./views/Tokens";
 import { Notice } from "./components";
@@ -19,6 +20,7 @@ const VIEWS: { id: string; label: string; editorOnly?: boolean }[] = [
   { id: "tree", label: "Tree" },
   { id: "render", label: "Render" },
   { id: "variables", label: "Variables" },
+  { id: "search", label: "Search" },
   { id: "tags", label: "Tags" },
   { id: "diff", label: "Diff" },
   { id: "revisions", label: "Revisions" },
@@ -87,6 +89,9 @@ export default function App() {
       break;
     case "audit":
       body = <AuditView params={route.params} />;
+      break;
+    case "search":
+      body = <SearchView params={route.params} />;
       break;
     case "variables":
       body = <VariablesView />;

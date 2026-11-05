@@ -20,10 +20,10 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, oidc
+from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, oidc, varsearch
 from ais.auth import Principal, require
 from ais.db import get_session, init_db
 from ais.importer import ImportError_, import_tree_report, live_node_by_path
@@ -240,6 +240,49 @@ def variable(name: str, principal: Principal = viewer, session: Session = Depend
     return api_write.definition_out(d)
 
 
+# ------------------------------------------------------------- variable search
+
+_VALUE_HELP = (
+    "Only this value: JSON (550.90 is a number, \"550.90\" a string), or a plain string when it is "
+    "not valid JSON. On /vars a node's own value; on /vars/hosts the whole resolved value (the fold, "
+    "for merge/append strategies)."
+)
+
+
+def _search_args(
+    key: str = Query(..., min_length=1, max_length=255, description="The variable name"),
+    value: str | None = Query(None, description=_VALUE_HELP),
+    subtree: str | None = Query(None, description="Only this node and what is below it (plus, on /vars, the ancestors that set the key)"),
+    revision: int | None = Query(None, description="As of this revision (default: current)"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    return {"key": key, "wanted": varsearch.parse_value(value), "subtree": subtree or None, "revision": revision, "limit": limit, "offset": offset}
+
+
+@app.get("/api/v1/vars")
+def vars_where_set(args: dict[str, Any] = Depends(_search_args), principal: Principal = viewer, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Where is a key set? The nodes that set it in their own variables, by path, with their
+    values (and, for a fold strategy, the cumulative value each emits). ``ais.varsearch``."""
+    _check_revision(session, args["revision"])
+    try:
+        return varsearch.where_set(session, args.pop("key"), **args)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+
+
+@app.get("/api/v1/vars/hosts")
+def vars_hosts(args: dict[str, Any] = Depends(_search_args), principal: Principal = viewer, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Which hosts have this value? Every host's resolved value of the key (as a playbook sees
+    it), with the node it comes from, paged by path; counts and the value distribution cover
+    the whole scope. Computed at the revision, not read from the stored snapshots."""
+    _check_revision(session, args["revision"])
+    try:
+        return varsearch.host_values(session, args.pop("key"), **args)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+
+
 def revision_out(r: Revision) -> dict[str, Any]:
     return {"id": r.id, "actor": r.actor, "source": r.source, "ts": r.ts, "message": r.message, "change": r.change}
 
@@ -277,14 +320,20 @@ def audit_log(
     limit: int = Query(50, ge=1, le=1000),
     before: int | None = Query(None, description="Only rows with an id below this (paging, newest first)"),
     node: str | None = Query(None, description="A node by id or live path: its rows and its variables' rows under every id it had (moves change ids)"),
-    key: str | None = Query(None, description="With node: only that variable's rows"),
+    key: str | None = Query(None, description="A variable's rows (set, unset, its definition) anywhere; with node, only on that node"),
+    subtree: str | None = Query(None, description="Only rows whose recorded path (after, else before) is this path or below it: the path when the row was written"),
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Audit rows, newest first. Editor or admin; viewers get 403."""
     stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
     if key is not None and node is None:
-        raise HTTPException(422, "key needs node")
+        stmt = stmt.where(AuditLog.key == key)  # ix_audit_key; set by audit.record (migration 0007)
+    if subtree:
+        # Variable and node rows carry the path they had then; definitions, tags and auth
+        # events have none and drop out. Unindexed, so it narrows the other filters.
+        recorded = func.coalesce(AuditLog.after["path"].as_string(), AuditLog.before["path"].as_string())
+        stmt = stmt.where(or_(recorded == subtree, recorded.startswith(subtree + ".", autoescape=True)))
     if node is not None:
         n = session.get(Node, int(node)) if node.isdigit() else live_node_by_path(session, node)
         if n is None:

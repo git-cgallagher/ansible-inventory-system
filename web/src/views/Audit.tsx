@@ -7,7 +7,8 @@ import type { AuditRow } from "../types";
 
 const PAGE = 50;
 // `node` (a path) + `key` follow a node through moves and renames (the server walks node.move rows).
-const FILTERS = ["actor", "action", "target_type", "target_id", "node", "key", "revision", "change", "since", "until"] as const;
+// `key` alone finds a variable's rows on every node; `subtree` matches the path a row recorded when written.
+const FILTERS = ["actor", "action", "target_type", "target_id", "node", "key", "subtree", "revision", "change", "since", "until"] as const;
 type Filters = Record<(typeof FILTERS)[number], string>;
 
 /** `GET /audit` (editor+). Filters live in the URL so "who changed this key" links work. */
@@ -53,7 +54,7 @@ export function AuditView({ params }: { params: URLSearchParams }) {
               value={filters[f]}
               onChange={(e) => setFilters({ ...filters, [f]: e.target.value })}
               placeholder={
-                f === "action" ? "node. or variable.set" : f === "node" ? "all.commercial.prod" : f === "change" ? "SRE-1234" : f === "since" || f === "until" ? "2026-11-01T00:00" : ""
+                f === "action" ? "node. or variable.set" : f === "node" || f === "subtree" ? "all.commercial.prod" : f === "key" ? "gpu_driver" : f === "change" ? "SRE-1234" : f === "since" || f === "until" ? "2026-11-01T00:00" : ""
               }
               aria-label={f}
             />

@@ -3,6 +3,19 @@
 ## Unreleased
 
 ### Added
+- **Variable search** (#23, variable search). `GET /api/v1/vars?key=` (viewer) lists the nodes
+  that set a key in their own variables, by path, with their values, `effective` (the fold each
+  emits) for merge/append keys, and with `subtree` the ancestors that set it (`above_subtree`).
+  `GET /api/v1/vars/hosts?key=` gives every host's resolved value (what a playbook sees) with
+  `from` / `sources`, counts over the whole scope (`total`, `with_key`, `without_key`) and the
+  distribution of values. Both take `value` (JSON with its type: `550.90` is not `"550.90"`;
+  text that is not JSON is a plain string; hosts match the whole resolved value, the fold for
+  merge/append keys), `subtree`, `revision`, `limit` and `offset`. Also `ais vars KEY [--hosts]
+  [--value] [--subtree] [--revision] [--json]`, the `variable_info` module, and a Search page in
+  the UI, reached from a find box above the tree and a "where set" link on every variable of
+  the Variables page and of a node page. 0.02 s for where a key is set and 1.3–1.7 s for every
+  host's value at 100,000 hosts, 0.03 s for a datacenter (`docs/scale.md`).
+- `GET /api/v1/audit?subtree=`: only rows whose recorded path (as written then) is at or below it.
 - **Change ids.** Writes can carry a change id: the `X-AIS-Change` header (1-64 characters from
   letters, digits and `._:+@-`; a bad one, or one that looks like an `ais_` token, is a 400 that
   never repeats the value), the `change` option on every module (or `AIS_CHANGE`), and `--change`
@@ -73,6 +86,13 @@
   path that would be deleted.
 
 ### Changed
+- **`GET /api/v1/audit?key=` works without `node`** (it answered 422 "key needs node"): the
+  key's `variable.set` / `variable.unset` rows on every node and its definition's rows, newest
+  first. Migration `0007` adds `audit_log.key` (set on every new variable or definition row,
+  backfilled from `target_id` for older ones) with an index, and an index on
+  `node_variable (key, deleted_rev)` for the search. Audit rows now include `key`. Rows that
+  change many keys at once (`import`, `node.create` with variables, a subtree delete or restore)
+  are not found by key (#23).
 - The `import` audit row's `before` now records the definitions and tags the import changed, as
   they were, and a `tag.delete` row's `before` the memberships of deleted nodes
   (`deleted_members`), so both can be reverted. An `import` row written by an earlier version

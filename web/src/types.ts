@@ -125,6 +125,49 @@ export interface AuditRow {
   request_id: string | null;
   revision: number | null;
   change: string | null;
+  key: string | null; // the variable a node_variable / variable_definition row is about
+}
+
+/** `GET /vars` and `/vars/hosts`: what every variable search answers with. */
+interface VarSearchHead {
+  revision: number;
+  key: string;
+  strategy: Strategy;
+  declared: boolean;
+  subtree: string | null;
+  value?: unknown;
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface SettingNode {
+  id: number;
+  path: string;
+  kind: InvNode["kind"];
+  value: unknown; // the node's own value
+  effective?: unknown; // fold strategies: the cumulative value the node emits
+  above_subtree?: boolean;
+}
+
+export interface VarNodes extends VarSearchHead {
+  nodes: SettingNode[];
+}
+
+export interface HostValue {
+  host: string;
+  path: string;
+  value: unknown; // resolved
+  from: string; // the deepest node that sets it
+  sources?: string[]; // fold strategies: every contributor, root first
+}
+
+export interface VarHosts extends VarSearchHead {
+  with_key: number;
+  without_key: number;
+  values: { value: unknown; hosts: number }[];
+  values_truncated: boolean;
+  hosts: HostValue[];
 }
 
 /** Inventory keys the server adds itself; never shown as a variable. */

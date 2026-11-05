@@ -1,4 +1,4 @@
-"""``ais`` command line: init-db, import, export, export-tree, restore, revert, render, serve, user, token."""
+"""``ais`` command line: init-db, import, export, export-tree, restore, revert, render, vars, serve, user, token."""
 
 from __future__ import annotations
 
@@ -65,6 +65,15 @@ def main(argv: list[str] | None = None) -> int:
     ren.add_argument("--revision", type=int)
     ren.add_argument("--facts", help="JSON object of mock facts")
     ren.add_argument("--no-template", action="store_true")
+    vrs = sub.add_parser("vars", help="where a variable is set, or which hosts have which value (GET /api/v1/vars)")
+    vrs.add_argument("key", help="the variable name, e.g. gpu_driver")
+    vrs.add_argument("--value", help="only this value: JSON (550.90 a number, '\"550.90\"' a string), else a plain string")
+    vrs.add_argument("--hosts", action="store_true", help="list hosts and their resolved value instead of the nodes that set it")
+    vrs.add_argument("--subtree", help="only this node and below, e.g. all.commercial.prod")
+    vrs.add_argument("--revision", type=int, help="as of this revision (default: current)")
+    vrs.add_argument("--limit", type=int, help="at most this many rows (default: all)")
+    vrs.add_argument("--offset", type=int, default=0)
+    vrs.add_argument("--json", action="store_true", help="print the API's JSON document instead of a table")
     snp = sub.add_parser("snapshots", help="per-host snapshot history").add_subparsers(dest="snap_cmd", required=True)
     snp.add_parser("run", help="run background passes now until the newest revision is passed")
     snp.add_parser("status", help="newest revision, newest passed revision, last pass")
@@ -127,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
             json.dump(out, sys.stdout, indent=2, default=str)
         print()
         return 0
+    if args.cmd == "vars":
+        return _vars(args)
     if args.cmd == "snapshots":
         from ais import snapshots
 
@@ -306,6 +317,53 @@ def _export_tree(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(dump_yaml(data))
     print(f"exported {args.subtree or 'all'} at revision {rev}", file=sys.stderr)
+    return 0
+
+
+def _vars(args: argparse.Namespace) -> int:
+    """The CLI twin of ``GET /api/v1/vars`` (``--hosts``: ``/vars/hosts``), read in-process."""
+    from ais import varsearch
+    from ais.models import Revision
+
+    def show(v: object) -> str:
+        return json.dumps(v, sort_keys=True)
+
+    with session_scope() as s:
+        if args.revision is not None and s.get(Revision, args.revision) is None:
+            raise SystemExit(f"revision {args.revision} does not exist")
+        search = varsearch.host_values if args.hosts else varsearch.where_set
+        try:
+            out = search(
+                s,
+                args.key,
+                args.revision,
+                subtree=args.subtree,
+                wanted=varsearch.parse_value(args.value),
+                limit=args.limit if args.limit is not None else sys.maxsize,
+                offset=args.offset,
+            )
+        except KeyError as exc:
+            raise SystemExit(exc.args[0])
+    if args.json:
+        json.dump(out, sys.stdout, indent=2, default=str)
+        print()
+        return 0
+    rows = out["hosts"] if args.hosts else out["nodes"]
+    what = f"{args.key} ({out['strategy']}{'' if out['declared'] else ', undeclared'}) at revision {out['revision']}"
+    if args.hosts:
+        print(f"{what}: {out['total']} host(s) match, {out['with_key']} have it, {out['without_key']} do not")
+        print("values: " + ", ".join(f"{show(v['value'])} x{v['hosts']}" for v in out["values"]) + (" ..." if out["values_truncated"] else ""))
+        for r in rows:
+            origin = f"folded from {' + '.join(r['sources'])}" if "sources" in r else f"from {r['from']}"
+            print(f"{r['host']}\t{show(r['value'])}\t{origin}")
+    else:
+        print(f"{what}: set on {out['total']} node(s)")
+        for r in rows:
+            extra = f"\t(emits {show(r['effective'])})" if "effective" in r else ""
+            above = "\t(above the subtree)" if r.get("above_subtree") else ""
+            print(f"{r['path']}\t{show(r['value'])}{extra}{above}")
+    if out["total"] > out["offset"] + len(rows):
+        print(f"... {out['total'] - out['offset'] - len(rows)} more (--offset {out['offset'] + len(rows)})", file=sys.stderr)
     return 0
 
 

@@ -26,6 +26,9 @@ changes to the resolver, the exporter, snapshots or the plugin.
 5. `ansible-inventory --list` is ~23 s, but that is ansible-core computing every host's
    variables (vars plugins glob `host_vars/` 400k times, then a 17 s JSON dump). A playbook
    never does that. The plugin's own cost is the `--graph` line: 4.5 s with a warm ETag store.
+6. **Every host's value of one variable over the whole tree** (`GET /api/v1/vars/hosts`
+   without `subtree`) is 1.3–2.2 s: it loads every node in scope, like the export. With a
+   datacenter as `subtree` it is 0.03 s. See [Variable search](#variable-search-2026-11-05-issue-23).
 
 ## Results, 100k hosts on PostgreSQL 16 (compose)
 
@@ -71,6 +74,47 @@ insert: 7.2 s, 208 MB peak.
 **Machine**: Apple M3 Max (14 cores, 36 GB), Docker Desktop 29.9.2 (aarch64 VM, 14 CPUs,
 7.7 GiB). The API is the compose image (Python 3.12, one uvicorn worker), on PostgreSQL 16.15.
 The client and `ansible-inventory` run on the host (Python 3.14, ansible-core 2.21.5).
+
+### Variable search (2026-11-05, issue 23)
+
+Measured like the tree-export lines: `ais serve` on the host (Python 3.14, one worker) against
+the same generated tree in a PostgreSQL 16 container, medians of 5 from `bench/benchmark.py`
+(the two `ansible_host` lines one `curl` each). Not comparable with the compose rows above.
+
+| Operation | Seconds | Notes |
+|---|---:|---|
+| where is `app_port` set, whole tree (`GET /vars`) | 0.02 | 1,440 nodes |
+| where is `ansible_host` set, whole tree (first page of 10) | 0.95 | 100,000 nodes: a key set on every host |
+| hosts with `app_port`, whole tree (`GET /vars/hosts`, first page) | 1.29 | 100,000 hosts, 5 distinct values |
+| hosts with `app_port=9003`, whole tree | 1.40 | 19,999 hosts match |
+| hosts with `app_port`, `all.b0.prod.dc0` | 0.03 | 1,680 hosts |
+| hosts with `packages` (unique_append fold), whole tree | 1.67 | 100,000 hosts, top 50 of the distinct folds |
+| hosts with `ansible_host="10.0.48.57"`, whole tree | 2.15 | one match among 100,000 distinct values |
+
+*Where set* is one indexed query: `ix_nodevar_key_live (key, deleted_rev)` (migration 0007)
+finds the key's rows, then the node primary key (PostgreSQL plan: bitmap index scan on
+`ix_nodevar_key_live` → nested loop on `node_pkey`, 3 ms for 1,440 rows; with `subtree` a
+BitmapOr of `ix_node_path_prefix` and the `path_ltree` GiST index, 1.4 ms). Its cost grows with
+the number of nodes that set the key, not with the tree.
+
+*Hosts* reuses the resolver: `load_snapshot(subtree, keys=[key])` loads the scope's nodes and
+only that key's values, and each host takes `_emitted` of the deepest node on its chain that sets
+the key (equal to `resolve(...)["resolved"][key]`; the tests check it host by host). The cost is
+loading the scope's nodes as ORM objects, so `subtree` is the lever: 0.03 s for a datacenter.
+Paging does not make the whole tree cheaper, because the counts and the value distribution
+cover every host in scope (and a value filter has to look at all of them).
+
+Why not the stored host snapshots (`host_snapshot.resolved`)? They lag: a revision the
+background pass has not reached yet (seconds after a write at this size, longer for a burst)
+has no rows, so the answer would be stale right after the change an operator is investigating,
+and a pinned revision the pass skipped has none at all. Querying `resolved->>'key'` across
+100,000 JSONB rows would also need a GIN index on a table that grows with history, and would
+still miss `from`/`sources`. Computing at the exact revision is exact by construction and fast
+enough with a subtree; snapshots stay the source for per-host history and diffs.
+
+*Audit by key* uses `ix_audit_key (key, id)`: with 300,000 synthetic rows, `key = … ORDER BY id
+DESC LIMIT 50` is an index scan backward, 0.2 ms; adding `subtree` (the recorded path,
+`coalesce(after->>'path', before->>'path')`, unindexed) filters the key's rows, 1.8 ms.
 
 ## Before and after
 

@@ -310,3 +310,77 @@ test("revert a change set and then the revert, from the Revisions page", async (
   await expect(refused.getByRole("checkbox", { name: "Force" })).toBeVisible();
   await refused.getByRole("button", { name: "Cancel" }).click();
 });
+
+// Issue 23: where is a key set, which hosts have which value, and its history by key alone.
+// Last in the file and asserts no revision numbers; it writes its own e2e_gpu key first.
+test("variable search: where set, hosts by value, links from the tree, variables and node pages", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill(EMAIL);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("tree", { name: "Inventory tree" })).toBeVisible();
+
+  // the string "560.35" for all.commercial.prod (web01, web02, db01), "550.90" on dc1.db (db01)
+  await page.evaluate(async () => {
+    const s = JSON.parse(sessionStorage.getItem("ais.session")!);
+    const headers = { Authorization: `Bearer ${s.token}`, "Content-Type": "application/json" };
+    let rev = (await (await fetch("/api/v1/revisions?limit=1", { headers })).json())[0].id;
+    for (const [path, value] of [
+      ["all.commercial.prod", "560.35"],
+      ["all.commercial.prod.dc1.db", "550.90"],
+    ]) {
+      const node = await (await fetch(`/api/v1/nodes/${path}`, { headers })).json();
+      const r = await fetch(`/api/v1/nodes/${node.id}/vars/e2e_gpu`, { method: "PUT", headers: { ...headers, "If-Match": `"${rev}"` }, body: JSON.stringify({ value }) });
+      if (!r.ok) throw new Error(`set failed: ${r.status}`);
+      rev = (await r.json()).revision;
+    }
+  });
+
+  // --- the tree's find box searches under the selected node
+  await page.goto("/#/tree?path=all.commercial");
+  await expect(page.getByRole("heading", { level: 1, name: "commercial" })).toBeVisible();
+  await page.getByRole("searchbox", { name: "Find a variable" }).fill("e2e_gpu");
+  await page.getByRole("searchbox", { name: "Find a variable" }).press("Enter");
+  await expect(page).toHaveURL(/#\/search\?key=e2e_gpu&subtree=all\.commercial$/);
+  await expect(page.getByTestId("set-count")).toHaveText("Set on 2 nodes");
+  const setters = page.locator("table.setters tbody tr");
+  await expect(setters).toHaveCount(2);
+  await expect(page.locator('table.setters tr[data-path="all.commercial.prod.dc1.db"]')).toContainText('"550.90"');
+  await expect(page.getByTestId("host-count")).toHaveText(/^3 hosts have it · \d+ without it$/); // the lab hosts have none
+  await expect(page.getByRole("list", { name: "Values" })).toContainText('"560.35" on 2 hosts');
+  await expect(page.locator('table.host-values tr[data-host="db01"]')).toContainText("all.commercial.prod.dc1.db");
+  await expect(page.locator('table.host-values tr[data-host="web01"]')).toContainText("all.commercial.prod");
+
+  // --- a value from the distribution filters the hosts to it
+  await page.getByRole("list", { name: "Values" }).getByRole("link", { name: '"550.90"' }).click();
+  await expect(page.getByTestId("host-count")).toHaveText(/^1 of 3 hosts match/);
+  await expect(page.locator("table.host-values tbody tr")).toHaveCount(1);
+  await expect(page.locator('table.host-values tr[data-host="db01"]')).toBeVisible();
+
+  // --- a number is not the string: typed values follow YAML/JSON
+  await page.getByRole("textbox", { name: "Value" }).fill("550.90");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByTestId("set-count")).toHaveText("Set on 0 nodes");
+  await expect(page.getByTestId("host-count")).toHaveText(/^0 of 3 hosts match/);
+
+  // --- history by key alone (editor): both writes, on two different nodes
+  await page.getByRole("textbox", { name: "Value" }).fill("");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("link", { name: "history" }).click();
+  await expect(page).toHaveURL(/#\/audit\?key=e2e_gpu&subtree=all\.commercial$/);
+  await expect(page.locator("table.audit tbody tr")).toHaveCount(2);
+  await page.goto("/#/audit?key=e2e_gpu");
+  await expect(page.locator("table.audit tbody tr")).toHaveCount(2);
+  await expect(page.locator("table.audit tbody tr").first()).toContainText("variable.set");
+
+  // --- "where set" from a node page and from the Variables page
+  await page.goto("/#/tree?path=all.commercial.prod.dc1.web");
+  await page.locator('table.vars:not(.inherited) tr[data-key="http_port"]').getByRole("link", { name: "Where is http_port set" }).click();
+  await expect(page).toHaveURL(/#\/search\?key=http_port$/);
+  await expect(page.locator('table.setters tr[data-path="all.commercial.prod.dc1.web"]')).toContainText("8080");
+  await page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Variables" }).click();
+  await page.getByRole("link", { name: "Where is packages set" }).click();
+  await expect(page).toHaveURL(/#\/search\?key=packages$/);
+  await expect(page.getByRole("columnheader", { name: "Emits (folded)" })).toBeVisible();
+  await expect(page.locator('table.setters tr[data-path="all"]')).toContainText("- vim");
+});

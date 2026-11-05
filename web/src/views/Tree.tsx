@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, errorText } from "../api";
 import { Notice, Spinner } from "../components";
 import { navigate } from "../router";
@@ -251,6 +251,7 @@ export function TreeView({ path }: { path: string | null }) {
   return (
     <div className="split">
       <aside className="tree-pane">
+        <FindVariable subtree={selectedPath} />
         {rootId === null && !error && <Spinner />}
         {rootId !== null && (
           <ul role="tree" aria-label="Inventory tree" className="tree" onKeyDown={onKeyDown}>
@@ -268,5 +269,20 @@ export function TreeView({ path }: { path: string | null }) {
         {selected && <NodeDetail key={selected.id} node={selected} onStructure={onStructure} />}
       </section>
     </div>
+  );
+}
+
+/** "Where is this key set, and which hosts have which value?" under the selected node: opens
+ * the Search page (`#/search?key=…&subtree=…`). */
+function FindVariable({ subtree }: { subtree: string }) {
+  const [key, setKey] = useState("");
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    if (key) navigate("search", { key, subtree: subtree === "all" ? undefined : subtree });
+  };
+  return (
+    <form className="find-var" onSubmit={submit} role="search" aria-label="Find a variable">
+      <input type="search" value={key} onChange={(e) => setKey(e.target.value.trim())} placeholder={subtree === "all" ? "Find a variable…" : `Find a variable under ${subtree}…`} aria-label="Find a variable" title="Where it is set and each host's value, under the selected node" />
+    </form>
   );
 }

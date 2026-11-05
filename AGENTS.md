@@ -123,6 +123,20 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   footprint (paths, path+key, definition and tag names; a create/move/delete/restore covers the
   whole subtree): a later revision outside the reverted set that overlaps refuses with 409 unless
   `force`, and `force` never skips an inverse that cannot apply.
+- **Variable search answers what a playbook sees, at the exact revision** (`ais.varsearch`,
+  `GET /vars`, `GET /vars/hosts`, `ais vars`, the `variable_info` module, the UI's Search page).
+  A host's value is `resolver._emitted` of the deepest node on its chain that sets the key, over
+  `load_snapshot(keys=[key])`; never a second fold or merge implementation, and never the stored
+  host snapshots (they lag the pass). `tests/test_varsearch.py` compares it with `resolve` host by
+  host for every strategy; a resolver change that breaks that is wrong like a parity break.
+  `load_snapshot(keys=)` holds only those keys: never export or `check_export` such a snapshot.
+  `value=` is JSON with its type (`550.90` ≠ `"550.90"`; non-JSON text = a plain string); nodes
+  match their own value, hosts the whole resolved value. Read-only: no revision, no audit row.
+- **Audit rows know their variable.** `audit.record` sets `audit_log.key` for `node_variable`
+  rows (`target_id` = `"<node id>/<key>"`, key = everything after the first `/`) and
+  `variable_definition` rows (the name); migration 0007 backfilled older rows the same way.
+  `GET /audit?key=` without `node` filters on it (`ix_audit_key`). A new row kind about one
+  variable sets it the same way, through `audit.row_key`.
 - **Change ids** (`X-AIS-Change`, module option `change`, CLI `--change`) are validated in
   `RequestIdMiddleware` (`audit.CHANGE_RE`: 1-64 of `[A-Za-z0-9._:+@-]`, no `ais_` prefix; 400
   otherwise, and the message never contains the value). They are one URL path segment as they
@@ -182,7 +196,7 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
 Public repo `git-cgallagher/ansible-inventory-system` (created 2026-11-01; full new-public-repo
 baseline from `~/Code/AGENTS.md`). CI `ci.yml`: job `test` (pytest incl. parity, Python 3.12 +
 3.14, plus an `ansible-inventory --graph` smoke), job `image` (docker build) and job `collection`
-(`ansible-test sanity` + the eight module integration targets against a live `ais serve` on SQLite,
+(`ansible-test sanity` + the module integration targets against a live `ais serve` on SQLite,
 Python 3.12; the step mints an editor token into the gitignored `integration_config.yml`) and job
 `web` (`npm ci`, `npm run build` = `tsc` + Vite, then the Playwright smoke against `e2e/serve.sh`;
 the report is uploaded on failure). The `image` job builds the UI too (Node stage in the
@@ -212,6 +226,7 @@ cd examples && export AIS_DATABASE_URL=sqlite:///./ais.db
 ../.venv/bin/ais user create me@example.com --role admin   # prompts; --no-password for token-only
 export AIS_TOKEN="$(../.venv/bin/ais token create --user me@example.com)"   # shown once
 ../.venv/bin/ais serve                                 # from examples/
+../.venv/bin/ais vars packages --hosts --subtree all.federal   # variable search (GET /api/v1/vars[/hosts]); --value, --revision, --json
 ../.venv/bin/ansible-inventory --graph                 # examples/ansible.cfg sets collections_path; token from AIS_TOKEN
 docker compose -f deploy/compose.yml up --build        # PostgreSQL + API + UI on :8000 (verified 2026-11-01, phase 3: Playwright smoke passed against it)
 docker compose -f deploy/compose.yml exec api ais user create admin@example.com --role admin --no-password
@@ -245,14 +260,19 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - `server/ais/migrations/` — Alembic (`env.py` takes a connection from
   `ais.db.init_db`; `0001` = spike schema, `0002` = phase 1 incl. the PostgreSQL ltree
   branch, `0003` = `audit_log`, `0004` = `node.meta` / `node_variable.value` NOT NULL, `0005` =
-  `snapshot_pass`, `0006` = `revision.change` / `audit_log.change` + `ix_audit_revision`). On SQLite
+  `snapshot_pass`, `0006` = `revision.change` / `audit_log.change` + `ix_audit_revision`, `0007` =
+  `ix_nodevar_key_live (key, deleted_rev)` + `audit_log.key` (backfilled) + `ix_audit_key`). On SQLite
   `init_db` migrates with `PRAGMA foreign_keys=OFF` and runs `PRAGMA foreign_key_check` before
   turning them back on. `server/alembic.ini` is for hand use only.
 - `server/ais/audit.py` — `RequestIdMiddleware` (`X-Request-ID` in/out, `X-AIS-Source` →
   `source`, both as context variables), `record(session, …)`, `audit_out`, `as_utc` (query
   datetimes: naive = UTC, so `since`/`until` work on SQLite's naive strings and PostgreSQL's
   timestamptz alike).
-- `server/ais/resolver.py` — `fold`, `load_snapshot(revision, subtree, paths=)` (revision-aware
+- `server/ais/varsearch.py` — `where_set` (the nodes that set a key, own value, `effective`
+  fold, `above_subtree`) and `host_values` (each host's resolved value, `from`/`sources`, counts
+  and the `values` distribution), `parse_value`/`Wanted` (the `value=` rule), `canonical`.
+  `GET /api/v1/vars` and `/vars/hosts` in `api.py`, `cli._vars` the CLI twin.
+- `server/ais/resolver.py` — `fold`, `load_snapshot(revision, subtree, paths=, keys=)` (revision-aware
   for nodes and vars; subtree and paths filter in SQL, the subtree through `path_ltree` on
   PostgreSQL), `load_chain(revision, host=|path=)` (just the ancestor chain, which is all
   `resolve` needs), `build_export`, `resolve(host|path, overrides)`. `Snapshot` indexes children
@@ -314,7 +334,7 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - `collection/.../plugins/modules/` — `node`, `host`, `variable`, `variable_definition`,
   `node_move` (path → new_path; done when only new_path is live), `import` (tree dict; check mode =
   server dry run), `revert` (`revision` or `revert_change`, `force`; dry run first: check mode
-  stops there, 409 `already reverted` = not changed) (write, check + diff mode), `node_info`, `render_info`. `tests/integration/targets/<module>` = check,
+  stops there, 409 `already reverted` = not changed) (write, check + diff mode), `node_info`, `render_info`, `variable_info` (`/vars` + `/vars/hosts`, pages up to `limit`; its `value_counts` is the API's `values`, a name Jinja would resolve to the dict method). `tests/integration/targets/<module>` = check,
   real, repeat, failure cases with an `always:` cleanup, all against one shared server (unique
   `it_*`/`it-*` names per target). `tests/sanity/ignore-2.*.txt` only waive the GPLv3-header
   check (the collection is MIT).
@@ -326,7 +346,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   for the 409 body `{error, expected, current}`, any 401 → login), `src/router.ts` (hash routes),
   `src/views/` (`Login`, `Tree` (lazy children, ARIA tree keys), `NodeDetail`, `NodeActions`
   (add child, move/rename, delete), `VarEditor`, `Render`, `Diff`, `Revisions` (change filter,
-  Revert panel: dry run, then `If-Match` = the dry run's revision), `Audit`,
+  Revert panel: dry run, then `If-Match` = the dry run's revision), `Audit` (`key` alone, `subtree`),
+  `Search` (`#/search?key=&value=&subtree=&revision=`: where set + host values; the value box is YAML, sent as JSON; reached from the find box above the tree, "where set" on the Variables and node pages),
   `Variables` (definitions: strategy, description, JSON Schema), `Tags`, `Tokens`), `src/styles.css` (tokens, dark via
   `prefers-color-scheme`). `vite.config.ts` sets `outDir: ../server/ais/static`.
   `e2e/smoke.spec.ts` + `e2e/serve.sh` + `playwright.config.ts`.
@@ -437,6 +458,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - **Node lookups by path need the `GET /nodes/{ref}` route declared with `ref: str`**: FastAPI
   would 422 `all.commercial` against an `int` path parameter. Digits = id, anything else = path.
 
+- **`node_variable.value` is `JSON`, not `JSONB`, on PostgreSQL**, and `json = json` has no
+  operator there: a SQL `NodeVariable.value == x` passes on SQLite and fails on PostgreSQL. The
+  variable search therefore filters `value=` in Python after the indexed key lookup.
 - **Never scan `snap.nodes` per node or per host.** `Snapshot.children()` used to, and a 12k-node
   export took 24 s (110k nodes: unbounded). Use the indexes (`children`, `host`) or one pass.
 - **PostgreSQL caps a statement at 65,535 bind parameters.** A 100k-element `IN` list or a

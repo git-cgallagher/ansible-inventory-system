@@ -151,10 +151,14 @@ def load_snapshot(
     subtree: str | None = None,
     *,
     paths: list[str] | None = None,
+    keys: list[str] | None = None,
 ) -> Snapshot:
     """The tree as of ``revision`` (default: current). ``subtree`` keeps that node, its
     ancestors and everything below it; ``paths`` keeps exactly those nodes (a host's chain
-    for a render). Both filter in SQL, so a 100k-host tree is not read for one host."""
+    for a render). Both filter in SQL, so a 100k-host tree is not read for one host.
+    ``keys`` loads only those variables (every node still): a key's emitted value depends
+    only on that key's own values along the chain, so ``_emitted`` stays exact for them
+    (``ais.varsearch``). Such a snapshot must not be exported: the other keys are missing."""
     rev = revision if revision is not None else current_revision(session)
     node_filter = None
     if subtree:
@@ -171,6 +175,8 @@ def load_snapshot(
     by_path = {n.path: n for n in nodes.values()}
 
     stmt = select(NodeVariable).where(_live_at(NodeVariable, rev))
+    if keys is not None:
+        stmt = stmt.where(NodeVariable.key.in_(keys))
     if node_filter is not None:
         stmt = stmt.join(Node, Node.id == NodeVariable.node_id).where(_live_at(Node, rev), node_filter)
     vars_by_node: dict[int, dict[str, Any]] = {}

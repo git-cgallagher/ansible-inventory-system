@@ -50,7 +50,13 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
 - **Audit**: every effective write and every login/token/user event is one `audit_log` row
   (actor, action, target, before/after, source, request id, revision), written in the same
   transaction as the change. `GET /api/v1/audit` filters by actor, action (or prefix),
-  target, revision, request id and time, newest first.
+  target, revision, request id, time, a variable's key (on every node) and a subtree, newest first.
+- **Variable search.** `GET /api/v1/vars?key=gpu_driver` lists the nodes that set a key
+  themselves, with their values; `GET /api/v1/vars/hosts?key=gpu_driver&value="550.90"` lists the
+  hosts whose resolved value matches (as a playbook sees it), with the node it comes from and
+  the distribution of values. Both take `subtree`, `revision` and paging; `ais vars` and the
+  `variable_info` module are the same search, and the UI has a Search page with "where set"
+  links on the Variables and node pages.
 - **Move/rename** (`POST /api/v1/nodes/{id}/move`) rewrites the subtree's paths as new
   temporal rows, so the previous revision still shows the old tree; node ids change.
 - **Tags** (`PUT /api/v1/tags/{name}` with member paths) are extra var-less groups under `all`
@@ -111,6 +117,7 @@ export AIS_TOKEN="$(../.venv/bin/ais token create --user me@example.com)"   # pr
 ../.venv/bin/ansible-inventory --host web02
 ../.venv/bin/ais render --path all.commercial.lab.dc1.web --facts '{"os_family": "RedHat"}'
 ../.venv/bin/ais export-tree --subtree all.federal > federal.yml   # import format; --revision, --as, --no-hosts
+../.venv/bin/ais vars packages                       # where a key is set; --hosts, --value, --subtree, --revision
 ```
 
 Open `http://127.0.0.1:8000/` for the web UI once it is built (next section). API docs at
@@ -312,12 +319,13 @@ port for a TLS proxy); see section 3 of the getting-started guide.
 |---|---|---|
 | Export / render | `GET /api/v1/export` (ETag, `If-None-Match` → 304), `POST /api/v1/render` (`host` or mock `path`, `overrides`, `facts`, `revision`) | viewer |
 | Tree export | `GET /api/v1/tree?subtree=&revision=&as=&ancestor_vars=&hosts=&format=json\|yaml`: the import format (`POST /import`'s `tree`); ETag, `X-AIS-Revision` | viewer |
+| Variable search | `GET /api/v1/vars?key=&value=&subtree=&revision=&limit=&offset=`: the nodes that set the key themselves (own `value`; `effective` = the fold each emits for merge/append keys; `above_subtree` for the subtree's ancestors). `GET /api/v1/vars/hosts?…` (same parameters): each host's resolved value with `from` (and `sources` for a fold), `total`/`with_key`/`without_key` and the `values` distribution over the whole scope. `value` is JSON (`550.90` a number, `"550.90"` a string; text that is not JSON is a plain string); hosts match the whole resolved value | viewer |
 | Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions[?change=&before=&limit=]` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
 | Revert (`If-Match`) | `POST /api/v1/revisions/{id}/revert`, `POST /api/v1/changes/{change}/revert` (`force`, `dry_run`, `message`; 201): one new revision; 409 `conflict` (with `conflicts`) when a later revision changed the same things, 409 `already reverted`, 422 when nothing recorded can be inverted; `dry_run` needs no `If-Match` and adds `hosts` | editor |
 | Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts; `?dry_run=true` needs no `If-Match`), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`) | editor |
-| Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&change=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had (across moves, renames and restores) | editor |
+| Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&change=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had (across moves, renames and restores); `key=` alone = that variable's set/unset rows on every node and its definition's rows; `subtree=` = rows whose recorded path (as written then) is at or below it | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |
 | Open | `GET /healthz` (`status`, `version`, `oidc`), `GET /` + `/assets/…` (the built web UI, static files only) | none |
 
@@ -344,7 +352,8 @@ revalidation.
 The web UI has a Playwright smoke test (sign in, keyboard tree, inherited values, an edit
 that hits and recovers from a 409, render, diff, audit, a deep link; then add, move and delete
 a node with the key history surviving the move, a schema-checked definition, a tag, a token; deleting a
-group confirms its node and host counts) against a throwaway
+group confirms its node and host counts; reverting a change; searching a variable from the tree, the
+Variables page and a node page, by value, and its history by key) against a throwaway
 server on the seed tree; CI runs it in the `web` job:
 
 ```bash
@@ -365,7 +374,8 @@ cp tests/integration/integration_config.yml.template tests/integration/integrati
 
 `docs/scale.md` has the numbers for 100,000 hosts on PostgreSQL (full export 3.3–3.5 s at any
 revision; subtree export 0.06 s; render 0.02 s; the background snapshot pass 7 s after a write,
-storing only changed hosts; `ansible-inventory --graph` 4.5 s with a warm ETag store), what still costs,
+storing only changed hosts; `ansible-inventory --graph` 4.5 s with a warm ETag store; variable
+search 0.02 s for where a key is set, 1.3–1.7 s for every host's value, 0.03 s per datacenter), what still costs,
 and how to rerun them (`bench/generate.py`, `bench/benchmark.py`).
 
 ## Layout

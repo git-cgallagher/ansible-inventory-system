@@ -190,6 +190,8 @@ tr.synthetic { color: var(--muted); }
 .inline { display: flex; gap: 0.75rem; align-items: end; flex-wrap: wrap; }
 .chain { font-size: 13px; }
 .list td { white-space: nowrap; }
+.find-var { margin: 0 0 0.5rem; }
+.find-var input { width: 100%; box-sizing: border-box; }
 .audit td details { white-space: normal; }
 
 .node-actions { margin-top: 0.5rem; }
