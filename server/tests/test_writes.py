@@ -45,7 +45,7 @@ def test_var_put_closes_and_reopens_rows(editor, session, seeded):
     assert resolve(load_snapshot(session, revision=rev1), host="web01")["resolved"]["http_port"] == 9090
     # idempotent re-put: no new revision, no precondition needed
     again = editor.put(f"/api/v1/nodes/{web}/vars/http_port", json={"value": 9090})
-    assert again.status_code == 200 and again.json() == {"revision": rev1, "changed": False, "node_id": web, "key": "http_port", "value": 9090}
+    assert again.status_code == 200 and again.json() == {"revision": rev1, "changed": False, "dry_run": False, "node_id": web, "key": "http_port", "value": 9090}
     # unset
     r = editor.delete(f"/api/v1/nodes/{web}/vars/http_port", if_match=rev1)
     assert r.status_code == 200

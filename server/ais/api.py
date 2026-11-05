@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, keycheck, oidc, varsearch
+from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, impact, keycheck, oidc, varsearch
 from ais.auth import Principal, require
 from ais.db import get_session, init_db
 from ais.importer import ImportError_, import_tree_report, live_node_by_path
@@ -77,7 +77,7 @@ class RenderRequest(BaseModel):
 class ImportRequest(BaseModel):
     tree: dict[str, Any]
     message: str | None = None
-    dry_run: bool = Field(default=False, description="Run the import and roll it back: report what it would change, write nothing")
+    dry_run: bool = Field(default=False, description="Run the import and roll it back: report what it would change (counts and `impact`), write nothing")
 
 
 @app.get("/healthz")
@@ -445,7 +445,11 @@ def import_(
     """Additive bulk import under one revision. 201 when it changed something; 200 with
     ``changed: false`` (and no revision, no audit row) when the tree already matched;
     ``dry_run`` reports the same counts and rolls back (no ``If-Match`` needed)."""
-    if not req.dry_run:
+    preview = None
+    if req.dry_run:
+        api_write.lock_preview(session, if_match)
+        preview = impact.Preview(session)
+    else:
         check_precondition(session, if_match)  # the importer opens its own revision
     try:
         result = import_tree_report(session, req.tree, actor=principal.actor, message=req.message)
@@ -454,11 +458,16 @@ def import_(
     api_write.check_export(session)
     keys = api_write.review_keys(session, result.revision)
     summary = result.summary()
+    if preview is not None and result.changed:
+        return api_write.preview_answer(session, response, preview, result.revision.id, {**summary, **keys})
     if req.dry_run or not result.changed:
         session.rollback()
         rev_now = current_revision(session)
         response.headers["ETag"] = etag(rev_now)
-        return {"revision": rev_now, "changed": result.changed, "dry_run": req.dry_run, **summary, **keys}
+        out = {"revision": rev_now, "changed": result.changed, "dry_run": req.dry_run, **summary, **keys}
+        if req.dry_run:
+            out["impact"] = impact.empty()
+        return out
     rev = result.revision
     audit.record(
         session,

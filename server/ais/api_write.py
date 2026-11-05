@@ -19,11 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais import audit, keycheck, schema
+from ais import audit, impact, keycheck, schema
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.importer import ImportError_, check_kind, check_name, check_position, definition_doc, infer_kind, live_node_by_path
-from ais.locking import IfMatch, begin_write, check_precondition, etag
+from ais.audit import current_change, current_source
+from ais.locking import IfMatch, begin_write, check_precondition, etag, lock_for_write
 from ais.models import PATH_SEP, MergeStrategy, Node, NodeKind, NodeVariable, Revision, Role, TagMember, VariableDefinition
 from ais.resolver import build_export, current_revision, load_snapshot
 from ais.restore import RestoreError, restore_subtree
@@ -83,6 +84,64 @@ def check_export(session: Session) -> None:
 def _finish(response: Response, rev: Revision, body: dict[str, Any]) -> dict[str, Any]:
     response.headers["ETag"] = etag(rev.id)
     return {"revision": rev.id, "changed": True, **body}
+
+
+DRY_RUN = "Preview: run every check the write runs, report what it would change (`impact`), write nothing. No If-Match needed; one that is sent must be current (409 otherwise)"
+
+
+def lock_preview(session: Session, if_match: str | None) -> None:
+    """A dry run's lock: the write lock (so the base revision cannot move while the write is
+    applied, measured and rolled back), and ``If-Match`` checked only when the client sent
+    one, so a preview of a page that is out of date refuses like the write would (409)."""
+    if if_match is not None:
+        check_precondition(session, if_match)
+    else:
+        lock_for_write(session)
+
+
+def begin(session: Session, if_match: str | None, dry_run: bool, *, actor: str, message: str | None) -> tuple[Revision, impact.Preview | None]:
+    """``begin_write`` for a real write; for a dry run ``lock_preview``, an
+    ``impact.Preview`` taken before anything changes, and a revision that is rolled back."""
+    if not dry_run:
+        return begin_write(session, if_match, actor=actor, message=message), None
+    lock_preview(session, if_match)
+    preview = impact.Preview(session)
+    rev = Revision(actor=actor, source=current_source(), message=message, change=current_change())
+    session.add(rev)
+    session.flush()
+    return rev, preview
+
+
+def answer(session: Session, response: Response, rev: Revision, preview: impact.Preview | None, body: dict[str, Any]) -> dict[str, Any]:
+    """The tail of every write route: commit (the dependency does) and answer the new
+    revision, or, in a dry run, measure the impact, roll back and answer the base revision
+    with the same body plus ``impact``."""
+    if preview is None:
+        return _finish(response, rev, {"dry_run": False, **body})
+    return preview_answer(session, response, preview, rev.id, body)
+
+
+def preview_answer(session: Session, response: Response, preview: impact.Preview, rev_id: int, body: dict[str, Any]) -> dict[str, Any]:
+    found = preview.impact(rev_id)
+    session.rollback()
+    response.status_code = 200
+    response.headers["ETag"] = etag(preview.base)
+    return {"revision": preview.base, "changed": True, "dry_run": True, **body, "impact": found}
+
+
+def unchanged(response: Response, session: Session, dry_run: bool, body: dict[str, Any]) -> dict[str, Any]:
+    """A no-op ``PUT``: no revision, no precondition, no audit row; a dry run says so too."""
+    rev_now = current_revision(session)
+    response.headers["ETag"] = etag(rev_now)
+    out = {"revision": rev_now, "changed": False, "dry_run": dry_run, **body}
+    if dry_run:
+        out["impact"] = impact.empty()
+    return out
+
+
+def phantom(out: dict[str, Any]) -> dict[str, Any]:
+    """A node a dry run created: its id and revision were rolled back, so they are null."""
+    return {**out, "id": None, "created_rev": None}
 
 
 def _audit(session: Session, principal: Principal, rev: Revision, action: str, target_type: str, target_id: Any, before: Any, after: Any) -> None:
@@ -179,13 +238,14 @@ class NodeMove(BaseModel):
 def create_node(
     req: NodeCreate,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     if (req.parent_id is None) == (req.parent_path is None):
         raise HTTPException(422, "exactly one of parent_id or parent_path is required")
-    rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"create node {req.name}")
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=req.message or f"create node {req.name}")
     parent = _resolve_parent(session, req.parent_id, req.parent_path)
     kind = req.kind or infer_kind(parent.depth + 1, None)
     path = f"{parent.path}{PATH_SEP}{req.name}"
@@ -218,8 +278,10 @@ def create_node(
     check_export(session)
     keys = review_keys(session, rev)
     out = node_out(node, req.vars)
+    if preview is not None:
+        return preview_answer(session, response, preview, rev.id, {"node": phantom(out), **keys})
     _audit(session, principal, rev, "node.create", "node", node.id, None, out)
-    return _finish(response, rev, {"node": out, **keys})
+    return answer(session, response, rev, None, {"node": out, **keys})
 
 
 @router.patch("/nodes/{node_id}")
@@ -227,11 +289,12 @@ def patch_node(
     node_id: int,
     req: NodePatch,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"patch node {node_id}")
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=req.message or f"patch node {node_id}")
     node = get_live_node(session, node_id)
     if node.kind is NodeKind.host and req.inventory_name:
         raise HTTPException(422, "hosts have no inventory_name")
@@ -246,7 +309,7 @@ def patch_node(
     check_export(session)
     out = node_out(node, live_vars(session, node.id))
     _audit(session, principal, rev, "node.update", "node", node.id, before, node_out(node))
-    return _finish(response, rev, {"node": out})
+    return answer(session, response, rev, preview, {"node": out})
 
 
 @router.post("/nodes/{node_id}/move")
@@ -254,6 +317,7 @@ def move_node(
     node_id: int,
     req: NodeMove,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
@@ -269,7 +333,7 @@ def move_node(
         raise HTTPException(422, "give parent_id or parent_path, not both")
     if req.parent_id is None and req.parent_path is None and req.name is None:
         raise HTTPException(422, "nothing to do: give a new parent, a new name, or both")
-    rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"move node {node_id}")
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=req.message or f"move node {node_id}")
     node = get_live_node(session, node_id)
     if node.kind is NodeKind.all:
         raise HTTPException(422, "the root cannot be moved or renamed")
@@ -279,8 +343,10 @@ def move_node(
         new_parent = _resolve_parent(session, req.parent_id, req.parent_path)
     before, out, moved = move_subtree(session, rev, node, new_parent, req.name or node.name)
     check_export(session)
+    if preview is not None:  # the new ids were rolled back
+        return preview_answer(session, response, preview, rev.id, {"node": phantom(out), "moved": [{**m, "id": None} for m in moved]})
     _audit(session, principal, rev, "node.move", "node", node.id, before, {**out, "moved": moved})
-    return _finish(response, rev, {"node": out, "moved": moved})
+    return answer(session, response, rev, None, {"node": out, "moved": moved})
 
 
 def move_subtree(session: Session, rev: Revision, node: Node, new_parent: Node, new_name: str) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
@@ -391,7 +457,7 @@ def delete_node(
     response: Response,
     recursive: bool = Query(False, description="Confirm deleting a node that has descendants (the whole subtree goes)"),
     expect_count: int | None = Query(None, ge=1, description="Confirm by size: must equal the number of nodes deleted, the node included"),
-    dry_run: bool = Query(False, description="Report what would be deleted (and whether it would be refused); writes nothing, no If-Match needed"),
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
@@ -399,24 +465,17 @@ def delete_node(
     """Delete a node and its subtree (closed under one revision; earlier revisions keep them,
     and ``POST /nodes/restore`` brings them back). A node with live descendants is refused
     (409, with the counts) unless ``recursive`` or a matching ``expect_count`` confirms it."""
-    if dry_run:
-        node = get_live_node(session, node_id)
-    else:
-        rev = begin_write(session, if_match, actor=principal.actor, message=f"delete node {node_id}")
-        node = get_live_node(session, node_id)
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=f"delete node {node_id}")
+    node = get_live_node(session, node_id)
     if node.kind is NodeKind.all:
         raise HTTPException(422, "the root cannot be deleted")
     subtree = live_subtree(session, node)
     _delete_guard(node, subtree, recursive, expect_count)
     counts = {"nodes": len(subtree), "hosts": sum(1 for n in subtree if n.kind is NodeKind.host)}
     paths = [n.path for n in subtree]
-    if dry_run:
-        rev_now = current_revision(session)
-        response.headers["ETag"] = etag(rev_now)
-        return {"revision": rev_now, "changed": True, "dry_run": True, "deleted": paths, **counts}
     before = delete_subtree(session, rev, node, subtree)
     _audit(session, principal, rev, "node.delete", "node", node.id, before, None)
-    return _finish(response, rev, {"dry_run": False, "deleted": paths, **counts})
+    return answer(session, response, rev, preview, {"deleted": paths, **counts})
 
 
 def delete_subtree(session: Session, rev: Revision, node: Node, subtree: list[Node] | None = None) -> dict[str, Any]:
@@ -457,7 +516,10 @@ def restore_node(
     /audit?node=<path>`` keeps the history from before the delete. Refused: the root (422), a
     live node at ``path`` or a parent that is not live (409), a host name live elsewhere now
     (409), a value its definition now rejects (422). ``dry_run`` reports the same and rolls back."""
-    if not req.dry_run:
+    if req.dry_run:
+        lock_preview(session, if_match)
+        preview = impact.Preview(session)
+    else:
         check_precondition(session, if_match)  # the importer opens the revision
     try:
         result = restore_subtree(session, req.path, req.revision, actor=principal.actor, source=audit.current_source(), message=req.message)
@@ -468,15 +530,12 @@ def restore_node(
     check_export(session)
     keys = review_keys(session, result.revision, strict=False)  # a restore puts back what was there
     summary = result.summary()
-    if req.dry_run:
-        restored = [{"path": r["path"], "old_id": r["old_id"]} for r in result.restored]
-        session.rollback()
-        rev_now = current_revision(session)
-        response.headers["ETag"] = etag(rev_now)
-        return {"revision": rev_now, "changed": True, "dry_run": True, **summary, "restored": restored, **keys}
-    rev = result.revision
     root = session.get(Node, result.restored[0]["id"])
     out = node_out(root, live_vars(session, root.id))  # type: ignore[arg-type]
+    if req.dry_run:  # the new ids were rolled back
+        restored = [{"path": r["path"], "old_id": r["old_id"]} for r in result.restored]
+        return preview_answer(session, response, preview, result.revision.id, {"node": phantom(out), **summary, "restored": restored, **keys})
+    rev = result.revision
     _audit(
         session,
         principal,
@@ -511,6 +570,7 @@ def put_var(
     key: str,
     req: VarPut,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
@@ -522,18 +582,16 @@ def put_var(
     node = get_live_node(session, node_id)
     current = live_vars(session, node.id)
     if key in current and current[key] == req.value:
-        rev_now = current_revision(session)
-        response.headers["ETag"] = etag(rev_now)
-        return {"revision": rev_now, "changed": False, "node_id": node.id, "key": key, "value": req.value}
+        return unchanged(response, session, dry_run, {"node_id": node.id, "key": key, "value": req.value})
     _check_value(session, key, req.value, node.path)
-    rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"set {key} on {node.path}")
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=req.message or f"set {key} on {node.path}")
     _set_var(session, node, key, req.value, rev)
     session.flush()
     check_export(session)
     keys = review_keys(session, rev)
     before = {"path": node.path, "key": key, "value": current[key]} if key in current else None
     _audit(session, principal, rev, "variable.set", "node_variable", _var_target(node, key), before, {"path": node.path, "key": key, "value": req.value})
-    return _finish(response, rev, {"node_id": node.id, "key": key, "value": req.value, **keys})
+    return answer(session, response, rev, preview, {"node_id": node.id, "key": key, "value": req.value, **keys})
 
 
 @router.delete("/nodes/{node_id}/vars/{key}")
@@ -541,11 +599,12 @@ def delete_var(
     node_id: int,
     key: str,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    rev = begin_write(session, if_match, actor=principal.actor, message=f"unset {key} on node {node_id}")
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=f"unset {key} on node {node_id}")
     node = get_live_node(session, node_id)
     current = session.scalar(
         select(NodeVariable).where(NodeVariable.node_id == node.id, NodeVariable.key == key, NodeVariable.deleted_rev.is_(None))
@@ -555,7 +614,7 @@ def delete_var(
     current.deleted_rev = rev.id
     session.flush()
     _audit(session, principal, rev, "variable.unset", "node_variable", _var_target(node, key), {"path": node.path, "key": key, "value": current.value}, None)
-    return _finish(response, rev, {"node_id": node.id, "key": key})
+    return answer(session, response, rev, preview, {"node_id": node.id, "key": key})
 
 
 # ------------------------------------------------------- variable definitions
@@ -579,6 +638,7 @@ def put_definition(
     name: str,
     req: DefinitionPut,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
@@ -592,13 +652,11 @@ def put_definition(
     before = definition_out(definition) if definition is not None else None
     wanted = {"name": name, "merge_strategy": req.merge_strategy.value, "description": req.description, "json_schema": req.json_schema}
     if before == wanted:  # idempotent re-put: no revision, no precondition, no audit row
-        rev_now = current_revision(session)
-        response.headers["ETag"] = etag(rev_now)
-        return {"revision": rev_now, "changed": False, "definition": before}
-    rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"declare variable {name}")
+        return unchanged(response, session, dry_run, {"definition": before})
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=req.message or f"declare variable {name}")
     out = set_definition(session, name, wanted)
     _audit(session, principal, rev, "definition.set", "variable_definition", name, before, out)
-    return _finish(response, rev, {"definition": out})
+    return answer(session, response, rev, preview, {"definition": out})
 
 
 def set_definition(session: Session, name: str, wanted: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -628,15 +686,16 @@ def set_definition(session: Session, name: str, wanted: dict[str, Any] | None) -
 def delete_definition(
     name: str,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    rev = begin_write(session, if_match, actor=principal.actor, message=f"undeclare variable {name}")
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=f"undeclare variable {name}")
     definition = session.get(VariableDefinition, name)
     if definition is None:
         raise HTTPException(404, f"variable {name!r} is not declared")
     before = definition_out(definition)
     set_definition(session, name, None)
     _audit(session, principal, rev, "definition.delete", "variable_definition", name, before, None)
-    return _finish(response, rev, {"name": name})
+    return answer(session, response, rev, preview, {"name": name})

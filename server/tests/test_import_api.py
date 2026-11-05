@@ -21,11 +21,14 @@ def test_dry_run_then_real_then_noop(editor, viewer, session, seeded):
     rev = current_rev(editor)
     dry = editor.post("/api/v1/import", json={"tree": TREE, "dry_run": True})  # no If-Match needed
     assert dry.status_code == 200
-    assert dry.json() == {"revision": rev, "changed": True, "dry_run": True, "nodes_created": 2, "variables_set": 2, "definitions": ["queue_size"], "tags": [], "warnings": [], "warnings_total": 0}
+    body = dry.json()
+    found = body.pop("impact")
+    assert body == {"revision": rev, "changed": True, "dry_run": True, "nodes_created": 2, "variables_set": 2, "definitions": ["queue_size"], "tags": [], "warnings": [], "warnings_total": 0}
+    assert (found["total"], found["added"], found["hosts"][0]["host"], found["hosts"][0]["status"]) == (1, 1, "mq01", "added")
     assert current_rev(editor) == rev and viewer.get("/api/v1/nodes/all.commercial.prod.dc1.mq").status_code == 404
     real = editor.post("/api/v1/import", json={"tree": TREE}, if_match=rev)
     new = real.json()["revision"]  # > rev; on PostgreSQL the dry run used up a sequence value
-    assert real.status_code == 201 and new > rev and real.json() == {**dry.json(), "revision": new, "dry_run": False}
+    assert real.status_code == 201 and new > rev and real.json() == {**body, "revision": new, "dry_run": False}
     before = _audits(session)
     again = editor.post("/api/v1/import", json={"tree": TREE}, if_match=new)
     assert again.status_code == 200
