@@ -23,7 +23,7 @@ from ais import audit, impact, keycheck, schema
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.importer import ImportError_, check_kind, check_name, check_position, definition_doc, infer_kind, live_node_by_path
-from ais.audit import current_change, current_source
+from ais.audit import current_source
 from ais.locking import IfMatch, begin_write, check_precondition, etag, lock_for_write
 from ais.models import PATH_SEP, MergeStrategy, Node, NodeKind, NodeVariable, Revision, Role, TagMember, VariableDefinition
 from ais.resolver import build_export, current_revision, load_snapshot
@@ -106,10 +106,7 @@ def begin(session: Session, if_match: str | None, dry_run: bool, *, actor: str, 
         return begin_write(session, if_match, actor=actor, message=message), None
     lock_preview(session, if_match)
     preview = impact.Preview(session)
-    rev = Revision(actor=actor, source=current_source(), message=message, change=current_change())
-    session.add(rev)
-    session.flush()
-    return rev, preview
+    return preview.revision(actor=actor, source=current_source(), message=message), preview
 
 
 def answer(session: Session, response: Response, rev: Revision, preview: impact.Preview | None, body: dict[str, Any]) -> dict[str, Any]:
@@ -516,13 +513,15 @@ def restore_node(
     /audit?node=<path>`` keeps the history from before the delete. Refused: the root (422), a
     live node at ``path`` or a parent that is not live (409), a host name live elsewhere now
     (409), a value its definition now rejects (422). ``dry_run`` reports the same and rolls back."""
+    rev = None
     if req.dry_run:
         lock_preview(session, if_match)
         preview = impact.Preview(session)
+        rev = preview.revision(actor=principal.actor, source=audit.current_source(), message=req.message or f"restore {req.path}")
     else:
         check_precondition(session, if_match)  # the importer opens the revision
     try:
-        result = restore_subtree(session, req.path, req.revision, actor=principal.actor, source=audit.current_source(), message=req.message)
+        result = restore_subtree(session, req.path, req.revision, actor=principal.actor, source=audit.current_source(), message=req.message, rev=rev)
     except RestoreError as exc:
         raise HTTPException(exc.status, str(exc)) from exc
     except ImportError_ as exc:

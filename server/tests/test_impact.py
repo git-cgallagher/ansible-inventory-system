@@ -282,6 +282,23 @@ def test_dry_run_refuses_exactly_what_the_write_refuses(editor, engine, seeded, 
     assert current_rev(editor) == rev
 
 
+def test_dry_runs_take_no_revision_id(editor, seeded):
+    """A dry run's revision is ``base + 1`` set explicitly under the write lock, so on
+    PostgreSQL it uses up no sequence value: the next real write is still ``base + 1``."""
+    rev = current_rev(editor)
+    web = _id(editor, WEB)
+    assert editor.put(f"/api/v1/nodes/{web}/vars/http_port", json={"value": 1}, params={"dry_run": "true"}).status_code == 200
+    assert editor.post("/api/v1/import", json={"tree": {"all": {"vars": {"x_dry": 1}}}, "dry_run": True}).status_code == 200
+    assert editor.post(f"/api/v1/nodes/{web}/move", json={"name": "www"}, params={"dry_run": "true"}).status_code == 200
+    assert editor.delete(f"/api/v1/nodes/{_id(editor, DC1)}", params={"dry_run": "true", "recursive": "true"}).status_code == 200
+    r = editor.put(f"/api/v1/nodes/{web}/vars/http_port", json={"value": 1}, if_match=rev)
+    assert r.status_code == 200 and r.json()["revision"] == rev + 1
+    deleted = editor.delete(f"/api/v1/nodes/{_id(editor, DC1)}", params={"recursive": "true"}, if_match=rev + 1).json()["revision"]
+    assert editor.post("/api/v1/nodes/restore", json={"path": DC1, "dry_run": True}).status_code == 200
+    assert editor.post(f"/api/v1/revisions/{deleted}/revert", json={"dry_run": True}).status_code == 200
+    assert editor.post("/api/v1/nodes/restore", json={"path": DC1}, if_match=deleted).json()["revision"] == deleted + 1
+
+
 def test_stale_if_match_refuses_a_dry_run(editor, seeded):
     rev = current_rev(editor)
     web = _id(editor, WEB)

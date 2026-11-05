@@ -27,8 +27,8 @@ def test_dry_run_then_real_then_noop(editor, viewer, session, seeded):
     assert (found["total"], found["added"], found["hosts"][0]["host"], found["hosts"][0]["status"]) == (1, 1, "mq01", "added")
     assert current_rev(editor) == rev and viewer.get("/api/v1/nodes/all.commercial.prod.dc1.mq").status_code == 404
     real = editor.post("/api/v1/import", json={"tree": TREE}, if_match=rev)
-    new = real.json()["revision"]  # > rev; on PostgreSQL the dry run used up a sequence value
-    assert real.status_code == 201 and new > rev and real.json() == {**body, "revision": new, "dry_run": False}
+    new = real.json()["revision"]
+    assert real.status_code == 201 and new == rev + 1  # the dry run took no sequence value, on PostgreSQL either and real.json() == {**body, "revision": new, "dry_run": False}
     before = _audits(session)
     again = editor.post("/api/v1/import", json={"tree": TREE}, if_match=new)
     assert again.status_code == 200

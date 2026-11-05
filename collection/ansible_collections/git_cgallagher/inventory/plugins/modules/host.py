@@ -145,7 +145,7 @@ def main():
             module.exit_json(changed=False, host={}, revision=client.current_revision(), key_warnings=[])
         changed, _deleted = remove_node(client, module, existing["path"])
         impact = merge_impacts(client.impacts)
-        module.exit_json(changed=changed, host={}, key_warnings=[], impact=impact,
+        module.exit_json(changed=changed, host={}, key_warnings=[], **({"impact": impact} if impact else {}),
                          revision=client.revision if client.revision is not None else client.current_revision(),
                          diff=with_impact({"before": {"path": existing["path"]}, "after": {}}, impact))
 
@@ -160,7 +160,8 @@ def main():
             variables[key] = p[key]
     changed, node, diff = ensure_node(client, module, path, kind="host", variables=variables, purge_vars=p["purge_vars"])
     revision = client.revision if client.revision is not None else client.current_revision()
-    module.exit_json(changed=changed, host=node, diff=diff, revision=revision, key_warnings=client.key_warnings, impact=merge_impacts(client.impacts))
+    impact = merge_impacts(client.impacts)  # check mode only
+    module.exit_json(changed=changed, host=node, diff=diff, revision=revision, key_warnings=client.key_warnings, **({"impact": impact} if impact else {}))
 
 
 if __name__ == "__main__":

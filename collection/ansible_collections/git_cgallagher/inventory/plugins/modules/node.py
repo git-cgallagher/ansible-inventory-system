@@ -153,14 +153,15 @@ def main():
     if p["state"] == "absent":
         changed, deleted = remove_node(client, module, p["path"], recursive=p["recursive"])
         impact = merge_impacts(client.impacts)
-        module.exit_json(changed=changed, node={}, deleted=deleted, key_warnings=[], impact=impact,
+        module.exit_json(changed=changed, node={}, deleted=deleted, key_warnings=[], **({"impact": impact} if impact else {}),
                          revision=client.revision if client.revision is not None else client.current_revision(),
                          diff=with_impact({"before": {"path": p["path"], "deleted": deleted} if changed else {}, "after": {}}, impact))
     changed, node, diff = ensure_node(
         client, module, p["path"], kind=p["kind"], inventory_name=p["inventory_name"], meta=p["meta"], variables=p["vars"], purge_vars=p["purge_vars"]
     )
     revision = client.revision if client.revision is not None else client.current_revision()
-    module.exit_json(changed=changed, node=node, diff=diff, revision=revision, key_warnings=client.key_warnings, impact=merge_impacts(client.impacts))
+    impact = merge_impacts(client.impacts)  # check mode only
+    module.exit_json(changed=changed, node=node, diff=diff, revision=revision, key_warnings=client.key_warnings, **({"impact": impact} if impact else {}))
 
 
 if __name__ == "__main__":

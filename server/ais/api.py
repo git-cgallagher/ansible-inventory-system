@@ -445,14 +445,15 @@ def import_(
     """Additive bulk import under one revision. 201 when it changed something; 200 with
     ``changed: false`` (and no revision, no audit row) when the tree already matched;
     ``dry_run`` reports the same counts and rolls back (no ``If-Match`` needed)."""
-    preview = None
+    preview = rev = None
     if req.dry_run:
         api_write.lock_preview(session, if_match)
         preview = impact.Preview(session)
+        rev = preview.revision(actor=principal.actor, source="import", message=req.message or "bulk import")
     else:
         check_precondition(session, if_match)  # the importer opens its own revision
     try:
-        result = import_tree_report(session, req.tree, actor=principal.actor, message=req.message)
+        result = import_tree_report(session, req.tree, actor=principal.actor, message=req.message, rev=rev)
     except ImportError_ as exc:
         raise HTTPException(422, str(exc)) from exc
     api_write.check_export(session)

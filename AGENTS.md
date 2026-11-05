@@ -539,9 +539,10 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `DROP`, rename); the `DROP` of `node` cascaded and emptied `node_variable` (found by
   `test_0004_fills_spike_nulls`). `PRAGMA foreign_keys` is a no-op inside a transaction, so
   `init_db` sets it on the connection before `begin()`. Any new batch migration relies on that.
-- **Revision ids are increasing, not contiguous on PostgreSQL.** A refused write, a no-op
-  `POST /import` and an import `dry_run` roll back a `Revision` insert, which still uses up a
-  sequence value. Never assume `next == current + 1` in a test (SQLite reuses the id, so a
+- **Revision ids are increasing, not contiguous on PostgreSQL.** A refused write and a no-op
+  `POST /import` roll back a `Revision` insert, which still uses up a sequence value. Dry runs
+  don't: `impact.Preview.revision` sets the id to `base + 1` explicitly (safe under the write
+  lock), so a preview never makes the next revision number jump. Never assume `next == current + 1` in a test (SQLite reuses the id, so a
   test that does passes locally and fails with `AIS_TEST_DATABASE_URL`).
 - **Definitions and tags are not temporal, so a tree export at an old revision carries today's
   declarations and today's tag names/descriptions**, with the memberships of the nodes live at

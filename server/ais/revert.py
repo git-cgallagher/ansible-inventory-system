@@ -631,9 +631,12 @@ def revert(
     if message is None:
         first = session.get(Revision, revisions[0])
         message = f"revert {label}" + (f": {first.message}" if change is None and first is not None and first.message else "")
-    rev = Revision(actor=actor, source=source, message=message, change=current_change())
-    session.add(rev)
-    session.flush()
+    if preview is not None:
+        rev = preview.revision(actor=actor, source=source, message=message)
+    else:
+        rev = Revision(actor=actor, source=source, message=message, change=current_change())
+        session.add(rev)
+        session.flush()
     ctx = _Ctx(session=session, rev=rev, actor=actor, source=source)
     for row in rows:
         _invert(ctx, row)

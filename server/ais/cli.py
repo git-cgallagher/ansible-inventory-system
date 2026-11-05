@@ -181,7 +181,8 @@ def _import(args: argparse.Namespace) -> int:
         lock_for_write(s)
         preview = impact.Preview(s) if args.dry_run else None
         try:
-            result = import_tree_report(s, tree, actor="cli", message=args.message)
+            rev = preview.revision(actor="cli", source="import", message=args.message or "bulk import") if preview else None
+            result = import_tree_report(s, tree, actor="cli", message=args.message, rev=rev)
             build_export(load_snapshot(s))
             keys = keycheck.review(s, result.revision.id, strict=keycheck.strict_keys())
         except (ImportError_, ValueError) as exc:  # keycheck.UndeclaredKeys is a ValueError
@@ -234,7 +235,8 @@ def _restore(args: argparse.Namespace) -> int:
         lock_for_write(s)
         preview = impact.Preview(s) if args.dry_run else None
         try:
-            result = restore_subtree(s, args.path, args.revision, actor="cli", source="cli", message=args.message)
+            rev = preview.revision(actor="cli", source="cli", message=args.message or f"restore {args.path}") if preview else None
+            result = restore_subtree(s, args.path, args.revision, actor="cli", source="cli", message=args.message, rev=rev)
             build_export(load_snapshot(s))
         except (RestoreError, ImportError_, ValueError) as exc:
             s.rollback()
