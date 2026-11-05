@@ -363,13 +363,13 @@ def test_a_schema_tightened_since_refuses_the_old_value(editor, session, built):
 
 def test_change_ids_are_validated(editor, session, built):  # noqa: F811
     rev = built
-    for bad in ("has space", "x" * 65, "ais_abcdefabcdef", "-leading", "quote\"d"):
+    for bad in ("has space", "x" * 65, "ais_abcdefabcdef", "-leading", "quote\"d", "a/b", "a#b"):
         r = editor.put(f"/api/v1/nodes/{_id(editor, POD)}/vars/owner", json={"value": 1}, headers={"X-AIS-Change": bad}, if_match=rev)
         assert r.status_code == 400, bad
         assert r.json()["detail"]["error"] == "invalid change id"
         assert bad not in r.json()["detail"]["message"]
-    r = editor.put(f"/api/v1/nodes/{_id(editor, POD)}/vars/owner", json={"value": 1}, headers={"X-AIS-Change": "CHG0012345/deploy#3"}, if_match=rev)
-    assert r.status_code == 200 and session.get(Revision, r.json()["revision"]).change == "CHG0012345/deploy#3"
+    r = editor.put(f"/api/v1/nodes/{_id(editor, POD)}/vars/owner", json={"value": 1}, headers={"X-AIS-Change": "CHG0012345:deploy.3"}, if_match=rev)
+    assert r.status_code == 200 and session.get(Revision, r.json()["revision"]).change == "CHG0012345:deploy.3"
     # reads with a valid header are fine and record nothing
     assert editor.get("/api/v1/revisions", headers={"X-AIS-Change": "SRE-1"}).status_code == 200
 

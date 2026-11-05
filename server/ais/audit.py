@@ -44,11 +44,11 @@ SOURCES = ("api", "module", "ui")  # what a client may claim; import/login/cli a
 _MAX_REQUEST_ID = 64
 
 # A change id: a ticket or change number, not free text. 1-64 characters, starting with a
-# letter or digit, then letters, digits and ``. _ : / # + @ -`` (``SRE-1234``,
-# ``CHG0012345``, ``deploy/2026-11-05#3``). No spaces or quotes, so it is safe in a URL path,
-# a header and a log line.
-CHANGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#+@-]{0,63}$")
-CHANGE_RULE = "1-64 characters: letters, digits and . _ : / # + @ - (starting with a letter or digit)"
+# letter or digit, then letters, digits and ``. _ : + @ -`` (``SRE-1234``, ``CHG0012345``,
+# ``deploy:2026-11-05.3``). No spaces, quotes, ``/`` or ``#``, so it is one URL path segment
+# as is (``POST /changes/{change}/revert``), a header value and a safe log token.
+CHANGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,63}$")
+CHANGE_RULE = "1-64 characters: letters, digits and . _ : + @ - (starting with a letter or digit)"
 
 
 def change_error(value: str) -> str | None:

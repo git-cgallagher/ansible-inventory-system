@@ -103,6 +103,17 @@ def _overlap(a: Touch, b: Touch) -> bool:
     return False
 
 
+def _specific(a: Touch, b: Touch) -> Touch:
+    """Of two overlapping touches, the narrower one (what the message should name)."""
+    if a[0] == "tree" and b[0] != "tree":
+        return b
+    if b[0] == "tree" and a[0] != "tree":
+        return a
+    if a[0] == "tree" and b[0] == "tree":
+        return a if len(a[1]) >= len(b[1]) else b
+    return a
+
+
 def _describe_touch(t: Touch) -> str:
     if t[0] == "var":
         return f"{t[2]} on {t[1]}"
@@ -273,7 +284,7 @@ def find_conflicts(session: Session, revisions: list[int], rows: list[AuditLog])
                     "change": lr.change,
                     "reverting": r.revision,
                     "reverting_action": r.action,
-                    "on": _describe_touch(hit[0]),
+                    "on": _describe_touch(_specific(*hit)),
                     "already_reverted": lr.revision in reverted_by.get(r.revision, set()),  # type: ignore[arg-type]
                 }
             )

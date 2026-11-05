@@ -26,6 +26,17 @@ options:
     description: HTTP timeout in seconds.
     type: int
     default: 30
+  change:
+    description:
+      - Change id sent as the C(X-AIS-Change) header and recorded on every revision this task creates (modules that only
+        read create none), for example a ticket number such as C(SRE-1234).
+      - Give every task of one change the same id (C(module_defaults) for the C(git_cgallagher.inventory.inventory)
+        group does that for a whole play); C(GET /api/v1/revisions?change=SRE-1234) lists them and
+        M(git_cgallagher.inventory.revert) with O(git_cgallagher.inventory.revert#module:revert_change) undoes them
+        together.
+      - 1 to 64 characters from letters, digits and C(._:+@-), starting with a letter or digit. Defaults to the
+        E(AIS_CHANGE) environment variable.
+    type: str
 """
 
     # Options shared by the modules that write.
