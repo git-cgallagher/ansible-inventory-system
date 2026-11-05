@@ -225,6 +225,22 @@ From a checkout: `ansible-galaxy collection install
 ./collection/ansible_collections/git_cgallagher/inventory` (or point `collections_path` at
 `collection/`, as `examples/ansible.cfg` does). The collection and the server share a version.
 
+Consumers should run with this in `ansible.cfg`, as `examples/ansible.cfg` does:
+
+```ini
+[inventory]
+any_unparsed_is_failed = True
+```
+
+Without it, an inventory that fails to load (server down, bad token, a pinned revision that
+doesn't exist, a file name the plugin doesn't accept) is only a warning, and a playbook exits
+0 having run on no hosts. Under `[defaults]` Ansible ignores the key silently. Leave Ansible's
+inventory cache (`cache: true`) off in deploy pipelines: while it is fresh (`cache_timeout`,
+default 3600 s) the plugin never asks the server, so changes, a new revision pin and an outage
+all go unnoticed (the plugin warns on each such run). The plugin's own ETag store only
+revalidates and never serves a copy when the server is down. Details: section 8 of
+[the getting-started guide](docs/getting-started.md).
+
 ### PostgreSQL (compose)
 
 ```bash

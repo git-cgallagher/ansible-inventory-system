@@ -10,13 +10,27 @@
 - `deploy/compose.prod.yml`: production overrides for compose (database password from
   `AIS_DB_PASSWORD`, API on loopback for a TLS proxy, `FORWARDED_ALLOW_IPS: "*"`, restart
   policies).
+- The inventory plugin warns whenever it answers from Ansible's inventory cache (`cache:
+  true`) instead of the server: "inventory revision N comes from Ansible's inventory cache".
+  That cache is keyed by the file's path only, so it used to serve hosts up to `cache_timeout`
+  old without a word, with the server down or a new `revision:` pinned (#19, fail-closed
+  inventory).
 
 ### Changed
 - The server requires ansible-core >= 2.19 (it already needed 2.19's trusted-template API to
   run; now pip refuses an older one). The collection still supports ansible-core 2.18.
 - `.gitignore` ignores `*.token`.
+- `examples/ansible.cfg`, the getting-started guide, the README and the plugin's docs set
+  `any_unparsed_is_failed = True` under `[inventory]`. Without it a playbook whose inventory
+  fails to load (server down, bad token, unknown revision pin) exits 0 having run on no hosts.
+  Under `[defaults]` Ansible ignores the key silently.
 
 ### Fixed
+- The getting-started guide said Ansible's inventory cache "also works on top of" the ETag
+  store. It does, but it serves stale hosts silently while the server is down; the guide and
+  the plugin's docs now say to leave `cache` off in deploy pipelines, and the plugin's example
+  no longer sets it. The guide's troubleshooting table covers "no hosts matched", "could not
+  be verified by inventory plugin" and the new cache warning.
 - `ais import` now behaves like `POST /api/v1/import`. It takes the write lock and refuses a
   tree that would no longer export. When nothing changed it writes no revision: it used to
   record an empty one on every run. A real import now leaves its `import` audit row; the CLI

@@ -96,3 +96,37 @@ def test_empty_etag_store_disables_it(server, inventory_file, tmp_path, monkeypa
     env = dict(os.environ, AIS_ETAG_STORE="", ANSIBLE_COLLECTIONS_PATH=str(COLLECTION_PATH), ANSIBLE_INVENTORY_UNPARSED_FAILED="1")
     subprocess.run([_ansible_inventory_bin(), "-i", str(inventory_file), "--graph"], check=True, capture_output=True, env=env, cwd=cwd)
     assert list(cwd.iterdir()) == []
+
+
+def test_inventory_cache_hit_warns(server, tmp_path):
+    """With ``cache: true`` Ansible answers from its inventory cache without asking the server,
+    whatever the file now says (the cache key is the file's path only). The plugin must say so:
+    that run can be up to ``cache_timeout`` stale, and a dead server goes unnoticed."""
+    import os
+    import subprocess
+
+    from tests.conftest import _ansible_inventory_bin
+
+    inv = tmp_path / "ais.yml"
+    cache_opts = f"cache: true\ncache_plugin: jsonfile\ncache_connection: {tmp_path / 'invcache'}\n"
+    inv.write_text(f"plugin: git_cgallagher.inventory.db\nurl: {server}\n{cache_opts}")
+    env = dict(os.environ, ANSIBLE_COLLECTIONS_PATH=str(COLLECTION_PATH), ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED="1")
+
+    def run(*args):
+        return subprocess.run([_ansible_inventory_bin(), "-i", str(inv), "--list", *args], capture_output=True, text=True, env=env)
+
+    first = run()
+    assert first.returncode == 0, first.stderr
+    assert "inventory cache" not in " ".join(first.stderr.split())
+    # point the file at a port nothing listens on: the cached copy is still served, with a warning
+    inv.write_text(f"plugin: git_cgallagher.inventory.db\nurl: http://127.0.0.1:1\n{cache_opts}")
+    second = run()
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout)["_meta"]["hostvars"].keys() == json.loads(first.stdout)["_meta"]["hostvars"].keys()
+    assert "web01" in json.loads(second.stdout)["_meta"]["hostvars"]
+    warning = " ".join(second.stderr.split())
+    assert "comes from Ansible's inventory cache" in warning and "the server was not asked" in warning
+    # --flush-cache really asks the server, and with any_unparsed_is_failed a dead one fails the run
+    third = run("--flush-cache")
+    assert third.returncode != 0
+    assert "inventory cache" not in " ".join(third.stderr.split())
