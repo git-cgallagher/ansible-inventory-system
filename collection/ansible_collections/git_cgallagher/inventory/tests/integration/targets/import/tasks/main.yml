@@ -113,6 +113,7 @@
       git_cgallagher.inventory.node:
         path: all.it_import
         state: absent
+        recursive: true
     - name: Current revision for the tag cleanup
       ansible.builtin.uri:
         url: "{{ ais_url }}/api/v1/revisions?limit=1"

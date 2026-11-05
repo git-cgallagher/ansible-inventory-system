@@ -127,11 +127,26 @@
           - stale is failed and stale.status == 409 and stale.current_revision > 1 and 'moved' in stale.msg
           - collision is failed and collision.status == 409 and 'collision' in collision.msg
 
-    - name: Delete in check mode
+    - name: Delete a group with a child, without recursive (refused)
+      git_cgallagher.inventory.node:
+        path: all.commercial.prod.dc1.it_cache
+        state: absent
+      register: refused
+      ignore_errors: true
+    - name: The same in check mode (the server's dry run refuses too)
       git_cgallagher.inventory.node:
         path: all.commercial.prod.dc1.it_cache
         state: absent
       check_mode: true
+      register: refused_chk
+      ignore_errors: true
+    - name: Delete in check mode, with diff
+      git_cgallagher.inventory.node:
+        path: all.commercial.prod.dc1.it_cache
+        state: absent
+        recursive: true
+      check_mode: true
+      diff: true
       register: del_chk
     - name: Still there
       git_cgallagher.inventory.node_info:
@@ -141,21 +156,46 @@
       git_cgallagher.inventory.node:
         path: all.commercial.prod.dc1.it_cache
         state: absent
+        recursive: true
       register: deleted
     - name: Delete again
       git_cgallagher.inventory.node:
         path: all.commercial.prod.dc1.it_cache
         state: absent
+        recursive: true
       register: deleted2
     - ansible.builtin.assert:
         that:
+          - refused is failed and refused.status == 409
+          - "'1 node(s) below it' in refused.msg and 'recursive=true' in refused.msg"
+          - refused.nodes == 2 and refused.hosts == 1
+          - refused_chk is failed and refused_chk.status == 409
           - del_chk is changed
+          - del_chk.deleted == ['all.commercial.prod.dc1.it_cache', 'all.commercial.prod.dc1.it_cache.it_cache01']
+          - del_chk.diff.before.deleted | length == 2
           - still.exists
           - deleted is changed
           - deleted.deleted | length == 2
           - deleted2 is not changed
+    - name: A leaf needs no recursive
+      git_cgallagher.inventory.node:
+        path: all.commercial.prod.dc1.it_leaf
+      register: leaf
+    - name: Delete the leaf
+      git_cgallagher.inventory.node:
+        path: all.commercial.prod.dc1.it_leaf
+        state: absent
+      register: leaf_deleted
+    - ansible.builtin.assert:
+        that:
+          - leaf is changed
+          - leaf_deleted is changed and leaf_deleted.deleted == ['all.commercial.prod.dc1.it_leaf']
   always:
     - name: Cleanup
       git_cgallagher.inventory.node:
-        path: all.commercial.prod.dc1.it_cache
+        path: "{{ item }}"
         state: absent
+        recursive: true
+      loop:
+        - all.commercial.prod.dc1.it_cache
+        - all.commercial.prod.dc1.it_leaf

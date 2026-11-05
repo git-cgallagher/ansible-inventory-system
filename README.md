@@ -58,9 +58,15 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
 - **Tree export** (`GET /api/v1/tree`, `ais export-tree`) writes the tree or one subtree, at
   any revision, in the format `ais import` and `POST /api/v1/import` read: nodes with their
   kinds and own values, the declarations they use, and tags. Importing it reproduces the
-  inventory, so backup, restore (export a deleted subtree at an earlier revision, import it),
-  cloning (`as=` re-roots the copy, `hosts=false` leaves hosts out) and keeping the tree in Git
+  inventory, so backup, cloning (`as=` re-roots the copy, `hosts=false` leaves hosts out) and keeping the tree in Git
   are one call each. The import format takes `tags:` (member paths, additive).
+- **Delete asks first, restore is one call.** `DELETE /api/v1/nodes/{id}` refuses (409, with
+  the node and host counts) to delete a node that has descendants unless the call says
+  `recursive=true` or gives `expect_count` = the subtree's size; `dry_run=true` lists what would
+  go. `POST /api/v1/nodes/restore {path, revision?}` (or `ais restore PATH`) brings a deleted
+  subtree back as it was at a revision (default: the last one before the delete), with its own
+  values, node meta and tag memberships, and links the new node ids to the old ones so the audit
+  history from before the delete stays visible. It never overwrites a live node.
 - **Variable schemas**: a definition's `json_schema` is enforced on every write of that key
   (API, import, modules), and a new schema is refused while any live value violates it.
 - **Hardening**: requests with a bad bearer token are audited (`token.rejected`, never the
@@ -136,7 +142,8 @@ npm run dev                            # or: hot reload on :5173, API proxied to
 - **Render**: a real host, or a mock host at any path, with optional overrides and facts;
   shows each resolved value, where it came from, the Jinja result and per-key template errors.
 - **Structure** (editor role): add a child, move or rename a node with its subtree, delete a
-  subtree, from the node page.
+  subtree (the dialog shows how many nodes and hosts go and confirms that count), from the node
+  page.
 - **Variables**: declare a variable's merge strategy, description and JSON Schema.
 - **Tags**: create, edit and delete tags and their member paths.
 - **Tokens**: mint API tokens for the plugin and the modules (capped role, expiry; the secret is
@@ -269,8 +276,8 @@ port for a TLS proxy); see section 3 of the getting-started guide.
 | Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
-| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH/DELETE /nodes/{id}`, `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`) | editor |
-| Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had | editor |
+| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts; `?dry_run=true` needs no `If-Match`), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`) | editor |
+| Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had (across moves, renames and restores) | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |
 | Open | `GET /healthz` (`status`, `version`, `oidc`), `GET /` + `/assets/…` (the built web UI, static files only) | none |
 
@@ -293,7 +300,8 @@ revalidation.
 
 The web UI has a Playwright smoke test (sign in, keyboard tree, inherited values, an edit
 that hits and recovers from a 409, render, diff, audit, a deep link; then add, move and delete
-a node with the key history surviving the move, a schema-checked definition, a tag, a token) against a throwaway
+a node with the key history surviving the move, a schema-checked definition, a tag, a token; deleting a
+group confirms its node and host counts) against a throwaway
 server on the seed tree; CI runs it in the `web` job:
 
 ```bash

@@ -45,7 +45,10 @@ function describe(status: number, detail: unknown): string {
       .map((d: { loc?: unknown[]; msg?: string }) => `${(d.loc ?? []).slice(1).join(".")}: ${d.msg ?? ""}`)
       .join("; ");
   }
-  if (detail && typeof detail === "object") return JSON.stringify(detail);
+  if (detail && typeof detail === "object") {
+    const message = (detail as { message?: unknown }).message;
+    return typeof message === "string" ? message : JSON.stringify(detail);
+  }
   return `HTTP ${status}`;
 }
 

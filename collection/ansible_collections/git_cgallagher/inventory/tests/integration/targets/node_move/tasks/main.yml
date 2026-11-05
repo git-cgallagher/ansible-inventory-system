@@ -99,6 +99,7 @@
       git_cgallagher.inventory.node:
         path: "{{ item }}"
         state: absent
+        recursive: true
       loop:
         - all.commercial.prod.dc1.it_move
         - all.commercial.lab.dc1.it_move

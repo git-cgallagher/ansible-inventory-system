@@ -47,7 +47,12 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   explicit stack: never make it recursive again (it died near depth 1,000).
 - **Nodes and variables are temporal rows**; never UPDATE a value in place or hard-delete —
   close the row with `deleted_rev` and insert a new one under a new `Revision`. `DELETE
-  /nodes/{id}` closes the whole subtree and its live variables. A pinned revision therefore
+  /nodes/{id}` closes the whole subtree and its live variables, **but only when confirmed**:
+  a node with live descendants needs `recursive=true` or `expect_count` = subtree size (node
+  included; a wrong count refuses even with `recursive`), else 409 `subtree not empty` with
+  `message`/`nodes`/`hosts` (`api_write._delete_guard`). `dry_run=true` is a pure read (no
+  revision opened, no `If-Match`) and applies the same guard. Never add a delete path that skips it
+  (the module sends `recursive` only when the task says so; the UI sends the previewed count). A pinned revision therefore
   sees exactly the tree of that moment. (`inventory_name`, `meta`, variable *definitions* and
   **tags** (`tag`, `tag_member`) are the documented exceptions: not temporal, changes apply to
   every revision's export. Tag writes still lock, need `If-Match` and open a revision.)
@@ -83,8 +88,9 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   revision, clone with `as`). Anything new the tree can hold that changes the export (a
   column, a node attribute) must be exportable *and* importable, or be listed as left out in
   the guide (node `meta` is, today). A subtree's ancestors are structure only unless
-  `ancestor_vars`: a restore must not roll the parents back. Restore code (issue 20) calls
-  `export_tree(session, revision, subtree)` then `import_tree_report`; no HTTP needed.
+  `ancestor_vars`: a restore must not roll the parents back. `ais.restore.restore_subtree`
+  (`POST /nodes/restore`, `ais restore`) is exactly `export_tree(session, R, path)` then
+  `import_tree_report` in-process, plus `meta` (which the format leaves out) and the id map.
 - **The CLI writes like the API.** `ais import` (`cli._import`) takes `lock_for_write`, checks the
   export, drops a no-op (no revision) and records one `import` audit row (`tests/test_cli.py`). A
   new CLI write command does the same.
@@ -132,8 +138,21 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   *together with* the list and send that as `If-Match`. Tokens are not inventory writes (no
   `If-Match`); revoking the token the page runs on signs the user out.
 - **History links go by path, not id**: `#/audit?node=<path>&key=<key>`. The server
-  (`GET /audit?node=&key=`, `audit.node_lineage`) walks the `node.move` rows back through every
-  id the node had (its own moves and its ancestors'), so the history survives moves and renames.
+  (`GET /audit?node=&key=`, `audit.node_lineage`) walks the `node.move` (`after.moved`) and
+  `node.restore` (`after.restored`) rows back through every id the node had (its own moves and
+  its ancestors', and the deleted rows a restore replaced), so the history survives moves,
+  renames, deletes and restores. Both maps cover the **whole subtree**, `[{old_id, id, …}]`; a
+  new write that re-creates nodes under new ids must record one too, or the history breaks.
+- **A restore makes new rows; it never revives deleted ones.** A node row is live over one
+  interval `[created_rev, deleted_rev)`; clearing `deleted_rev` would make every revision between
+  the delete and the restore show the subtree (and `host_path` find its hosts there). It
+  refuses, before writing: the root (422), a live node at the path (409; never overwrites), a
+  parent that is not live (409, naming the highest deleted ancestor: otherwise the export's
+  spine would recreate it var-less), host names live elsewhere (409), values a tightened
+  definition rejects (422). The default revision is the newest `Revision.id` **below** the
+  latest `deleted_rev` at the path, never `deleted_rev - 1` (ids are not contiguous on
+  PostgreSQL). The revision's `source` is the client's (`api`/`ui`/`module`/`cli`), not the
+  importer's `import`.
 
 ## Repo and CI
 Public repo `git-cgallagher/ansible-inventory-system` (created 2026-11-01; full new-public-repo
@@ -238,6 +257,10 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   hosts=)` (the import format; `TreeExportError` for a bad `as`), `dump_yaml` (libyaml when
   present, fixed key order, no folding). Definitions: all for the whole tree, the used ones
   for a subtree; tags: members inside the subtree only (re-rooted with `as`).
+- `server/ais/restore.py` — `restore_subtree(session, path, revision, actor=, source=)` →
+  `RestoreResult` (`restored` = `[{old_id, id, path}]`, `summary()`), `RestoreError(status,
+  message)`, `last_live_revision`. The caller locks, runs `check_export`, records the
+  `node.restore` row (`after.restored` is what `node_lineage` reads) or rolls back a dry run.
 - `server/ais/importer.py` — YAML tree → nodes/vars under one revision; kind inferred
   from depth unless declared; rejects bad kind order and names, values their schema rejects.
   `import_tree_report` returns an `ImportResult` (counts, `tags_changed`, `changed`, `summary()`;
@@ -248,7 +271,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   revalidation; `etag_store` option). Accepts `inventory.yml` / `ais.yml` file names.
 - `collection/.../plugins/module_utils/client.py` — `Client` (token/url from options or
   `AIS_TOKEN`/`AIS_URL`, `request`, `write` with `If-Match`, 409 stale vs other 409, 401/403),
-  `ensure_node`/`remove_node` (shared by `node` and `host`). `doc_fragments/api.py` holds the
+  `ensure_node`/`remove_node` (shared by `node` and `host`; `remove_node(recursive=)`, check
+  mode = the server's delete `dry_run`). A structured 409 detail's `message` becomes the task's
+  `msg`, its other keys (`nodes`, `hosts`, …) the result's. `doc_fragments/api.py` holds the
   `api` and `api.write` fragments; `meta/runtime.yml` declares the `inventory` action group
   (`module_defaults: group/git_cgallagher.inventory.inventory`).
 - `collection/.../plugins/modules/` — `node`, `host`, `variable`, `variable_definition`,

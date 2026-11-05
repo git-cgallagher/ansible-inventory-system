@@ -117,6 +117,14 @@ export interface TokenRow {
   created_at: string;
 }
 
+/** `DELETE /nodes/{id}` (and its `dry_run`): what goes, counted. */
+export interface DeleteResult extends WriteResult {
+  dry_run: boolean;
+  deleted: string[];
+  nodes: number;
+  hosts: number;
+}
+
 export interface MoveResult extends WriteResult {
   node: InvNode;
   moved: { old_id: number; id: number; from: string; to: string }[];
