@@ -12,6 +12,10 @@ author: Chris Gallagher (@git-cgallagher)
 description:
   - Sets O(key) to O(value) at the node O(path), or removes it. Values are compared as JSON, so an
     unchanged value is not a change and needs no revision.
+  - An undeclared O(key) that looks like a typo of a declared key (or of an undeclared key many nodes set) is
+    still written, with an Ansible warning ("did you mean ...?") and the details in RV(key_warnings).
+  - When the server runs in strict mode (C(AIS_STRICT_KEYS=true)), a key that is not declared and not set on any
+    node yet is refused; declare it first with M(git_cgallagher.inventory.variable_definition).
 options:
   path:
     description: Path of the node (a group or a host), for example C(all.commercial.prod).
@@ -53,6 +57,15 @@ value:
   description: The value now stored at the node (absent when removed).
   returned: when state=present
   type: raw
+key_warnings:
+  description:
+    - Undeclared keys this task wrote that look like typos of a declared key or of an undeclared key many nodes set,
+      one per key and path, each with C(key), C(path), C(did_you_mean), C(declared) and C(message). Each is also an
+      Ansible warning. The write still happened; declare the key (M(git_cgallagher.inventory.variable_definition)) to
+      silence it, or fix the key.
+  returned: always
+  type: list
+  elements: dict
 revision:
   description: Inventory revision after the task.
   returned: always
@@ -83,19 +96,19 @@ def main():
     present = key in current
     if p["state"] == "absent":
         if not present:
-            module.exit_json(changed=False, revision=client.current_revision())
+            module.exit_json(changed=False, revision=client.current_revision(), key_warnings=[])
         diff = {"before": {key: current[key]}, "after": {}}
         if module.check_mode:
-            module.exit_json(changed=True, diff=diff, revision=client.current_revision())
+            module.exit_json(changed=True, diff=diff, revision=client.current_revision(), key_warnings=[])
         client.write("DELETE", "/nodes/%d/vars/%s" % (node["id"], key))
-        module.exit_json(changed=True, diff=diff, revision=client.revision)
+        module.exit_json(changed=True, diff=diff, revision=client.revision, key_warnings=[])
     if present and current[key] == p["value"]:
-        module.exit_json(changed=False, value=current[key], revision=client.current_revision())
+        module.exit_json(changed=False, value=current[key], revision=client.current_revision(), key_warnings=[])
     diff = {"before": {key: current[key]} if present else {}, "after": {key: p["value"]}}
     if module.check_mode:
-        module.exit_json(changed=True, value=p["value"], diff=diff, revision=client.current_revision())
+        module.exit_json(changed=True, value=p["value"], diff=diff, revision=client.current_revision(), key_warnings=[])
     data = client.write("PUT", "/nodes/%d/vars/%s" % (node["id"], key), {"value": p["value"]})
-    module.exit_json(changed=True, value=data["value"], diff=diff, revision=client.revision)
+    module.exit_json(changed=True, value=data["value"], diff=diff, revision=client.revision, key_warnings=client.key_warnings)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,9 @@
 * Sends ``X-AIS-Source: module`` and one ``X-Request-ID`` per task so audit rows can be tied
   to the run, and ``X-AIS-Change`` from the ``change`` option (or ``AIS_CHANGE``) so the
   revisions of one change can be listed and reverted together.
+* A write's ``warnings`` (undeclared keys that look like typos of known ones, server issue
+  #24) become Ansible warnings (``module.warn``) and are kept in ``key_warnings`` for the
+  module's result: Ansible reserves the result's ``warnings`` for plain strings.
 """
 from __future__ import annotations
 
@@ -67,6 +70,7 @@ class Client(object):
         self.revision = params.get("expect_revision")  # None: read lazily before the first write
         self.message = params.get("revision_message")
         self.change = params.get("change") or os.environ.get("AIS_CHANGE") or None
+        self.key_warnings = []
         if not self.base:
             module.fail_json(msg="url is required (option url or AIS_URL)")
         if not self.token:
@@ -143,7 +147,7 @@ class Client(object):
             self.module.fail_json(msg="ais: refused: %s" % to_native(detail), status=409, **extra)
         if status == 428:
             self.module.fail_json(msg="ais: the server wants If-Match on this write (client bug): %s" % detail, status=428)
-        self.module.fail_json(msg="ais: %s %s: %s" % (url, status, to_native(detail)), status=status)
+        self.module.fail_json(msg="ais: %s %s: %s" % (url, status, to_native(detail)), status=status, **extra)
 
     # -------------------------------------------------------------------- reads
 
@@ -169,6 +173,21 @@ class Client(object):
 
     # ------------------------------------------------------------------- writes
 
+    def collect(self, data):
+        """Turn a write response's (or dry run's) ``warnings`` into Ansible warnings, once
+        each; the structured list stays in ``key_warnings``."""
+        if not isinstance(data, dict):
+            return data
+        for warning in data.get("warnings") or []:
+            if warning not in self.key_warnings:
+                self.key_warnings.append(warning)
+                self.module.warn("ais: %s" % warning.get("message", warning))
+        total = data.get("warnings_total") or 0
+        shown = len(data.get("warnings") or [])
+        if total > shown:
+            self.module.warn("ais: ... and %d more undeclared key(s) that look like typos" % (total - shown))
+        return data
+
     def write(self, method, path, body=None):
         """Locked write. Reads the current revision once when ``expect_revision`` was
         not given, then follows the revision each write returns."""
@@ -179,7 +198,7 @@ class Client(object):
         _status, data = self.request(method, path, body=body, if_match=self.revision, allow=())
         if isinstance(data, dict) and "revision" in data:
             self.revision = data["revision"]
-        return data
+        return self.collect(data)
 
 
 # --------------------------------------------------------------- node helpers

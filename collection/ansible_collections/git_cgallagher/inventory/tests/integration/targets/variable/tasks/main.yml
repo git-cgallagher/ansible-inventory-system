@@ -82,9 +82,44 @@
           - nope is failed and 'does not exist' in nope.msg
           - novalue is failed
           - rm_chk is changed and rm is changed and rm2 is not changed
+          - set1.key_warnings == [] and set3.key_warnings == []
+
+    # Issue 24: an undeclared key one swap away from the declared "packages" (seed.yml) is
+    # written, with an Ansible warning and the details in key_warnings.
+    - name: Near miss in check mode (nothing written, nothing to warn about)
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: pakcages
+        value: [it-tool]
+      check_mode: true
+      register: typo_chk
+    - name: Near miss of a declared key
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: pakcages
+        value: [it-tool]
+      register: typo
+    - name: Same value again (no write, no warning)
+      git_cgallagher.inventory.variable:
+        path: all.commercial.lab
+        key: pakcages
+        value: [it-tool]
+      register: typo_again
+    - ansible.builtin.assert:
+        that:
+          - typo_chk is changed and typo_chk.key_warnings == []
+          - typo is changed
+          - typo.key_warnings | length == 1
+          - typo.key_warnings[0].key == 'pakcages'
+          - typo.key_warnings[0].path == 'all.commercial.lab'
+          - typo.key_warnings[0].did_you_mean == 'packages'
+          - typo.key_warnings[0].declared
+          - typo.warnings | select('search', 'did you mean packages') | list | length == 1
+          - typo_again is not changed and typo_again.key_warnings == []
   always:
     - name: Cleanup
       git_cgallagher.inventory.variable:
         path: all.commercial.lab
-        key: it_feature_flag
+        key: "{{ item }}"
         state: absent
+      loop: [it_feature_flag, pakcages]

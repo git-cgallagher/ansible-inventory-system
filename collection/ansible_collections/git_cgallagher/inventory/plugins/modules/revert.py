@@ -86,6 +86,15 @@ hosts:
   returned: check mode
   type: list
   elements: dict
+key_warnings:
+  description:
+    - Undeclared keys this task wrote that look like typos of a declared key or of an undeclared key many nodes set,
+      one per key and path, each with C(key), C(path), C(did_you_mean), C(declared) and C(message). Each is also an
+      Ansible warning. The write still happened; declare the key (M(git_cgallagher.inventory.variable_definition)) to
+      silence it, or fix the key.
+  returned: always
+  type: list
+  elements: dict
 revision:
   description: Inventory revision after the task (the revert's, or the current one when nothing changed).
   returned: always
@@ -122,16 +131,28 @@ def main():
     status, data = client.request("POST", path, body=dict(body, dry_run=True), allow=(409,), keep_body=True)
     if status == 409:
         if isinstance(data, dict) and data.get("error") == "already reverted":
-            module.exit_json(changed=False, reverted_by=data.get("reverted_by", []), revision=client.current_revision())
+            module.exit_json(changed=False, reverted_by=data.get("reverted_by", []), revision=client.current_revision(), key_warnings=[])
         client.fail(status, data, path)
     if module.check_mode:
+        client.collect(data)
         module.exit_json(
-            changed=True, reverted=data.get("reverted", []), operations=data.get("operations", []), hosts=data.get("hosts", []), revision=data["revision"]
+            changed=True,
+            reverted=data.get("reverted", []),
+            operations=data.get("operations", []),
+            hosts=data.get("hosts", []),
+            revision=data["revision"],
+            key_warnings=client.key_warnings,
         )
     if client.revision is None:
         client.revision = data["revision"]  # the dry run's: refuses if anything changed since
     result = client.write("POST", path, body)
-    module.exit_json(changed=True, reverted=result.get("reverted", []), operations=result.get("operations", []), revision=result["revision"])
+    module.exit_json(
+        changed=True,
+        reverted=result.get("reverted", []),
+        operations=result.get("operations", []),
+        revision=result["revision"],
+        key_warnings=client.key_warnings,
+    )
 
 
 if __name__ == "__main__":
