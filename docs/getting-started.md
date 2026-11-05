@@ -460,7 +460,8 @@ Ansible.
 ## 8. Use it from playbooks
 
 An inventory source is a YAML file whose name ends in `inventory.yml`, `inventory.yaml`,
-`ais.yml` or `ais.yaml`:
+`ais.yml` or `ais.yaml`. The plugin ignores any other name, and Ansible's only hint is a
+generic "could not be verified by inventory plugin" warning:
 
 ```yaml
 # inventory/ais.yml
@@ -474,7 +475,20 @@ url: https://inventory.example.com
 # ansible.cfg
 [defaults]
 inventory = inventory/ais.yml
+
+[inventory]
+any_unparsed_is_failed = True
 ```
+
+**Keep `any_unparsed_is_failed`.** By default, an inventory source that fails to load is only
+a warning in Ansible. When the server is down, the token is wrong or a pinned `revision:`
+doesn't exist, a playbook prints `skipping: no hosts matched` and **exits 0**, so a deploy job
+goes green having touched nothing. With the setting, the same run stops with
+`Completely failed to parse inventory source` and exits 1. It must be in the `[inventory]`
+section: under `[defaults]` (as `any_unparsed_is_failed` or `inventory_any_unparsed_is_failed`)
+Ansible ignores it without a word, and the run exits 0 again. The environment variable is
+`ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED=True`. `ansible-config dump --only-changed` shows
+whether it took effect (`INVENTORY_ANY_UNPARSED_IS_FAILED`).
 
 Give it a **viewer** token through `AIS_TOKEN` (or the `token` option, but keep it out of
 git). Then use the qualified groups and tag groups as usual:
@@ -493,8 +507,20 @@ Points worth knowing:
 - **`subtree`** exports only part of the tree. That's much faster on a big estate, and handy
   for giving a team only its own business.
 - **Revalidation.** The plugin keeps the last export in `~/.cache/ais` (`etag_store`) and asks
-  the server whether it changed. An unchanged inventory costs one tiny request. Ansible's own
-  inventory cache (`cache: true`) also works on top of it.
+  the server whether it changed. An unchanged inventory costs one tiny request. The store
+  only revalidates: when the server can't be reached the inventory fails to load, it never
+  falls back to the stored copy.
+- **Leave Ansible's inventory cache (`cache: true`) off in deploy pipelines.** It is a
+  different thing from the ETag store. Its key is the inventory file's path and nothing else,
+  so while the cache is younger than `cache_timeout` (default 3600 seconds) the plugin doesn't
+  ask the server at all. A change made in the meantime, a new `revision:` or `subtree:` in the
+  file and a server that is down all go unnoticed: the play runs on the cached hosts, and
+  `any_unparsed_is_failed` can't help, because the inventory did load. (Tested: API stopped,
+  every cached host served, the playbook ran and exited 0.) What it saves is the one small
+  revalidation request per run, which the ETag store already makes cheap. If you do turn it on
+  for interactive use, keep `cache_timeout` short and use `--flush-cache` when it matters. The
+  plugin prints a warning ("comes from Ansible's inventory cache") on every run it answers
+  from that cache.
 - **Templates are evaluated on the controller.** A stored `"{{ ansible_host }}:{{ http_port }}"`
   reaches a play as `10.1.1.11:8080`, exactly as the render showed. This includes lookups,
   which is how secrets work (next section). It also means that anyone who can write the
@@ -663,6 +689,10 @@ As of 0.3.0:
 
 | You see | Means | Do |
 |---|---|---|
+| a playbook prints `Could not match supplied host pattern` and `skipping: no hosts matched`, and exits 0 | the inventory didn't load, and Ansible treats that as a warning. Look above for `Failed to parse inventory`: `Connection refused` (server down), `404` with `revision=` in the URL (a pinned revision that doesn't exist), `rejected the token`, or `could not be verified by inventory plugin` (next row) | fix the cause, and set `any_unparsed_is_failed = True` under `[inventory]` so it fails the run next time (section 8) |
+| `inventory source '…' could not be verified by inventory plugin 'git_cgallagher.inventory.db'` | the file's name doesn't end in `ais.yml`, `ais.yaml`, `inventory.yml` or `inventory.yaml` | rename it (e.g. `prod.ais.yml`) |
+| `Completely failed to parse inventory source` | the inventory didn't load and `any_unparsed_is_failed` is on, as it should be | the warnings above it say why (the two rows above) |
+| `[WARNING]: ais: inventory revision N comes from Ansible's inventory cache` | `cache: true` is set; the server wasn't asked, so the hosts can be up to `cache_timeout` old | `--flush-cache`, or remove `cache: true` (section 8) |
 | `401` / plugin says "rejected the token" | missing, wrong, expired or revoked token | check `AIS_TOKEN`; `ais token list` |
 | `403` | the token's role is too low | writes need editor; the audit log needs editor; users need admin |
 | `428 Precondition Required` | a write without `If-Match` | send `If-Match: "<revision>"` |

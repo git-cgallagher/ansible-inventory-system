@@ -19,7 +19,18 @@ description:
     inventory (the editor role) can run code on every controller that uses it.
   - "Honours the export's C(ETag): the last export is kept in O(etag_store) and re-sent
     as C(If-None-Match), so an unchanged inventory costs one cheap 304 instead of a
-    full download (independent of, and complementary to, Ansible's inventory cache)."
+    full download. The store only revalidates. When the server is unreachable the inventory fails to load;
+    it never falls back to the stored copy."
+  - Ansible's inventory cache (O(cache)) is different. Its key is this file's path only, so
+    while the cache is younger than O(cache_timeout) (default 3600 seconds) the plugin does not
+    contact the server at all. A changed inventory, a changed O(revision) or O(subtree), or a
+    server that is down all go unnoticed, and the play runs on the cached hosts. The plugin
+    prints a warning whenever it answers from that cache. Leave O(cache) off for deploy
+    pipelines; the ETag store already makes an unchanged inventory cheap.
+  - Set C(any_unparsed_is_failed = True) in the C([inventory]) section of C(ansible.cfg). Without
+    it, an inventory that fails to load (server down, bad token, unknown O(revision)) is only a
+    warning, and a playbook exits 0 having run on no hosts. Under C([defaults]) Ansible
+    ignores the key without a word.
 options:
   plugin:
     description: Token that ensures this is a source file for the plugin.
@@ -72,12 +83,26 @@ extends_documentation_fragment:
 """
 
 EXAMPLES = r"""
+# inventory/ais.yml (the file name must end in ais.yml, ais.yaml, inventory.yml or inventory.yaml).
+# The token comes from AIS_TOKEN. Pair it with this in ansible.cfg, so that an inventory
+# that fails to load fails the run instead of matching no hosts:
+#   [inventory]
+#   any_unparsed_is_failed = True
 plugin: git_cgallagher.inventory.db
-url: http://127.0.0.1:8000
+url: https://inventory.example.com
 subtree: all.commercial.prod
-cache: true
-cache_plugin: jsonfile
-cache_connection: ~/.cache/ais
+# revision: 1234   # pin an exact revision for a reproducible rerun
+
+# Ansible's inventory cache on top, for interactive use only. While the cache is younger than
+# cache_timeout this file is answered from it without asking the server: changes, a new
+# revision pin and a server outage all go unnoticed (the plugin warns on each such run).
+# Don't use it in deploy pipelines.
+# plugin: git_cgallagher.inventory.db
+# url: https://inventory.example.com
+# cache: true
+# cache_plugin: jsonfile
+# cache_connection: ~/.cache/ais-inventory
+# cache_timeout: 300
 """
 
 import hashlib
@@ -192,6 +217,16 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 data = self._cache[cache_key]
             except KeyError:
                 pass
+            else:
+                # Ansible's cache key is the plugin name and this file's path only, so a cached
+                # copy is served without asking the server: server down, revision pin changed or
+                # inventory changed since. Never let that pass silently.
+                self.display.warning(
+                    "ais: inventory revision %s comes from Ansible's inventory cache, not from %s;"
+                    " the server was not asked, so changes since then (and any revision or subtree"
+                    " change in %s) are not seen. Run with --flush-cache or set 'cache: false'."
+                    % (data.get("revision"), self.get_option("url"), path)
+                )
         if data is None:
             data = self._fetch()
             if self.get_option("cache"):

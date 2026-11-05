@@ -310,6 +310,18 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   tag is only valid for the same parameters; the plugin's store is keyed per URL.
 - `~/.cache/ais/export-*.json` (the plugin's ETag store) holds a full inventory copy per
   source on the controller. `AIS_ETAG_STORE=""` disables it (tests use a tmp dir).
+- **A failed inventory load is a warning in Ansible, and the playbook exits 0 on no hosts**
+  (server down, bad token, `revision: 999` → 404, a file name `verify_file` rejects). The
+  consumer fix is `any_unparsed_is_failed = True` under **`[inventory]`**; under `[defaults]`
+  (either spelling) Ansible ignores it silently. `examples/ansible.cfg` sets it. Tests use
+  `ANSIBLE_INVENTORY_UNPARSED_FAILED` / `ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED` for the same
+  reason. Measured 2026-11-05 on compose (issue #19, fail-closed inventory).
+- **Ansible's inventory cache key is the plugin name + the file's path only**
+  (`Cacheable.get_cache_key`). With `cache: true` a fresh cache is served without contacting
+  the server, whatever the file now says (`revision`, `subtree`, `url`) and whether the server
+  is up; `any_unparsed_is_failed` can't catch it because the parse succeeded. `parse()` warns
+  on that branch (`test_inventory_cache_hit_warns`); keep the warning. `--flush-cache` passes
+  `cache=False` and refetches.
 - The CI plugin smoke serves on :8000; running `docker compose up` at the same time makes two
   servers fight over the port and the smoke reads the wrong one. Run one at a time.
 - **A refusal raised as `HTTPException` rolls back the whole session, audit row included.** That
