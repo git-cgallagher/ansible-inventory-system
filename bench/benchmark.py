@@ -7,6 +7,8 @@ Measures, against ``--url`` with a viewer token (``AIS_TOKEN``):
 * the background snapshot pass (``GET /api/v1/snapshots/status``): the first full pass over
   every host, and the pass after the write below with how many hosts it stored;
 * subtree export of one datacenter;
+* tree export in the import format (``GET /api/v1/tree``): the whole tree as JSON and as
+  YAML, and the subtree as YAML;
 * single-host render (``POST /render {host}``, Jinja on) and a mock render at a path;
 * ``ansible-inventory --graph`` through the real plugin (fetch + parse into Ansible's
   inventory, which is what a playbook run pays), with the ETag store off and warm (304);
@@ -131,6 +133,15 @@ def main(argv: list[str] | None = None) -> int:
     med, last = timed(lambda: (lambda r: (r[0], r))(api.call("GET", f"/api/v1/export?subtree={args.subtree}")), args.repeat)
     sub = json.loads(last[2])
     row(f"subtree export ({args.subtree})", med, f"{len(last[2]) / 1e3:.0f} kB, {len(sub['hosts'])} hosts")
+
+    for label, query in (
+        ("tree export, whole tree (JSON)", ""),
+        ("tree export, whole tree (YAML)", "?format=yaml"),
+        (f"tree export ({args.subtree}, YAML)", f"?format=yaml&subtree={args.subtree}"),
+    ):
+        med, last = timed(lambda: (lambda r: (r[0], r))(api.call("GET", f"/api/v1/tree{query}")), args.repeat)
+        assert last[1] == 200, last[2][:200]
+        row(label, med, f"{len(last[2]) / 1e6:.1f} MB")
 
     med, last = timed(lambda: (lambda r: (r[0], r))(api.call("POST", "/api/v1/render", {"host": args.host})), args.repeat)
     assert last[1] == 200, last[2][:200]

@@ -36,6 +36,9 @@ changes to the resolver, the exporter, snapshots or the plugin.
 | full export, repeat | 3.34 | |
 | full export, `If-None-Match` (304) | 0.00 | |
 | subtree export (`all.b0.prod.dc0`) | 0.06 | 312 kB, 1,680 hosts |
+| tree export, whole tree (JSON) | 3.25 | 6.9 MB, the import format (`GET /api/v1/tree`); see below |
+| tree export, whole tree (YAML) | 5.27 | 17.5 MB, libyaml's dumper |
+| tree export (`all.b0.prod.dc0`, YAML) | 0.09 | 288 kB |
 | render host `h012345` (Jinja on) | 0.02 | |
 | render mock path (the node page's read) | 0.00 | |
 | variable write (`PUT`, includes the exporter check) | 3.29 | |
@@ -52,6 +55,11 @@ timing from `GET /api/v1/snapshots/status`. Memory after the run: API container 
 PostgreSQL 200 MiB; database 191 MB, of which `host_snapshot` is 81 MB (100,012 rows: the first
 pass, then 12 for the write). Measured 2026-11-01 after the snapshots-on-change change; the
 earlier run stored 78 MB more on every export after a write.
+
+The three tree-export lines were measured later (2026-11-05, issue 26) and differently: one
+`curl` each against `ais serve` on the host (Python 3.12) with the same generated tree in a
+PostgreSQL 16 container, where the plugin export measured 3.97 s. In process the medians of 3
+were 3.0 s (JSON), 5.2 s (YAML) and 0.09 s (subtree). `bench/benchmark.py` now times them too.
 
 **Tree** (`bench/generate.py --hosts 100000`): depth 8 (`all` → 4 businesses → 3 tiers → 5
 datacenters → three nested `group` levels of 4 × 5 × 7 → hosts). That is 109,917 nodes:

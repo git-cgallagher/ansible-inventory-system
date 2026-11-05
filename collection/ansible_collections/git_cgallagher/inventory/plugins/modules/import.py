@@ -6,14 +6,15 @@ from __future__ import annotations
 
 DOCUMENTATION = r"""
 module: import
-short_description: Bulk-import a YAML tree of nodes, variables and definitions
+short_description: Bulk-import a YAML tree of nodes, variables, definitions and tags
 version_added: "0.2.0"
 author: Chris Gallagher (@git-cgallagher)
 description:
   - Sends a tree in the server's import format (the same as C(ais import)) to C(POST /api/v1/import). All of
     it lands under one revision.
-  - Additive. Missing nodes are created, the listed variables and definitions are set, and nothing is
-    deleted, moved or re-kinded. Use M(git_cgallagher.inventory.node) with O(git_cgallagher.inventory.node#module:purge_vars)
+  - Additive. Missing nodes are created, the listed variables and definitions are set, tag members are added, and
+    nothing is deleted, moved or re-kinded (and no tag member removed).
+    Use M(git_cgallagher.inventory.node) with O(git_cgallagher.inventory.node#module:purge_vars)
     or C(state=absent) to remove things.
   - Idempotent. When the tree already matches, the server writes nothing and the task is not changed. Check mode
     asks the server for a dry run, which runs the import and rolls it back, so it reports the same counts and writes nothing.
@@ -26,6 +27,10 @@ options:
         (C(merge_strategy), C(description), C(json_schema)).
       - Each node takes C(vars), C(children), C(hosts) (host name to its variables), and optionally C(kind) and
         C(inventory_name).
+      - C(tags) optionally maps a tag name to C(description) and C(members) (node paths, which must exist once the
+        tree is imported).
+      - The server's tree export (C(GET /api/v1/tree), C(ais export-tree)) writes this format, so a backup or an
+        export at an earlier revision can be imported as it is.
       - Read a file on the controller with C(lookup('ansible.builtin.file', 'seed.yml') | from_yaml).
     type: dict
     required: true
@@ -57,6 +62,15 @@ EXAMPLES = r"""
                         vars: {packages: [redis]}
                         hosts:
                           cache01: {ansible_host: 10.1.3.11}
+      tags:
+        patch_wave_1:
+          description: first patch wave
+          members: [all.commercial.prod.dc1.cache]
+
+- name: Restore a deleted datacenter from the revision before the delete
+  git_cgallagher.inventory.import:
+    tree: "{{ lookup('ansible.builtin.file', 'dc1-at-41.yml') | from_yaml }}"  # ais export-tree --revision 41 --subtree all.commercial.prod.dc1
+    revision_message: restore dc1
 """
 
 RETURN = r"""
@@ -70,6 +84,11 @@ variables_set:
   type: int
 definitions:
   description: Variable definitions the import created or changed.
+  returned: always
+  type: list
+  elements: str
+tags:
+  description: Tags the import created or changed (description or new members).
   returned: always
   type: list
   elements: str
@@ -95,7 +114,7 @@ def main():
         _status, data = client.request("POST", "/import", body=dict(body, dry_run=True), allow=())
     else:
         data = client.write("POST", "/import", body)
-    summary = dict((k, data.get(k)) for k in ("nodes_created", "variables_set", "definitions"))
+    summary = dict((k, data.get(k)) for k in ("nodes_created", "variables_set", "definitions", "tags"))
     module.exit_json(
         changed=bool(data.get("changed")),
         revision=data.get("revision"),

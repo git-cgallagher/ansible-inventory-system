@@ -1,4 +1,4 @@
-"""``ais`` command line: init-db, import, export, render, serve, user, token."""
+"""``ais`` command line: init-db, import, export, export-tree, render, serve, user, token."""
 
 from __future__ import annotations
 
@@ -37,6 +37,13 @@ def main(argv: list[str] | None = None) -> int:
     exp = sub.add_parser("export", help="print the plugin export as JSON")
     exp.add_argument("--revision", type=int)
     exp.add_argument("--subtree")
+    ext = sub.add_parser("export-tree", help="print the tree (or a subtree) in the import format, as YAML")
+    ext.add_argument("--revision", type=int, help="as of this revision (default: current); restores a deleted subtree")
+    ext.add_argument("--subtree", help="path of the subtree, e.g. all.commercial.prod.dc1 (default: the whole tree)")
+    ext.add_argument("--as", dest="as_path", metavar="PATH", help="re-root the subtree at PATH (a clone)")
+    ext.add_argument("--ancestor-vars", action="store_true", help="also export the ancestors' own variables (self-contained)")
+    ext.add_argument("--no-hosts", action="store_true", help="leave the hosts out (a clone inside one inventory)")
+    ext.add_argument("--format", choices=["yaml", "json"], default="yaml")
     ren = sub.add_parser("render", help="resolve a real or mock host")
     ren.add_argument("--host")
     ren.add_argument("--path")
@@ -81,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
             json.dump(build_export(load_snapshot(s, args.revision, args.subtree)), sys.stdout, indent=2)
         print()
         return 0
+    if args.cmd == "export-tree":
+        return _export_tree(args)
     if args.cmd == "render":
         with session_scope() as s:
             out = resolve(load_snapshot(s, args.revision), host=args.host, path=args.path)
@@ -135,8 +144,11 @@ def _import(args: argparse.Namespace) -> int:
         except (ImportError_, ValueError) as exc:
             s.rollback()
             raise SystemExit(f"import refused: {exc}")
-        summary = {"nodes_created": result.nodes_created, "variables_set": result.variables_set, "definitions": result.definitions_changed}
-        counts = f"{result.nodes_created} nodes created, {result.variables_set} variables set, {len(result.definitions_changed)} definitions changed"
+        summary = result.summary()
+        counts = (
+            f"{result.nodes_created} nodes created, {result.variables_set} variables set, "
+            f"{len(result.definitions_changed)} definitions changed, {len(result.tags_changed)} tags changed"
+        )
         if args.dry_run or not result.changed:
             s.rollback()
             if args.dry_run:
@@ -147,6 +159,32 @@ def _import(args: argparse.Namespace) -> int:
         rev = result.revision
         audit.record(s, actor="cli", action="import", target_type="tree", target_id="all", after={"revision": rev.id, **summary}, source="cli", revision=rev.id)
         print(f"imported as revision {rev.id}: {counts}")
+    return 0
+
+
+def _export_tree(args: argparse.Namespace) -> int:
+    """The CLI twin of ``GET /api/v1/tree``. Writes the document to stdout and the revision
+    it was taken at to stderr, so ``ais export-tree > tree.yml`` is a clean file."""
+    from ais.models import Revision
+    from ais.resolver import current_revision
+    from ais.tree import TreeExportError, dump_yaml, export_tree
+
+    with session_scope() as s:
+        if args.revision is not None and s.get(Revision, args.revision) is None:
+            raise SystemExit(f"revision {args.revision} does not exist")
+        rev = args.revision if args.revision is not None else current_revision(s)
+        try:
+            data = export_tree(s, rev, args.subtree, as_path=args.as_path, ancestor_vars=args.ancestor_vars, hosts=not args.no_hosts)
+        except KeyError as exc:
+            raise SystemExit(f"{exc.args[0]} at revision {rev}")
+        except TreeExportError as exc:
+            raise SystemExit(str(exc))
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        print()
+    else:
+        sys.stdout.write(dump_yaml(data))
+    print(f"exported {args.subtree or 'all'} at revision {rev}", file=sys.stderr)
     return 0
 
 

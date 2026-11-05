@@ -13,7 +13,6 @@ named by path, never by id (a move changes ids); a moved node keeps its membersh
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -24,20 +23,15 @@ from sqlalchemy.orm import Session
 from ais.api_write import _audit, _finish, check_export
 from ais.auth import Principal, require
 from ais.db import get_session
-from ais.importer import live_node_by_path
+from ais.importer import live_node_by_path, tag_name_error
 from ais.locking import IfMatch, begin_write, etag
-from ais.models import TAGGED_KINDS, Node, Role, Tag, TagMember
-from ais.resolver import GROUP_SEP, current_revision
+from ais.models import Node, Role, Tag, TagMember
+from ais.resolver import current_revision
 
 router = APIRouter(prefix="/api/v1", tags=["tags"])
 viewer = Depends(require(Role.viewer))
 editor = Depends(require(Role.editor))
 
-# Valid Ansible group names as they are emitted (no sanitizing needed).
-TAG_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,255}$")
-# The exporter's automatic tag groups are ``<kind>_<name>`` (``tier_prod``); an explicit
-# tag of that shape would silently merge into one, so those prefixes are reserved.
-RESERVED_PREFIXES = tuple(f"{k.value}{GROUP_SEP}" for k in sorted(TAGGED_KINDS, key=lambda k: k.value))
 
 
 def live_members(session: Session, tag: Tag) -> list[str]:
@@ -59,10 +53,9 @@ def _get_tag(session: Session, name: str) -> Tag:
 
 
 def check_tag_name(name: str) -> None:
-    if not TAG_NAME_RE.match(name):
-        raise HTTPException(422, f"invalid tag name {name!r}: letters, digits and '_' only (max 255)")
-    if name.startswith(RESERVED_PREFIXES) or name == "all":
-        raise HTTPException(422, f"tag name {name!r} is reserved (prefixes {', '.join(RESERVED_PREFIXES)} are automatic tag groups)")
+    error = tag_name_error(name)  # shared with the importer's ``tags:`` block
+    if error:
+        raise HTTPException(422, error)
 
 
 @router.get("/tags")

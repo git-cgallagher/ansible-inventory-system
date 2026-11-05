@@ -55,6 +55,12 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
   temporal rows, so the previous revision still shows the old tree; node ids change.
 - **Tags** (`PUT /api/v1/tags/{name}` with member paths) are extra var-less groups under `all`
   for targeting (`--limit canary`); a non-host member contributes every host under it.
+- **Tree export** (`GET /api/v1/tree`, `ais export-tree`) writes the tree or one subtree, at
+  any revision, in the format `ais import` and `POST /api/v1/import` read: nodes with their
+  kinds and own values, the declarations they use, and tags. Importing it reproduces the
+  inventory, so backup, restore (export a deleted subtree at an earlier revision, import it),
+  cloning (`as=` re-roots the copy, `hosts=false` leaves hosts out) and keeping the tree in Git
+  are one call each. The import format takes `tags:` (member paths, additive).
 - **Variable schemas**: a definition's `json_schema` is enforced on every write of that key
   (API, import, modules), and a new schema is refused while any live value violates it.
 - **Hardening**: requests with a bad bearer token are audited (`token.rejected`, never the
@@ -87,6 +93,7 @@ export AIS_TOKEN="$(../.venv/bin/ais token create --user me@example.com)"   # pr
 ../.venv/bin/ansible-inventory --graph         # uses examples/ansible.cfg + AIS_TOKEN
 ../.venv/bin/ansible-inventory --host web02
 ../.venv/bin/ais render --path all.commercial.lab.dc1.web --facts '{"os_family": "RedHat"}'
+../.venv/bin/ais export-tree --subtree all.federal > federal.yml   # import format; --revision, --as, --no-hosts
 ```
 
 Open `http://127.0.0.1:8000/` for the web UI once it is built (next section). API docs at
@@ -258,6 +265,7 @@ port for a TLS proxy); see section 3 of the getting-started guide.
 | Area | Routes | Role |
 |---|---|---|
 | Export / render | `GET /api/v1/export` (ETag, `If-None-Match` → 304), `POST /api/v1/render` (`host` or mock `path`, `overrides`, `facts`, `revision`) | viewer |
+| Tree export | `GET /api/v1/tree?subtree=&revision=&as=&ancestor_vars=&hosts=&format=json\|yaml`: the import format (`POST /import`'s `tree`); ETag, `X-AIS-Revision` | viewer |
 | Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
@@ -313,8 +321,8 @@ and how to rerun them (`bench/generate.py`, `bench/benchmark.py`).
 
 | Path | What |
 |---|---|
-| `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
-| `server/tests/` | fold property tests, export, auth, writes/locking, render, snapshots, plugin ETag, Ansible parity |
+| `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `tree.py` (tree export in the import format), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
+| `server/tests/` | fold property tests, export, tree export round trips, auth, writes/locking, render, snapshots, plugin ETag, Ansible parity |
 | `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
 | `web/` | React + TypeScript UI (Vite; builds into `server/ais/static`), Playwright smoke in `e2e/` |
 | `examples/` | `seed.yml` tree, `inventory.yml`, `ansible.cfg` |

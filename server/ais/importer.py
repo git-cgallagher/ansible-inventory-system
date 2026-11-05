@@ -23,6 +23,7 @@ Format::
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,9 @@ from ais.models import (
     NodeKind,
     NodeVariable,
     Revision,
+    Tag,
+    TagMember,
+    TAGGED_KINDS,
     VariableDefinition,
 )
 
@@ -69,6 +73,22 @@ def check_kind(parent: Node, kind: NodeKind) -> None:
         return
     if c_idx <= p_idx:
         raise ImportError_(f"{kind.value} {parent.path!r} child must be deeper than its parent kind {parent.kind.value}")
+
+
+# Tag names are valid Ansible group names as emitted (no sanitizing needed). The exporter's
+# automatic tag groups are ``<kind>_<name>`` (``tier_prod``); an explicit tag of that shape
+# would silently merge into one, so those prefixes (and ``all``) are reserved.
+TAG_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,255}$")
+RESERVED_TAG_PREFIXES = tuple(f"{k.value}_" for k in sorted(TAGGED_KINDS, key=lambda k: k.value))
+
+
+def tag_name_error(name: str) -> str | None:
+    """Why ``name`` cannot be a tag, or None. Shared by ``PUT /tags`` and the importer."""
+    if not isinstance(name, str) or not TAG_NAME_RE.match(name):
+        return f"invalid tag name {name!r}: letters, digits and '_' only (max 255)"
+    if name.startswith(RESERVED_TAG_PREFIXES) or name == "all":
+        return f"tag name {name!r} is reserved (prefixes {', '.join(RESERVED_TAG_PREFIXES)} are automatic tag groups)"
+    return None
 
 
 def check_name(name: str) -> None:
@@ -175,10 +195,20 @@ class ImportResult:
     nodes_created: int = 0
     variables_set: int = 0
     definitions_changed: list[str] = field(default_factory=list)
+    tags_changed: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
-        return bool(self.nodes_created or self.variables_set or self.definitions_changed)
+        return bool(self.nodes_created or self.variables_set or self.definitions_changed or self.tags_changed)
+
+    def summary(self) -> dict[str, Any]:
+        """The counts ``POST /import``, ``ais import`` and the audit row report."""
+        return {
+            "nodes_created": self.nodes_created,
+            "variables_set": self.variables_set,
+            "definitions": self.definitions_changed,
+            "tags": self.tags_changed,
+        }
 
 
 def import_tree(session: Session, data: dict[str, Any], *, actor: str = "import", message: str | None = None) -> Revision:
@@ -187,7 +217,8 @@ def import_tree(session: Session, data: dict[str, Any], *, actor: str = "import"
 
 def import_tree_report(session: Session, data: dict[str, Any], *, actor: str = "import", message: str | None = None) -> ImportResult:
     """Import ``data`` under one new revision. Additive: creates missing nodes and sets
-    the given variables and definitions; never deletes, moves or re-kinds anything."""
+    the given variables, definitions and tag memberships; never deletes, moves or re-kinds
+    anything, and never removes a tag member."""
     if not isinstance(data, dict) or "all" not in data:
         raise ImportError_("top-level 'all' is required")
     rev = Revision(actor=actor, source="import", message=message or "bulk import")
@@ -219,6 +250,7 @@ def import_tree_report(session: Session, data: dict[str, Any], *, actor: str = "
     root = get_or_create_node(session, None, "all", NodeKind.all, rev)
     _import_node(session, root, data["all"], rev)
     session.flush()
+    changed_tags = _import_tags(session, data.get("tags"))
     try:
         schema.check_live(session, keys=set(changed_defs), created_rev=rev.id)
     except schema.SchemaViolation as exc:
@@ -228,7 +260,62 @@ def import_tree_report(session: Session, data: dict[str, Any], *, actor: str = "
         nodes_created=session.scalar(select(func.count()).select_from(Node).where(Node.created_rev == rev.id)) or 0,
         variables_set=session.scalar(select(func.count()).select_from(NodeVariable).where(NodeVariable.created_rev == rev.id)) or 0,
         definitions_changed=sorted(changed_defs),
+        tags_changed=sorted(changed_tags),
     )
+
+
+# Members are looked up in chunks: PostgreSQL caps a statement at 65,535 bind parameters.
+_PATH_CHUNK = 5000
+
+
+def _import_tags(session: Session, spec: Any) -> list[str]:
+    """``tags: {name: {description, members: [path, ...]}}``, after the tree (members may
+    be nodes the same import created). Additive: creates a missing tag, sets the
+    description when the key is given, adds missing members; never removes one (``PUT
+    /tags/{name}`` is the declarative way). Returns the names of the tags it changed."""
+    if not spec:
+        return []
+    if not isinstance(spec, dict):
+        raise ImportError_("'tags' must be a mapping of tag name to {description, members}")
+    changed: list[str] = []
+    for name, tag_spec in spec.items():
+        error = tag_name_error(name)
+        if error:
+            raise ImportError_(error)
+        tag_spec = tag_spec or {}
+        if not isinstance(tag_spec, dict):
+            raise ImportError_(f"tag {name!r}: expected a mapping with 'description' and 'members'")
+        members = tag_spec.get("members") or []
+        if not isinstance(members, list) or not all(isinstance(m, str) for m in members):
+            raise ImportError_(f"tag {name!r}: 'members' must be a list of node paths")
+        nodes: dict[str, int] = {}
+        wanted = sorted(set(members))
+        for i in range(0, len(wanted), _PATH_CHUNK):
+            chunk = wanted[i : i + _PATH_CHUNK]
+            for path, node_id in session.execute(select(Node.path, Node.id).where(Node.path.in_(chunk), Node.deleted_rev.is_(None))):
+                nodes[path] = node_id
+        missing = [m for m in wanted if m not in nodes]
+        if missing:
+            raise ImportError_(f"tag {name!r}: node {missing[0]} does not exist")
+        tag = session.scalar(select(Tag).where(Tag.name == name))
+        dirty = False
+        if tag is None:
+            tag = Tag(name=name, description=tag_spec.get("description"))
+            session.add(tag)
+            session.flush()
+            dirty = True
+        elif "description" in tag_spec and tag.description != tag_spec["description"]:
+            tag.description = tag_spec["description"]
+            dirty = True
+        current = set(session.scalars(select(TagMember.node_id).where(TagMember.tag_id == tag.id)))
+        for path in wanted:
+            if nodes[path] not in current:
+                session.add(TagMember(tag_id=tag.id, node_id=nodes[path]))
+                dirty = True
+        if dirty:
+            changed.append(name)
+    session.flush()
+    return changed
 
 
 def _import_node(session: Session, root: Node, spec: dict[str, Any], rev: Revision) -> None:
