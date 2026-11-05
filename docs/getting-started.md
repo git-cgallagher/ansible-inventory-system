@@ -330,6 +330,50 @@ without writing anything, use `ais import my-tree.yml --dry-run`,
 A node may say `kind: group` explicitly, for example a group straight under a business when
 that business has no tiers. A child must always be of a deeper kind than its parent.
 
+A file may also list tags (see "Tags" below). Members are node paths, and the import only
+adds members, never removes one:
+
+```yaml
+tags:
+  canary: {description: first to get changes, members: [all.commercial.lab]}
+```
+
+`ais export-tree` (or `GET /api/v1/tree`) writes this same format from the database: the
+whole tree or one subtree, at the current revision or any earlier one. Importing its output
+reproduces what it exported, so it is also how you copy a subtree (below), restore a deleted
+one (section 11) and keep a logical backup or a Git copy of the tree (section 12).
+
+### Copy a subtree (clone)
+
+To build a new datacenter like an existing one, export the old one under its new path and
+import the result:
+
+```bash
+ais export-tree --subtree all.commercial.prod.dc1 --as all.commercial.prod.dc2 --no-hosts > dc2.yml
+ais import dc2.yml --dry-run && ais import dc2.yml --message "dc2 from dc1"
+```
+
+The API form is `GET /api/v1/tree?subtree=all.commercial.prod.dc1&as=all.commercial.prod.dc2&hosts=false&format=yaml`
+(viewer role); import the file with `ais import`, or send the JSON answer as `tree` to
+`POST /api/v1/import`.
+
+- `--as` moves every node, value and tag membership of the copy under the new path. Parents
+  that don't exist yet are created, with the kind their depth implies (business, tier,
+  datacenter, then group). The new parents' own values are not touched.
+- `--no-hosts` copies the structure and the group values only. Host names are unique across
+  the whole tree, so a copy with its hosts is refused (`duplicate host name`) until you rename
+  them in the file. To copy hosts, export with them and rename each one in the YAML.
+- A node with an `inventory_name` keeps it in the copy, which then collides with the original
+  group name (`group name collision`). Delete or change that line in the file first.
+- The copy carries the variable declarations its values use; importing them changes nothing
+  when they already match.
+
+A subtree export keeps the chain from `all` down to the subtree, so the file still starts at
+`all`, but those parents carry only their kind: importing it never overwrites the values of
+the parents in the destination. Add `--ancestor-vars` (`ancestor_vars=true`) for a file that
+stands on its own (the parents' own values included), for example to load one datacenter into
+an empty test server.
+
 ### The web UI
 
 Sign in as an editor or admin. From a node's page you can add a child, move or rename it
@@ -599,6 +643,22 @@ Roles are global: there's no "editor of `all.federal` only" yet.
   link opens it.
 - **Undo** is a new change, not a rewind: look up the old value in the diff or audit log and
   write it back. History is never rewritten.
+- **Restore a deleted subtree:** export it at a revision from before the delete, then import
+  that. The delete's audit row names the revision that deleted it; the one before is the
+  newest revision below it (ids are increasing, not always contiguous):
+
+  ```bash
+  curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/audit?action=node.delete&limit=5'     # "revision": 57
+  curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/revisions?before=57&limit=1'           # "id": 56
+  ais export-tree --revision 56 --subtree all.commercial.prod.dc1 > dc1-at-56.yml
+  ais import dc1-at-56.yml --message "restore dc1 (deleted in 57)"
+  ```
+
+  Every node, its own values and its tag memberships come back, so each host resolves as it
+  did at revision 56 (as long as nothing above the subtree changed since). The restored nodes
+  are new rows with new ids: host history continues by host name (`/hosts/{name}/snapshots`),
+  but the audit trail of the old nodes stays with the old ids. Over HTTP:
+  `GET /api/v1/tree?subtree=…&revision=56`, then `POST /api/v1/import {"tree": …}`.
 
 Per-host history is kept by a background task in the API process. It stores a host's state
 only in the revisions where it changed. A revision it skipped is computed on demand, so every
@@ -645,6 +705,25 @@ A restore returns everything to the moment of the dump, users and tokens include
 minted after the dump stops working. Test a restore before you need one. A dump holds password
 and token hashes, so store it as carefully as the database.
 
+#### Tree exports (logical backups, GitOps)
+
+`ais export-tree > tree.yml` (or `GET /api/v1/tree?format=yaml` with a viewer token) writes
+the whole tree in the import format: every node with its kind and own values, every variable
+declaration, and the tags. Loading it into an empty server with `ais import tree.yml` gives the
+same inventory: every host resolves to the same values. The output is stable (keys and nodes in
+a fixed order), so it diffs cleanly in Git, and a review of that diff is a review of the tree.
+The revision it was taken at goes to stderr (`X-AIS-Revision` over HTTP), not into the file,
+so an unchanged tree exports to the same bytes.
+
+It complements `pg_dump`, it doesn't replace it. A tree export has no history (revisions,
+snapshots, audit log), no users or tokens, and no node `meta`. Variable declarations and tags
+are not versioned, so an export at an old revision carries today's declarations and today's
+tag names. Importing is additive: an import never deletes a node or a value that the file
+doesn't have.
+
+At 100,000 hosts the whole-tree export takes about 3 s as JSON and 5 s as YAML (17 MB);
+one datacenter about 0.1 s (`docs/scale.md`).
+
 ### Upgrades
 
 Read `CHANGELOG.md`, back up, check out the new tag, and rebuild. Schema migrations run
@@ -677,6 +756,7 @@ As of 0.3.0:
 - **No secret storage.** Store lookups instead (section 9).
 - **No published container image.** Build from a tagged checkout.
 - **No `tag` module.** Use the API or UI.
+- **Tree exports leave out node `meta`.** The import format has no place for it.
 - **No user-management page.** Use the CLI or `/api/v1/users`.
 - **Writes slow down with size.** About 3.3 s each at 100,000 hosts.
 - **Render cost isn't capped.** A deliberately huge template (`{{ 'a' * 10**9 }}`) from any

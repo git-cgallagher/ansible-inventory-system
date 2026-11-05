@@ -7,6 +7,18 @@
   deployment (TLS, backups, upgrades), tree design, every write path, secrets, roles, history,
   settings, limits and troubleshooting. Each step was run against 0.3.0.
 - `ais import --dry-run`: reports what an import would change and writes nothing.
+- Tree export in the import format: `GET /api/v1/tree` (viewer; `subtree`, `revision`, `as`,
+  `ancestor_vars`, `hosts`, `format=json|yaml`; ETag and `X-AIS-Revision`) and `ais export-tree`
+  (`--subtree`, `--revision`, `--as`, `--ancestor-vars`, `--no-hosts`, `--format`). It returns
+  the nodes with their kinds and own values, the variable declarations they use and the tags,
+  exactly as `ais import` / `POST /api/v1/import` read them, so backup, restore (export a
+  deleted subtree at an earlier revision and import it), cloning (`as` re-roots the copy) and
+  keeping the tree in Git each take one call instead of a scraping script (#26, tree export).
+  Stored Jinja is returned verbatim. Node `meta` is not exported.
+- The import format takes `tags:` (tag name → `description`, `members` as node paths). Additive
+  like the rest of an import: it creates a tag, sets its description when given and adds
+  members, and never removes one. `POST /api/v1/import`, `ais import`, the audit row and the
+  `import` module report the changed tags as `tags`.
 - `deploy/compose.prod.yml`: production overrides for compose (database password from
   `AIS_DB_PASSWORD`, API on loopback for a TLS proxy, `FORWARDED_ALLOW_IPS: "*"`, restart
   policies).

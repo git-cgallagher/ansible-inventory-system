@@ -33,6 +33,7 @@ from ais.render import MOCK_HOSTNAME, render_templates
 from ais.resolver import GROUP_SEP, build_export, current_revision, host_path, load_chain, load_snapshot, resolve
 from ais import snapshots
 from ais.snapshots import diff, get_snapshot, list_snapshots
+from ais.tree import TreeExportError, dump_yaml, export_tree
 
 
 @asynccontextmanager
@@ -123,6 +124,40 @@ def export(
     # Serialized here: the export is plain JSON already, and FastAPI's jsonable_encoder
     # walks it in Python (0.7 s of a 3.5 s export at 100k hosts, docs/scale.md).
     return Response(json.dumps(data, separators=(",", ":")), media_type="application/json", headers={"ETag": tag})
+
+
+@app.get("/api/v1/tree")
+def tree(
+    request: Request,
+    revision: int | None = None,
+    subtree: str | None = None,
+    as_path: str | None = Query(None, alias="as", description="Re-root the subtree at this path (a clone), e.g. all.commercial.prod.dc9"),
+    ancestor_vars: bool = Query(False, description="Also export the ancestors' own variables (a self-contained subtree)"),
+    hosts: bool = Query(True, description="false leaves the hosts out (a clone inside one inventory)"),
+    fmt: str = Query("json", alias="format", pattern="^(json|yaml)$"),
+    principal: Principal = viewer,
+    session: Session = Depends(get_session),
+) -> Any:
+    """The tree, or one subtree, in the import format (``POST /import``'s ``tree``, ``ais
+    import``'s file) as of ``revision``: nodes with their kinds and own variables, the
+    definitions those variables use, and tag memberships. Importing it reproduces what was
+    exported, which makes backup, restore and cloning one call each (``ais.tree``)."""
+    _check_revision(session, revision)
+    rev = revision if revision is not None else current_revision(session)
+    params = f"{subtree or ''}|{as_path or ''}|{int(ancestor_vars)}|{int(hosts)}|{fmt}"
+    tag = f'"{rev}.{hashlib.sha256(params.encode()).hexdigest()[:8]}"'
+    if request.headers.get("if-none-match") == tag:
+        return Response(status_code=304, headers={"ETag": tag})
+    try:
+        data = export_tree(session, rev, subtree, as_path=as_path, ancestor_vars=ancestor_vars, hosts=hosts)
+    except KeyError as exc:
+        raise HTTPException(404, f"{exc.args[0]} at revision {rev}") from exc
+    except TreeExportError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    headers = {"ETag": tag, "X-AIS-Revision": str(rev)}
+    if fmt == "yaml":
+        return Response(dump_yaml(data), media_type="application/yaml", headers=headers)
+    return Response(json.dumps(data, separators=(",", ":")), media_type="application/json", headers=headers)
 
 
 # --------------------------------------------------------------------- render
@@ -343,11 +378,7 @@ def import_(
     except ImportError_ as exc:
         raise HTTPException(422, str(exc)) from exc
     api_write.check_export(session)
-    summary = {
-        "nodes_created": result.nodes_created,
-        "variables_set": result.variables_set,
-        "definitions": result.definitions_changed,
-    }
+    summary = result.summary()
     if req.dry_run or not result.changed:
         session.rollback()
         rev_now = current_revision(session)

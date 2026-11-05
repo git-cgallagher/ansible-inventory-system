@@ -73,6 +73,18 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   `tests/test_render.py`'s `SERVER_REACHING` cases must stay refused, via an override and via a
   stored value. A new builtin filter or test that touches files, the environment, the network
   or other server state goes into those sets.
+- **Tree export round-trips through import.** `ais.tree.export_tree` (`GET /api/v1/tree`,
+  `ais export-tree`) emits exactly the importer's format: kinds (always, for non-host nodes:
+  a `group` under `all` would re-import as a business), **own** values from
+  `snap.vars_by_node` (never `_emitted`: the fold would double on re-import; only `append`
+  shows it), declarations and tags. Importing an export reproduces the plugin export
+  (`build_export`, ids aside) and every host's resolved vars, and re-importing it into the
+  same tree is a no-op (`tests/test_tree_export.py`: empty database, delete + restore at a past
+  revision, clone with `as`). Anything new the tree can hold that changes the export (a
+  column, a node attribute) must be exportable *and* importable, or be listed as left out in
+  the guide (node `meta` is, today). A subtree's ancestors are structure only unless
+  `ancestor_vars`: a restore must not roll the parents back. Restore code (issue 20) calls
+  `export_tree(session, revision, subtree)` then `import_tree_report`; no HTTP needed.
 - **The CLI writes like the API.** `ais import` (`cli._import`) takes `lock_for_write`, checks the
   export, drops a no-op (no revision) and records one `import` audit row (`tests/test_cli.py`). A
   new CLI write command does the same.
@@ -222,9 +234,15 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - `server/ais/api.py` (reads incl. `GET /nodes/{id-or-path}`, export, render, snapshots,
   `GET /audit`, import), `api_write.py` (locked writes incl. `move`), `api_auth.py` (login,
   tokens, users; all audited), `cli.py` (`user`/`token` commands audit with `source=cli`).
+- `server/ais/tree.py` — `export_tree(session, revision, subtree, as_path=, ancestor_vars=,
+  hosts=)` (the import format; `TreeExportError` for a bad `as`), `dump_yaml` (libyaml when
+  present, fixed key order, no folding). Definitions: all for the whole tree, the used ones
+  for a subtree; tags: members inside the subtree only (re-rooted with `as`).
 - `server/ais/importer.py` — YAML tree → nodes/vars under one revision; kind inferred
   from depth unless declared; rejects bad kind order and names, values their schema rejects.
-  `import_tree_report` returns an `ImportResult` (counts, `changed`); `POST /import` rolls back a
+  `import_tree_report` returns an `ImportResult` (counts, `tags_changed`, `changed`, `summary()`;
+  `tags:` = name → description + member paths, additive, after the tree; `tag_name_error` is
+  shared with `PUT /tags`); `POST /import` rolls back a
   no-op (200, `changed: false`, no revision, no audit row) and a `dry_run` (no `If-Match` needed).
 - `collection/.../plugins/inventory/db.py` — the plugin (`fetch_export` does the ETag
   revalidation; `etag_store` option). Accepts `inventory.yml` / `ais.yml` file names.
@@ -377,6 +395,15 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `POST /import` and an import `dry_run` roll back a `Revision` insert, which still uses up a
   sequence value. Never assume `next == current + 1` in a test (SQLite reuses the id, so a
   test that does passes locally and fails with `AIS_TEST_DATABASE_URL`).
+- **Definitions and tags are not temporal, so a tree export at an old revision carries today's
+  declarations and today's tag names/descriptions**, with the memberships of the nodes live at
+  that revision (`DELETE /nodes` leaves `tag_member` rows, which is what lets a restore bring a
+  deleted subtree's memberships back; a hard tag delete loses them). An empty tag is not exported.
+- **A same-inventory clone with hosts is always refused** (host names are unique: `check_export`
+  409s on the duplicate), and a cloned node keeps its `inventory_name` (a group-name collision).
+  Hence `hosts=false` and the guide's "edit the file" advice. The importer also never updates
+  `inventory_name` (or `kind`) on an existing node, so editing that in an export and
+  re-importing is a silent no-op.
 - **Deleting a `Tag` with `session.delete` on its `TagMember` rows first warns** ("expected to
   delete 1 row(s); 0 were matched"): the FK cascade removed them already. Bulk
   `delete(TagMember)` then `session.delete(tag)`.
@@ -409,4 +436,7 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   ansible-core 2.21: it does not import there, and `.github/dependabot.yml` ignores python >= 3.15
   (lift that with a supporting ansible-core). CI's `image` job boots the image, so a base bump
   that builds but cannot start fails there.
-- Out of phase 4's scope: RBAC beyond admin/editor/viewer, backups.
+- Out of phase 4's scope: RBAC beyond admin/editor/viewer. Backups: `pg_dump` plus the logical
+  tree export (`ais export-tree`); there is no scheduled backup job.
+- Tree export leaves out node `meta` (the import format has nowhere to put it, hosts least of
+  all), and import never updates `inventory_name` on an existing node.
