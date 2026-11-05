@@ -17,15 +17,33 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.14"]
+    # The whole suite runs a second time on PostgreSQL (ltree, JSONB, revision ids that are not
+    # contiguous): a throwaway database for this job only, placeholder credentials.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ais
+          POSTGRES_PASSWORD: ais
+          POSTGRES_DB: ais_test
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ais -d ais_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: python -m pip install -e './server[test]'
+        run: python -m pip install -e './server[test,postgres]'
       - name: Unit, export and Ansible parity tests
         working-directory: server
+        run: python -m pytest -q
+      - name: The same tests on PostgreSQL 16
+        working-directory: server
+        env:
+          AIS_TEST_DATABASE_URL: postgresql+psycopg://ais:ais@127.0.0.1:5432/ais_test
         run: python -m pytest -q
       - name: Plugin smoke (ansible-inventory --graph against the API, bearer token from AIS_TOKEN)
         working-directory: examples

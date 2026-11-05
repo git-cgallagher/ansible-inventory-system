@@ -67,6 +67,17 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
   subtree back as it was at a revision (default: the last one before the delete), with its own
   values, node meta and tag memberships, and links the new node ids to the old ones so the audit
   history from before the delete stays visible. It never overwrites a live node.
+- **Change ids and revert.** Writes can carry a change id (`X-AIS-Change: SRE-1234`, the
+  modules' `change` option, `ais import --change`); revisions and audit rows record it and
+  `GET /api/v1/revisions?change=` / `GET /api/v1/audit?change=` filter by it.
+  `POST /api/v1/revisions/{id}/revert` undoes one revision and `POST /api/v1/changes/{change}/revert`
+  every revision of a change, as one new revision: the inverse of each audited write, newest
+  first, each recorded as an ordinary audit row (so a revert can be reverted too). Every write
+  kind reverts exactly (variables, nodes incl. moves, deletes and restores, definitions, tags,
+  imports). It refuses (409, listing them) when a later revision changed the same node, key,
+  definition or tag, unless `force=true`; `dry_run=true` lists the operations and the hosts whose
+  resolved vars would change. `ais revert` and the `revert` module do the same; the UI has a
+  Revert button on each revision and on a change.
 - **Variable schemas**: a definition's `json_schema` is enforced on every write of that key
   (API, import, modules), and a new schema is refused while any live value violates it.
 - **Hardening**: requests with a bad bearer token are audited (`token.rejected`, never the
@@ -150,7 +161,8 @@ npm run dev                            # or: hot reload on :5173, API proxied to
   shown once) and revoke them.
 - **Diff** a host between any two revisions, and browse **revisions** and the **audit log**
   (editor role), including "history" links from a node or a key that follow it across moves and
-  renames.
+  renames. Both filter by change id; **Revert** on a revision (or on a change) shows the dry run
+  (operations, hosts that would change, or the conflicts) before it writes.
 
 ### Managing the inventory from Ansible
 
@@ -213,6 +225,33 @@ audited with `source=module`. All support check mode and `--diff`.
       git_cgallagher.inventory.node:
         path: all.commercial.lab.dc1.cache
         state: absent
+        recursive: true
+```
+
+Give the tasks of one change the same `change` id (once, in `module_defaults`) and the
+`revert` module undoes them together, for example in a `rescue:`:
+
+```yaml
+- hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: http://127.0.0.1:8000
+      change: SRE-1234          # X-AIS-Change on every request; recorded on every revision
+  tasks:
+    - block:
+        - git_cgallagher.inventory.node_move:
+            path: all.commercial.prod.dc1.cache
+            new_path: all.commercial.prod.dc2.cache
+        - git_cgallagher.inventory.variable:
+            path: all.commercial.prod.dc2.cache
+            key: dns_servers
+            value: [10.2.0.2]
+      rescue:
+        - name: Undo everything SRE-1234 changed, as one revision
+          git_cgallagher.inventory.revert:
+            revert_change: SRE-1234
+            change: SRE-1234-rollback
 ```
 
 Tags have an API (`PUT /api/v1/tags/{name}`) but no module yet.
@@ -273,16 +312,20 @@ port for a TLS proxy); see section 3 of the getting-started guide.
 |---|---|---|
 | Export / render | `GET /api/v1/export` (ETag, `If-None-Match` → 304), `POST /api/v1/render` (`host` or mock `path`, `overrides`, `facts`, `revision`) | viewer |
 | Tree export | `GET /api/v1/tree?subtree=&revision=&as=&ancestor_vars=&hosts=&format=json\|yaml`: the import format (`POST /import`'s `tree`); ETag, `X-AIS-Revision` | viewer |
-| Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions` | viewer |
+| Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions[?change=&before=&limit=]` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
+| Revert (`If-Match`) | `POST /api/v1/revisions/{id}/revert`, `POST /api/v1/changes/{change}/revert` (`force`, `dry_run`, `message`; 201): one new revision; 409 `conflict` (with `conflicts`) when a later revision changed the same things, 409 `already reverted`, 422 when nothing recorded can be inverted; `dry_run` needs no `If-Match` and adds `hosts` | editor |
 | Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts; `?dry_run=true` needs no `If-Match`), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`) | editor |
-| Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had (across moves, renames and restores) | editor |
+| Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&change=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had (across moves, renames and restores) | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |
 | Open | `GET /healthz` (`status`, `version`, `oidc`), `GET /` + `/assets/…` (the built web UI, static files only) | none |
 
-Requests may send `X-Request-ID` (echoed, stored on audit rows) and `X-AIS-Source: module|ui`
-(recorded as the revision's and audit row's `source`).
+Requests may send `X-Request-ID` (echoed, stored on audit rows), `X-AIS-Source: module|ui`
+(recorded as the revision's and audit row's `source`) and `X-AIS-Change: <id>` (recorded as the
+revision's and its audit rows' `change`: 1-64 characters from letters, digits and `._:+@-`,
+starting with a letter or digit; anything else, or a value that looks like an `ais_` token, is a
+400 that does not repeat the value).
 
 ## Tests
 
@@ -329,9 +372,9 @@ and how to rerun them (`bench/generate.py`, `bench/benchmark.py`).
 
 | Path | What |
 |---|---|
-| `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `tree.py` (tree export in the import format), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
+| `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `tree.py` (tree export in the import format), `restore.py`, `revert.py` (revert engine), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
 | `server/tests/` | fold property tests, export, tree export round trips, auth, writes/locking, render, snapshots, plugin ETag, Ansible parity |
-| `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
+| `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`revert`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
 | `web/` | React + TypeScript UI (Vite; builds into `server/ais/static`), Playwright smoke in `e2e/` |
 | `examples/` | `seed.yml` tree, `inventory.yml`, `ansible.cfg` |
 | `docs/getting-started.md` | the long walk: concepts, deployment, design, operations |
