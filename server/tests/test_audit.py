@@ -114,7 +114,7 @@ def test_audit_route_roles_filters_and_paging(admin, editor, viewer, session, se
     assert editor.get("/api/v1/audit").status_code == 200
     rows = admin.get("/api/v1/audit").json()
     assert [r["action"] for r in rows] == ["token.create", "definition.set", "variable.set", "variable.set", "variable.set"]  # newest first
-    assert {k for k in rows[0]} == {"id", "ts", "actor", "action", "target_type", "target_id", "before", "after", "source", "request_id", "revision", "change"}
+    assert {k for k in rows[0]} == {"id", "ts", "actor", "action", "target_type", "target_id", "before", "after", "source", "request_id", "revision", "change", "key"}
     assert [r["after"]["value"] for r in admin.get("/api/v1/audit", params={"action": "variable.set"}).json()] == [9002, 9001, 9000]
     assert len(admin.get("/api/v1/audit", params={"action": "variable."}).json()) == 3  # prefix
     assert len(admin.get("/api/v1/audit", params={"actor": "admin@example.com"}).json()) == 1
@@ -159,5 +159,6 @@ def test_node_history_survives_moves(editor, seeded):
     assert [r["after"]["value"] for r in rows] == [9003, 9002, 9001]
     everything = editor.get("/api/v1/audit", params={"node": "all.commercial.prod.dc9.www"}).json()
     assert [r["action"] for r in everything] == ["variable.set", "variable.set", "node.move", "variable.set"]
-    assert editor.get("/api/v1/audit", params={"key": "http_port"}).status_code == 422
+    # key alone (issue 23): the same rows, found by key wherever the variable was set
+    assert [r["after"]["value"] for r in editor.get("/api/v1/audit", params={"key": "http_port"}).json()] == [9003, 9002, 9001]
     assert editor.get("/api/v1/audit", params={"node": "all.nowhere"}).status_code == 404

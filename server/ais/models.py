@@ -166,6 +166,7 @@ class NodeVariable(Base):
     __tablename__ = "node_variable"
     __table_args__ = (
         Index("ix_nodevar_node_key_live", "node_id", "key", "deleted_rev"),
+        Index("ix_nodevar_key_live", "key", "deleted_rev"),  # GET /vars?key= (where a key is set)
         CheckConstraint("deleted_rev IS NULL OR deleted_rev > created_rev", name="ck_nodevar_revs"),
     )
 
@@ -261,6 +262,7 @@ class AuditLog(Base):
         Index("ix_audit_target", "target_type", "target_id"),
         Index("ix_audit_change", "change"),
         Index("ix_audit_revision", "revision"),
+        Index("ix_audit_key", "key", "id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
@@ -275,6 +277,9 @@ class AuditLog(Base):
     request_id: Mapped[str | None] = mapped_column(String(64))
     revision: Mapped[int | None] = mapped_column(ForeignKey("revision.id", name="fk_audit_revision"))
     change: Mapped[str | None] = mapped_column(String(64))  # the revision's change id, on inventory writes
+    # The variable the row is about (node_variable and variable_definition rows), for
+    # GET /audit?key= without a node; set by ``audit.record``.
+    key: Mapped[str | None] = mapped_column(String(255))
 
 
 # -------------------------------------------------------------------- snapshots

@@ -146,7 +146,8 @@ def record(
     revision: int | None = None,
 ) -> AuditLog:
     """Add an audit row to ``session`` (flushed, not committed). An inventory write's row
-    (``revision`` set) carries the request's change id; auth events carry none."""
+    (``revision`` set) carries the request's change id; auth events carry none. A variable's
+    row (``node_variable``, ``variable_definition``) also gets ``key``, for ``GET /audit?key=``."""
     row = AuditLog(
         actor=actor,
         action=action,
@@ -158,10 +159,22 @@ def record(
         request_id=current_request_id(),
         revision=revision,
         change=current_change() if revision is not None else None,
+        key=row_key(target_type, str(target_id)),
     )
     session.add(row)
     session.flush()
     return row
+
+
+def row_key(target_type: str, target_id: str) -> str | None:
+    """The variable an audit row is about: ``node_variable`` targets are ``"<node id>/<key>"``
+    (the id is digits, so the key is everything after the first ``/``), definitions are the
+    name. Migration 0007 backfills older rows with the same rule."""
+    if target_type == "node_variable":
+        return target_id.split("/", 1)[1] if "/" in target_id else None
+    if target_type == "variable_definition":
+        return target_id
+    return None
 
 
 def audit_out(row: AuditLog) -> dict[str, Any]:
@@ -178,6 +191,7 @@ def audit_out(row: AuditLog) -> dict[str, Any]:
         "request_id": row.request_id,
         "revision": row.revision,
         "change": row.change,
+        "key": row.key,
     }
 
 
