@@ -229,3 +229,84 @@ test("deleting a group shows the node and host counts and confirms them", async 
   await expect(page.getByRole("status")).toContainText("Deleted 4 node(s) (2 host(s)) under all.federal.prod.dc2.web");
   await expect(page.getByRole("treeitem", { name: "web", exact: true })).toHaveCount(0);
 });
+
+// Issue 21: writes tagged with a change id are listed and reverted together from the Revisions
+// page, after a dry-run preview; a revert is itself revertible.
+test("revert a change set and then the revert, from the Revisions page", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill(EMAIL);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("tree", { name: "Inventory tree" })).toBeVisible();
+
+  // two writes carrying one change id, the way a playbook sends them (X-AIS-Change on each)
+  await page.evaluate(async () => {
+    const s = JSON.parse(sessionStorage.getItem("ais.session")!);
+    const headers = { Authorization: `Bearer ${s.token}`, "Content-Type": "application/json", "X-AIS-Change": "E2E-21" };
+    let rev = (await (await fetch("/api/v1/revisions?limit=1", { headers })).json())[0].id;
+    const web = await (await fetch("/api/v1/nodes/all.commercial.lab.dc1.web", { headers })).json();
+    let r = await fetch(`/api/v1/nodes/${web.id}/vars/http_port`, {
+      method: "PUT",
+      headers: { ...headers, "If-Match": `"${rev}"` },
+      body: JSON.stringify({ value: 9443 }),
+    });
+    if (!r.ok) throw new Error(`set failed: ${r.status}`);
+    rev = (await r.json()).revision;
+    r = await fetch("/api/v1/nodes", {
+      method: "POST",
+      headers: { ...headers, "If-Match": `"${rev}"` },
+      body: JSON.stringify({ parent_path: "all.commercial.lab.dc1.web", name: "lab-web02", kind: "host" }),
+    });
+    if (!r.ok) throw new Error(`create failed: ${r.status}`);
+  });
+
+  await page.goto("/#/revisions?change=E2E-21");
+  const rows = page.locator("table.list tbody tr");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.first()).toContainText("E2E-21");
+
+  // the preview: what it would do and to which hosts; it writes nothing
+  await page.getByRole("button", { name: "Revert change E2E-21" }).click();
+  const panel = page.getByRole("region", { name: "Revert change E2E-21" });
+  await expect(panel.getByTestId("revert-ops")).toHaveText("2 operation(s)");
+  await expect(panel).toContainText("delete all.commercial.lab.dc1.web.lab-web02");
+  await expect(panel).toContainText("set http_port on all.commercial.lab.dc1.web to 8081");
+  await expect(panel.getByTestId("revert-hosts")).toHaveText("2 hosts");
+  const hosts = panel.getByRole("list", { name: "Hosts that would change" });
+  await expect(hosts).toContainText("lab-web02 removed");
+  await expect(hosts).toContainText("lab-web01 changed (http_port)");
+  const based = Number((await panel.getByText(/^based on revision \d+$/).textContent())?.replace("based on revision ", ""));
+  const sent = page.waitForRequest((r) => r.method() === "POST" && r.url().endsWith("/api/v1/changes/E2E-21/revert") && !(r.postData() ?? "").includes("dry_run"));
+  await panel.getByRole("button", { name: "Confirm revert of change E2E-21" }).click();
+  expect((await sent).headers()["if-match"]).toBe(`"${based}"`);
+  await expect(page.getByRole("status")).toContainText("Reverted change E2E-21 as revision ");
+  await expect(page.getByRole("status")).toContainText(": 2 operation(s)");
+
+  // the audit log filters by the change id too
+  await page.goto("/#/audit?change=E2E-21");
+  await expect(page.locator("table.audit tbody tr")).toHaveCount(2);
+
+  // revert the revert from the unfiltered list: the host comes back
+  await page.goto("/#/revisions");
+  const newest = page.locator("table.list tbody tr").first();
+  await expect(newest).toContainText("revert change E2E-21");
+  const id = await newest.getAttribute("data-revision");
+  await newest.getByRole("button", { name: `Revert revision ${id}` }).click();
+  const again = page.getByRole("region", { name: `Revert revision ${id}` });
+  await expect(again.getByTestId("revert-ops")).toHaveText("2 operation(s)");
+  await again.getByRole("button", { name: `Confirm revert of revision ${id}` }).click();
+  await expect(page.getByRole("status")).toContainText(`Reverted revision ${id}`);
+  const back = await page.evaluate(async () => {
+    const s = JSON.parse(sessionStorage.getItem("ais.session")!);
+    return (await fetch("/api/v1/nodes/all.commercial.lab.dc1.web.lab-web02", { headers: { Authorization: `Bearer ${s.token}` } })).status;
+  });
+  expect(back).toBe(200);
+
+  // reverting the change once more now conflicts: the panel says why and offers force
+  await page.goto("/#/revisions?change=E2E-21");
+  await page.getByRole("button", { name: "Revert change E2E-21" }).click();
+  const refused = page.getByRole("region", { name: "Revert change E2E-21" });
+  await expect(refused.getByRole("alert")).toContainText("later revisions changed the same things");
+  await expect(refused.getByRole("checkbox", { name: "Force" })).toBeVisible();
+  await refused.getByRole("button", { name: "Cancel" }).click();
+});

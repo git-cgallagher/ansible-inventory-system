@@ -2,12 +2,12 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError, errorText } from "../api";
 import { Notice, Value } from "../components";
 import { when } from "../hooks";
-import { navigate } from "../router";
+import { href, navigate } from "../router";
 import type { AuditRow } from "../types";
 
 const PAGE = 50;
 // `node` (a path) + `key` follow a node through moves and renames (the server walks node.move rows).
-const FILTERS = ["actor", "action", "target_type", "target_id", "node", "key", "revision", "since", "until"] as const;
+const FILTERS = ["actor", "action", "target_type", "target_id", "node", "key", "revision", "change", "since", "until"] as const;
 type Filters = Record<(typeof FILTERS)[number], string>;
 
 /** `GET /audit` (editor+). Filters live in the URL so "who changed this key" links work. */
@@ -52,7 +52,9 @@ export function AuditView({ params }: { params: URLSearchParams }) {
             <input
               value={filters[f]}
               onChange={(e) => setFilters({ ...filters, [f]: e.target.value })}
-              placeholder={f === "action" ? "node. or variable.set" : f === "node" ? "all.commercial.prod" : f === "since" || f === "until" ? "2026-11-01T00:00" : ""}
+              placeholder={
+                f === "action" ? "node. or variable.set" : f === "node" ? "all.commercial.prod" : f === "change" ? "SRE-1234" : f === "since" || f === "until" ? "2026-11-01T00:00" : ""
+              }
               aria-label={f}
             />
           </label>
@@ -74,6 +76,7 @@ export function AuditView({ params }: { params: URLSearchParams }) {
             <th>Target</th>
             <th>Source</th>
             <th>Revision</th>
+            <th>Change</th>
           </tr>
         </thead>
         <tbody>
@@ -106,6 +109,7 @@ export function AuditView({ params }: { params: URLSearchParams }) {
               </td>
               <td>{r.source}</td>
               <td>{r.revision}</td>
+              <td>{r.change && <a href={href("audit", { change: r.change })}>{r.change}</a>}</td>
             </tr>
           ))}
         </tbody>

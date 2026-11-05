@@ -409,7 +409,8 @@ token:
 ```
 
 The modules are `node`, `host`, `variable`, `variable_definition`, `node_move`, `import`,
-`node_info` and `render_info`. `ansible-doc git_cgallagher.inventory.<name>` documents each.
+`revert`, `node_info` and `render_info`. Each takes a `change` id that every revision it writes
+records ([Undo a change](#undo-a-change)). `ansible-doc git_cgallagher.inventory.<name>` documents each.
 Install the collection from the GitHub release (it is not on Ansible Galaxy):
 
 ```bash
@@ -632,7 +633,8 @@ Roles are global: there's no "editor of `all.federal` only" yet.
 ## 11. History, diffs and the audit log
 
 - **Revisions:** `GET /api/v1/revisions` lists every revision with its actor, source (`api`,
-  `ui`, `module`, `cli`) and message. In the UI, see the Revisions page.
+  `ui`, `module`, `cli`), message and change id (`?change=SRE-1234` for one change's). In the UI,
+  see the Revisions page.
 - **Any revision, exactly:** `ais export --revision 12`, `ais render --host web01 --revision
   12`, or the plugin's `revision:` option.
 - **A host's own history:** `GET /api/v1/hosts/web01/snapshots` lists the revisions where
@@ -642,8 +644,8 @@ Roles are global: there's no "editor of `all.federal` only" yet.
   token or user event, with before and after values. Filter by actor, action, node (following
   it across moves and renames), revision or time. In the UI, a node's or variable's "history"
   link opens it.
-- **Undo** is a new change, not a rewind: look up the old value in the diff or audit log and
-  write it back. History is never rewritten.
+- **Undo** is a new change, not a rewind: `revert` writes the inverse as a new revision
+  ([Undo a change](#undo-a-change) below). History is never rewritten.
 - **Deleting a group asks first.** `DELETE /api/v1/nodes/{id}` on a node with anything below
   it answers 409 with the counts ("has 44 node(s) below it; deleting it deletes 45 node(s) in
   all, 21 of them host(s)") unless the call confirms: `?recursive=true`, or `?expect_count=45`,
@@ -686,6 +688,82 @@ Roles are global: there's no "editor of `all.federal` only" yet.
   The two-step path still works too, for a restore into another server or an edited copy:
   `ais export-tree --revision 56 --subtree … > dc1.yml`, then `ais import dc1.yml`; but an
   import does not link the old ids, so the audit trail of the old nodes stays with them.
+
+### Undo a change
+
+**Name your changes.** Send a change id with every write of one change: a ticket or change
+number such as `SRE-1234`. The API takes it as the `X-AIS-Change` header, every module as the
+`change` option (set it once for a play with `module_defaults`, or export `AIS_CHANGE`), and `ais
+import`/`ais restore`/`ais revert` as `--change`. The revision and its audit rows record it:
+
+```bash
+curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/revisions?change=SRE-1234'   # the change's revisions
+curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/audit?change=SRE-1234'       # and what each did
+```
+
+The UI's Revisions and Audit pages show the id and filter by it (`#/revisions?change=SRE-1234`).
+An id is 1 to 64 characters from letters, digits and `._:+@-`, starting with a letter or digit
+(`SRE-1234`, `CHG0012345`, `deploy:2026-11-05.3`). Anything else is refused with a 400 that does
+not repeat the value, and so is anything starting `ais_`: a token pasted into the wrong field
+must not end up in the revision list. It names the change; it is not a place for free text (the
+revision's `message` is).
+
+**Revert.** One revision, or every revision of a change id, comes undone as one new revision:
+
+```bash
+# what would it do? (no If-Match needed; writes nothing)
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"dry_run": true}' \
+  http://127.0.0.1:8000/api/v1/changes/SRE-1234/revert
+# {"revision": 61, "dry_run": true, "reverted": [57, 58, 60], "operations": [...],
+#  "hosts_changed": 21, "hosts": [{"host": "web01", "status": "changed", "changed": {...}}, ...]}
+curl -s -X POST -H "$H" -H 'If-Match: "61"' -H 'X-AIS-Change: SRE-1234-rollback' \
+  -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8000/api/v1/changes/SRE-1234/revert
+curl -s -X POST -H "$H" -H 'If-Match: "62"' -H 'Content-Type: application/json' -d '{}' \
+  http://127.0.0.1:8000/api/v1/revisions/59/revert                          # one revision
+ais revert --of-change SRE-1234 --dry-run      # the same from the server's shell
+ais revert --revision 59 --message "back out the DNS change"
+```
+
+From a playbook, the `revert` module (`revert_change: SRE-1234` or `revision: 59`) does the
+same; its check mode is the dry run, and a change that is already reverted is not a change.
+In the UI, each revision has a Revert button, and a change filter adds "Revert change …"; both
+show the dry run first and send the revision it was computed at as `If-Match`.
+
+The server applies the inverse of every audited write, newest first, and records each as an
+ordinary audit row (`variable.set`, `node.move`, `node.restore`, …) plus one `revert` row, so
+the history of a node or key shows the revert, and **a revert can itself be reverted** (that
+redoes the change). What each write turns into:
+
+| The write | Its revert |
+|---|---|
+| set a variable | sets the old value back, or unsets a key that was new |
+| unset a variable | sets the value again |
+| create a node | deletes it (it must still have nothing below it) |
+| patch a node (`inventory_name`, `meta`) | puts the old values back |
+| move or rename | moves it back, with its values, `meta` and tags (node ids change, history is linked) |
+| delete a subtree | restores it as it was at the revision before the delete (as `POST /nodes/restore` does) |
+| restore | deletes the restored subtree (it must hold nothing else) |
+| declare / change / undeclare a variable | declares it as it was, or undeclares it |
+| set / delete a tag | sets it back to its description and members, or deletes it |
+| import | deletes the nodes it created, puts back the values it replaced, unsets the ones it added, and puts its definitions and tags back as they were |
+
+Every kind reverts exactly: afterwards the tree export and every host's resolved variables are
+what they were before the write. Two limits, both about history from before this feature: an
+import recorded by an older server that changed definitions or tags cannot be reverted (its
+audit row does not say what they were; the revert says so and writes nothing), and a tag
+deleted by an older server comes back with its live members but without the memberships of
+nodes that were deleted at the time (they only matter to a later restore of those nodes).
+
+**Conflicts.** If a later revision that is not being reverted changed the same node (or
+anything above or below it, for a create, move, delete or restore), the same key on the same
+node, the same definition or the same tag, the revert is refused with 409 and the list
+(`conflicts`: which revision, what it did, who, and what overlapped). Revert those first,
+newest first, or send `"force": true` (`--force`, `force: true`) to revert over them, which
+overwrites what they did to those things. A change's own revisions never conflict with each
+other. `force` never makes the revert guess: an inverse that cannot apply now (the node moved
+away, the path is taken, a JSON Schema tightened since rejects the old value) is refused either
+way, with what blocked it. Reverting something that was already reverted answers 409
+`already reverted` with the revision that did it.
 
 Per-host history is kept by a background task in the API process. It stores a host's state
 only in the revisions where it changed. A revision it skipped is computed on demand, so every

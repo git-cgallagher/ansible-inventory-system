@@ -95,7 +95,8 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   export, drops a no-op (no revision) and records one `import` audit row (`tests/test_cli.py`). A
   new CLI write command does the same.
 - **Every effective write and every auth event leaves exactly one `audit_log` row, in the same
-  transaction** (`ais.audit.record`, after `check_export`). A refused write (409/422/428) therefore
+  transaction** (`ais.audit.record`, after `check_export`). The one multi-row write is a revert:
+  one ordinary row per inverse operation plus one `revert` row, all under its one revision. A refused write (409/422/428) therefore
   leaves none, and a no-op (`PUT` of an unchanged var or definition) leaves none either. The one
   deliberate exception to "raise to refuse": a failed login *returns* its 401 so the row commits.
   `before`/`after` never contain a secret (token plaintext, password hash). New write routes call
@@ -105,6 +106,29 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   `target_id` is the token id, the `ais_xxxxxx` display prefix, or `(not an ais_ token)`, never
   more. Requests with no token are not recorded. A throttled login is `login.throttled` (429,
   returned like the 401).
+- **Every write kind is revertible** (`ais.revert`, `POST /revisions/{id}/revert`, `POST
+  /changes/{change}/revert`, `ais revert`). A revert inverts a revision's audit rows newest first
+  under one new revision and records each inverse as an **ordinary** row of the forward kind
+  (`variable.set`, `node.move` with `moved`, `node.restore` with `restored`, `tag.set`, …), so
+  lineage, history and reverting a revert need nothing special; the `revert` summary row inverts
+  to nothing. So a row's `before`/`after` must hold what its inverse needs. A new write route
+  (or a new action) also goes into `revert.INVERTIBLE`, `_invert` and `footprint` and gets a case
+  in `tests/test_revert.py`'s `KINDS` round trip (write, revert: tree export, plugin export,
+  `meta` and every host's resolved vars equal the state before; revert the revert: equal the
+  state after). Rows recorded before an action carried enough are refused (422) with the reason,
+  never guessed: today, `import` rows without `before` that changed definitions or tags. The
+  routes' mutations live in functions that take the revision (`move_subtree`, `delete_subtree`,
+  `set_definition`, `converge_tag`, `remove_tag`, `import_tree_report(rev=)`,
+  `restore_subtree(rev=)`); reuse them rather than calling a route's body. Conflicts are by
+  footprint (paths, path+key, definition and tag names; a create/move/delete/restore covers the
+  whole subtree): a later revision outside the reverted set that overlaps refuses with 409 unless
+  `force`, and `force` never skips an inverse that cannot apply.
+- **Change ids** (`X-AIS-Change`, module option `change`, CLI `--change`) are validated in
+  `RequestIdMiddleware` (`audit.CHANGE_RE`: 1-64 of `[A-Za-z0-9._:+@-]`, no `ais_` prefix; 400
+  otherwise, and the message never contains the value). They are one URL path segment as they
+  are (`/changes/{change}/revert`), so never allow `/`, `#`, `?` or `%`. `begin_write` and
+  `import_tree_report` put `audit.current_change()` on the `Revision`, `audit.record` on rows
+  that have a revision.
 - **Move/rename never updates `path` in place.** `POST /nodes/{id}/move` closes the whole subtree
   and reopens it under the new revision: **node ids change** (the response's `moved` list maps
   old → new), variables and tag memberships are copied to the new rows, host snapshots survive by
@@ -164,7 +188,8 @@ Python 3.12; the step mints an editor token into the gitignored `integration_con
 the report is uploaded on failure). The `image` job builds the UI too (Node stage in the
 Dockerfile). All are required by the "main protection" ruleset (id `26318946`; `collection` and
 `web` added 2026-11-01 after their first green runs); the "external contributor review" ruleset means your own PRs merge with
-`gh pr merge --admin` once every check is green. Work on branches, never push to `main`.
+`gh pr merge --admin` once every check is green. The `test` job runs pytest twice: on SQLite and,
+through a `postgres:16` service, on PostgreSQL (`AIS_TEST_DATABASE_URL`). Work on branches, never push to `main`.
 **Several sessions may share this checkout**: never switch branches in the shared folder for side
 work; use `git worktree add` in the scratchpad instead.
 
@@ -219,7 +244,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   level schema; `group` may nest; `TAGGED_KINDS` get auto tag groups; `NAME_RE` = ltree-safe node names.
 - `server/ais/migrations/` — Alembic (`env.py` takes a connection from
   `ais.db.init_db`; `0001` = spike schema, `0002` = phase 1 incl. the PostgreSQL ltree
-  branch, `0003` = `audit_log`, `0004` = `node.meta` / `node_variable.value` NOT NULL). On SQLite
+  branch, `0003` = `audit_log`, `0004` = `node.meta` / `node_variable.value` NOT NULL, `0005` =
+  `snapshot_pass`, `0006` = `revision.change` / `audit_log.change` + `ix_audit_revision`). On SQLite
   `init_db` migrates with `PRAGMA foreign_keys=OFF` and runs `PRAGMA foreign_key_check` before
   turning them back on. `server/alembic.ini` is for hand use only.
 - `server/ais/audit.py` — `RequestIdMiddleware` (`X-Request-ID` in/out, `X-AIS-Source` →
@@ -261,16 +287,25 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `RestoreResult` (`restored` = `[{old_id, id, path}]`, `summary()`), `RestoreError(status,
   message)`, `last_live_revision`. The caller locks, runs `check_export`, records the
   `node.restore` row (`after.restored` is what `node_lineage` reads) or rolls back a dry run.
+- `server/ais/revert.py` — `revert(session, revisions, actor=, source=, force=, hosts=,
+  change=)` → `RevertResult`, `RevertError(status, detail)`, `footprint`, `find_conflicts`,
+  `revisions_of_change`. `api_revert.py` holds the two routes (dry run = apply + rollback, like
+  restore's); `cli._revert` the CLI twin. The dry run's `hosts` compares `resolved_vars` before
+  and after for the hosts under the reverted rows' paths (every host when a definition changes).
 - `server/ais/importer.py` — YAML tree → nodes/vars under one revision; kind inferred
   from depth unless declared; rejects bad kind order and names, values their schema rejects.
   `import_tree_report` returns an `ImportResult` (counts, `tags_changed`, `changed`, `summary()`;
   `tags:` = name → description + member paths, additive, after the tree; `tag_name_error` is
-  shared with `PUT /tags`); `POST /import` rolls back a
+  shared with `PUT /tags`; `before()` = the changed definitions and tags as they were, which the
+  `import` audit row records as its `before` for revert; `definition_doc`/`tag_doc` are the
+  shapes the API and audit rows use); `POST /import` rolls back a
   no-op (200, `changed: false`, no revision, no audit row) and a `dry_run` (no `If-Match` needed).
 - `collection/.../plugins/inventory/db.py` — the plugin (`fetch_export` does the ETag
   revalidation; `etag_store` option). Accepts `inventory.yml` / `ais.yml` file names.
 - `collection/.../plugins/module_utils/client.py` — `Client` (token/url from options or
-  `AIS_TOKEN`/`AIS_URL`, `request`, `write` with `If-Match`, 409 stale vs other 409, 401/403),
+  `AIS_TOKEN`/`AIS_URL`, `change` from the option or `AIS_CHANGE` sent as `X-AIS-Change` on every
+  request (the option is in the shared `api` fragment, so a group `module_defaults` works for info
+  modules too), `request(keep_body=)` returns an allowed status's `detail`, `request`, `write` with `If-Match`, 409 stale vs other 409, 401/403),
   `ensure_node`/`remove_node` (shared by `node` and `host`; `remove_node(recursive=)`, check
   mode = the server's delete `dry_run`). A structured 409 detail's `message` becomes the task's
   `msg`, its other keys (`nodes`, `hosts`, …) the result's. `doc_fragments/api.py` holds the
@@ -278,7 +313,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   (`module_defaults: group/git_cgallagher.inventory.inventory`).
 - `collection/.../plugins/modules/` — `node`, `host`, `variable`, `variable_definition`,
   `node_move` (path → new_path; done when only new_path is live), `import` (tree dict; check mode =
-  server dry run) (write, check + diff mode), `node_info`, `render_info`. `tests/integration/targets/<module>` = check,
+  server dry run), `revert` (`revision` or `revert_change`, `force`; dry run first: check mode
+  stops there, 409 `already reverted` = not changed) (write, check + diff mode), `node_info`, `render_info`. `tests/integration/targets/<module>` = check,
   real, repeat, failure cases with an `always:` cleanup, all against one shared server (unique
   `it_*`/`it-*` names per target). `tests/sanity/ignore-2.*.txt` only waive the GPLv3-header
   check (the collection is MIT).
@@ -289,7 +325,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `yaml`). `src/api.ts` (fetch wrapper: bearer, `If-Match`, `X-AIS-Source: ui`, `ApiError.stale`
   for the 409 body `{error, expected, current}`, any 401 → login), `src/router.ts` (hash routes),
   `src/views/` (`Login`, `Tree` (lazy children, ARIA tree keys), `NodeDetail`, `NodeActions`
-  (add child, move/rename, delete), `VarEditor`, `Render`, `Diff`, `Revisions`, `Audit`,
+  (add child, move/rename, delete), `VarEditor`, `Render`, `Diff`, `Revisions` (change filter,
+  Revert panel: dry run, then `If-Match` = the dry run's revision), `Audit`,
   `Variables` (definitions: strategy, description, JSON Schema), `Tags`, `Tokens`), `src/styles.css` (tokens, dark via
   `prefers-color-scheme`). `vite.config.ts` sets `outDir: ../server/ais/static`.
   `e2e/smoke.spec.ts` + `e2e/serve.sh` + `playwright.config.ts`.
@@ -436,6 +473,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   (autouse); a new test that logs in badly more than 5 times with one e-mail sets
   `AIS_LOGIN_MAX_FAILURES` itself. Behind a proxy every client is the proxy's address unless
   uvicorn runs with `--proxy-headers --forwarded-allow-ips`.
+- **A templated play var is re-evaluated on every use.** `vars: {id: "x-{{ '%s' | strftime }}"}`
+  gave each task of the `revert` integration target a different change id. Pin such values with
+  `set_fact` first.
 - **A module named `import` works** (ansible-test sanity and AnsiballZ both load it by path)
   even though it is a Python keyword; it cannot be imported with a plain `import` statement,
   which nothing needs.

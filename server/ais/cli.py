@@ -1,4 +1,4 @@
-"""``ais`` command line: init-db, import, export, export-tree, restore, render, serve, user, token."""
+"""``ais`` command line: init-db, import, export, export-tree, restore, revert, render, serve, user, token."""
 
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     imp.add_argument("file")
     imp.add_argument("--message")
     imp.add_argument("--dry-run", action="store_true", help="report what the import would change, write nothing")
+    imp.add_argument("--change", help="change id to record on the revision (like X-AIS-Change), e.g. SRE-1234")
     exp = sub.add_parser("export", help="print the plugin export as JSON")
     exp.add_argument("--revision", type=int)
     exp.add_argument("--subtree")
@@ -49,6 +50,15 @@ def main(argv: list[str] | None = None) -> int:
     rst.add_argument("--revision", type=int, help="as it was at this revision (default: the last one before its latest delete)")
     rst.add_argument("--message")
     rst.add_argument("--dry-run", action="store_true", help="report what the restore would bring back, write nothing")
+    rst.add_argument("--change", help="change id to record on the revision (like X-AIS-Change)")
+    rvt = sub.add_parser("revert", help="undo a revision, or every revision of a change id, as one new revision")
+    which = rvt.add_mutually_exclusive_group(required=True)
+    which.add_argument("--revision", type=int, help="the revision to undo")
+    which.add_argument("--of-change", metavar="CHANGE", help="undo every revision carrying this change id")
+    rvt.add_argument("--force", action="store_true", help="revert even though later revisions changed the same things")
+    rvt.add_argument("--dry-run", action="store_true", help="list the inverse operations and the hosts that would change, write nothing")
+    rvt.add_argument("--message")
+    rvt.add_argument("--change", help="change id to record on the revert's own revision")
     ren = sub.add_parser("render", help="resolve a real or mock host")
     ren.add_argument("--host")
     ren.add_argument("--path")
@@ -82,6 +92,13 @@ def main(argv: list[str] | None = None) -> int:
     token.add_parser("list")
 
     args = p.parse_args(argv)
+    if getattr(args, "change", None) is not None:
+        from ais import audit
+
+        try:
+            audit.change_var.set(audit.check_change(args.change))
+        except ValueError as exc:
+            raise SystemExit(str(exc))
 
     if args.cmd in ("init-db", "migrate"):
         init_db()
@@ -97,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         return _export_tree(args)
     if args.cmd == "restore":
         return _restore(args)
+    if args.cmd == "revert":
+        return _revert(args)
     if args.cmd == "render":
         with session_scope() as s:
             out = resolve(load_snapshot(s, args.revision), host=args.host, path=args.path)
@@ -164,7 +183,17 @@ def _import(args: argparse.Namespace) -> int:
                 print(f"nothing to change (revision {current_revision(s)})")
             return 0
         rev = result.revision
-        audit.record(s, actor="cli", action="import", target_type="tree", target_id="all", after={"revision": rev.id, **summary}, source="cli", revision=rev.id)
+        audit.record(
+            s,
+            actor="cli",
+            action="import",
+            target_type="tree",
+            target_id="all",
+            before=result.before(),
+            after={"revision": rev.id, **summary},
+            source="cli",
+            revision=rev.id,
+        )
         print(f"imported as revision {rev.id}: {counts}")
     return 0
 
@@ -209,6 +238,48 @@ def _restore(args: argparse.Namespace) -> int:
             revision=rev.id,
         )
         print(f"restored {result.path} as of revision {result.from_revision} as revision {rev.id}: {counts}")
+    return 0
+
+
+def _revert(args: argparse.Namespace) -> int:
+    """The CLI twin of ``POST /api/v1/revisions/{id}/revert`` and ``POST /changes/{id}/revert``:
+    takes the write lock, refuses what the API refuses (conflicts unless ``--force``), checks
+    the export, and leaves the same audit rows (``source=cli``)."""
+    from ais.locking import lock_for_write
+    from ais.revert import RevertError, revert, revisions_of_change
+
+    init_db()
+    with session_scope() as s:
+        lock_for_write(s)
+        if args.of_change is not None:
+            revisions = revisions_of_change(s, args.of_change)
+            if not revisions:
+                raise SystemExit(f"no revision carries change id {args.of_change!r}")
+        else:
+            revisions = [args.revision]
+        try:
+            result = revert(
+                s, revisions, actor="cli", source="cli", message=args.message, force=args.force, hosts=args.dry_run, change=args.of_change
+            )
+            build_export(load_snapshot(s))
+        except (RevertError, ValueError) as exc:
+            s.rollback()
+            raise SystemExit(f"revert refused: {exc}")
+        for op in result.operations:
+            print(f"  revision {op['reverts']}: {op['summary']}")
+        for c in result.conflicts:
+            print(f"  forced over revision {c['revision']} ({c['action']} {c['target']}): {c['on']}")
+        for note in result.notes:
+            print(f"  note: {note}")
+        label = f"change {args.of_change}" if args.of_change else f"revision {args.revision}"
+        if args.dry_run:
+            s.rollback()
+            print(f"dry run: reverting {label} would apply {len(result.operations)} operation(s); {len(result.hosts or [])} host(s) would change")
+            for h in (result.hosts or [])[:50]:
+                keys = sorted(set(h.get("added", {})) | set(h.get("removed", {})) | set(h.get("changed", {})))
+                print(f"  {h['host']}: {h['status']}" + (f" ({', '.join(keys)})" if keys else ""))
+            return 0
+        print(f"reverted {label} as revision {result.revision.id}: {len(result.operations)} operation(s)")
     return 0
 
 

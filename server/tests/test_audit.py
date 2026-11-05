@@ -114,7 +114,7 @@ def test_audit_route_roles_filters_and_paging(admin, editor, viewer, session, se
     assert editor.get("/api/v1/audit").status_code == 200
     rows = admin.get("/api/v1/audit").json()
     assert [r["action"] for r in rows] == ["token.create", "definition.set", "variable.set", "variable.set", "variable.set"]  # newest first
-    assert {k for k in rows[0]} == {"id", "ts", "actor", "action", "target_type", "target_id", "before", "after", "source", "request_id", "revision"}
+    assert {k for k in rows[0]} == {"id", "ts", "actor", "action", "target_type", "target_id", "before", "after", "source", "request_id", "revision", "change"}
     assert [r["after"]["value"] for r in admin.get("/api/v1/audit", params={"action": "variable.set"}).json()] == [9002, 9001, 9000]
     assert len(admin.get("/api/v1/audit", params={"action": "variable."}).json()) == 3  # prefix
     assert len(admin.get("/api/v1/audit", params={"actor": "admin@example.com"}).json()) == 1

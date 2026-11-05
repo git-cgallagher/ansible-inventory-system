@@ -173,6 +173,7 @@ tr.synthetic { color: var(--muted); }
 .editor-head label { flex-direction: row; align-items: center; }
 .editor-foot { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .hint { margin: 0; }
+.ops { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 0.15rem; }
 .seg { display: inline-flex; margin-left: auto; }
 .seg button { background: transparent; color: var(--accent); border-radius: 0; padding: 0.1rem 0.6rem; font-size: 12px; }
 .seg button:first-child { border-radius: 6px 0 0 6px; }

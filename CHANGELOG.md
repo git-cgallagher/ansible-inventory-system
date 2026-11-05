@@ -3,6 +3,28 @@
 ## Unreleased
 
 ### Added
+- **Change ids.** Writes can carry a change id: the `X-AIS-Change` header (1-64 characters from
+  letters, digits and `._:+@-`; a bad one, or one that looks like an `ais_` token, is a 400 that
+  never repeats the value), the `change` option on every module (or `AIS_CHANGE`), and `--change`
+  on `ais import`, `ais restore` and `ais revert`. Revisions and their audit rows record it
+  (migration `0006`), `GET /api/v1/revisions?change=` and `GET /api/v1/audit?change=` filter by
+  it, and the UI's Revisions and Audit pages show and filter by it (#21, revert and change sets).
+- **Revert.** `POST /api/v1/revisions/{id}/revert` undoes one revision and `POST
+  /api/v1/changes/{change}/revert` every revision of a change id, as one new revision (editor,
+  `If-Match`, 201; `force`, `dry_run`, `message`). The server applies the inverse of each audited
+  write, newest first, and records each as an ordinary audit row plus one `revert` row, so node
+  and key history follow it and a revert can itself be reverted. Every write kind reverts
+  exactly: variable set and unset, node create, patch, move, delete (through the restore) and
+  restore, variable definitions, tags and imports. A later revision outside the reverted set
+  that changed the same node or subtree, key, definition or tag refuses it with 409 and the
+  list (`conflicts`) unless `force`; an inverse that cannot apply now is refused either way;
+  something already reverted answers 409 `already reverted`. `dry_run` (no `If-Match`) lists the
+  operations and the hosts whose resolved variables would change. Also `ais revert --revision N
+  | --of-change ID [--force] [--dry-run]`, the `revert` module (check mode = the dry run; already
+  reverted = not changed), and a Revert button on each revision and on a change in the UI, which
+  shows the dry run before it writes (#21).
+- CI runs the whole server test suite on PostgreSQL 16 too (a service container in the `test`
+  job), not only on SQLite.
 - `docs/getting-started.md`: a getting-started guide, from the ideas through a PostgreSQL
   deployment (TLS, backups, upgrades), tree design, every write path, secrets, roles, history,
   settings, limits and troubleshooting. Each step was run against 0.3.0.
@@ -51,6 +73,13 @@
   path that would be deleted.
 
 ### Changed
+- The `import` audit row's `before` now records the definitions and tags the import changed, as
+  they were, and a `tag.delete` row's `before` the memberships of deleted nodes
+  (`deleted_members`), so both can be reverted. An `import` row written by an earlier version
+  that changed definitions or tags cannot be reverted (422, saying why); a tag deleted by an
+  earlier version is reverted without those memberships.
+- Audit rows carry `change` (null without a change id), and revision rows in `GET
+  /api/v1/revisions` carry `change`.
 - **Breaking: deleting a node that has descendants needs a confirmation.** `DELETE
   /api/v1/nodes/{id}` used to delete the whole subtree silently (one editor call removed 45
   nodes, 21 of them hosts). It now answers 409 (`error: "subtree not empty"`, with `message`,

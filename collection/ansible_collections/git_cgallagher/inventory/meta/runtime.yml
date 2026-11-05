@@ -10,3 +10,4 @@ action_groups:
     - render_info
     - node_move
     - import
+    - revert

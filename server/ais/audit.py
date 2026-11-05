@@ -10,12 +10,20 @@ correlate), otherwise a fresh UUID. The id is echoed in the response header.
 The same middleware reads ``X-AIS-Source: module|ui`` into ``source`` (default
 ``api``) so revisions and audit rows say which kind of client wrote. CLI writes
 have no request id and ``source`` ``cli``.
+
+``X-AIS-Change: <id>`` tags the request's writes with a change id (``SRE-1234``): the
+revision and its audit rows record it, ``GET /revisions?change=`` and ``GET /audit?change=``
+filter by it, and ``POST /changes/{id}/revert`` undoes every revision that carries it. The
+middleware validates it (``CHANGE_RE``) and answers 400 for a bad one without echoing it, so
+a pasted token never reaches a log line or an error message.
 """
 
 from __future__ import annotations
 
 import contextvars
 import datetime as dt
+import json
+import re
 import uuid
 from typing import Any
 
@@ -27,11 +35,41 @@ from ais.models import AuditLog
 
 request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("ais_request_id", default=None)
 source_var: contextvars.ContextVar[str] = contextvars.ContextVar("ais_source", default="api")
+change_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("ais_change", default=None)
 
 REQUEST_ID_HEADER = b"x-request-id"
 SOURCE_HEADER = b"x-ais-source"
+CHANGE_HEADER = b"x-ais-change"
 SOURCES = ("api", "module", "ui")  # what a client may claim; import/login/cli are set server-side
 _MAX_REQUEST_ID = 64
+
+# A change id: a ticket or change number, not free text. 1-64 characters, starting with a
+# letter or digit, then letters, digits and ``. _ : + @ -`` (``SRE-1234``, ``CHG0012345``,
+# ``deploy:2026-11-05.3``). No spaces, quotes, ``/`` or ``#``, so it is one URL path segment
+# as is (``POST /changes/{change}/revert``), a header value and a safe log token.
+CHANGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,63}$")
+CHANGE_RULE = "1-64 characters: letters, digits and . _ : + @ - (starting with a letter or digit)"
+
+
+def change_error(value: str) -> str | None:
+    """Why ``value`` cannot be a change id, or None. The message never contains the value:
+    it may be a secret pasted into the wrong field."""
+    if not CHANGE_RE.match(value):
+        return f"invalid change id: {CHANGE_RULE}"
+    if value.lower().startswith("ais_"):
+        return "invalid change id: it looks like an API token (ais_...); a change id names a ticket or change, such as SRE-1234"
+    return None
+
+
+def check_change(value: str | None) -> str | None:
+    """``value`` stripped, or None when empty; raises ``ValueError`` (with ``change_error``)."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    error = change_error(value)
+    if error:
+        raise ValueError(error)
+    return value
 
 
 class RequestIdMiddleware:
@@ -49,8 +87,22 @@ class RequestIdMiddleware:
         incoming = next((v for k, v in headers if k == REQUEST_ID_HEADER), None)
         rid = incoming.decode("latin-1")[:_MAX_REQUEST_ID] if incoming else uuid.uuid4().hex
         claimed = next((v for k, v in headers if k == SOURCE_HEADER), b"").decode("latin-1").lower()
+        try:
+            change = check_change(next((v for k, v in headers if k == CHANGE_HEADER), b"").decode("latin-1"))
+        except ValueError as exc:
+            body = json.dumps({"detail": {"error": "invalid change id", "message": str(exc)}}).encode()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 400,
+                    "headers": [(b"content-type", b"application/json"), (REQUEST_ID_HEADER, rid.encode("latin-1"))],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
         token = request_id_var.set(rid)
         source_token = source_var.set(claimed if claimed in SOURCES else "api")
+        change_token = change_var.set(change)
 
         async def send_with_id(message):
             if message["type"] == "http.response.start":
@@ -64,6 +116,7 @@ class RequestIdMiddleware:
         finally:
             request_id_var.reset(token)
             source_var.reset(source_token)
+            change_var.reset(change_token)
 
 
 def current_request_id() -> str | None:
@@ -73,6 +126,11 @@ def current_request_id() -> str | None:
 def current_source() -> str:
     """``api`` unless the request carried ``X-AIS-Source: module|ui``."""
     return source_var.get()
+
+
+def current_change() -> str | None:
+    """The request's ``X-AIS-Change`` (validated), or the CLI's ``--change``; None without."""
+    return change_var.get()
 
 
 def record(
@@ -87,7 +145,8 @@ def record(
     source: str = "api",
     revision: int | None = None,
 ) -> AuditLog:
-    """Add an audit row to ``session`` (flushed, not committed)."""
+    """Add an audit row to ``session`` (flushed, not committed). An inventory write's row
+    (``revision`` set) carries the request's change id; auth events carry none."""
     row = AuditLog(
         actor=actor,
         action=action,
@@ -98,6 +157,7 @@ def record(
         source=source,
         request_id=current_request_id(),
         revision=revision,
+        change=current_change() if revision is not None else None,
     )
     session.add(row)
     session.flush()
@@ -117,6 +177,7 @@ def audit_out(row: AuditLog) -> dict[str, Any]:
         "source": row.source,
         "request_id": row.request_id,
         "revision": row.revision,
+        "change": row.change,
     }
 
 

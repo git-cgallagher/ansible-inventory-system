@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from ais.api_write import _audit, _finish, check_export
 from ais.auth import Principal, require
 from ais.db import get_session
-from ais.importer import live_node_by_path, tag_name_error
+from ais.importer import live_node_by_path, tag_doc, tag_name_error
 from ais.locking import IfMatch, begin_write, etag
 from ais.models import Node, Role, Tag, TagMember
 from ais.resolver import current_revision
@@ -34,15 +34,8 @@ editor = Depends(require(Role.editor))
 
 
 
-def live_members(session: Session, tag: Tag) -> list[str]:
-    rows = session.scalars(
-        select(Node.path).join(TagMember, TagMember.node_id == Node.id).where(TagMember.tag_id == tag.id, Node.deleted_rev.is_(None))
-    )
-    return sorted(rows)
-
-
 def tag_out(session: Session, tag: Tag) -> dict[str, Any]:
-    return {"name": tag.name, "description": tag.description, "members": live_members(session, tag)}
+    return tag_doc(session, tag)  # type: ignore[return-value]
 
 
 def _get_tag(session: Session, name: str) -> Tag:
@@ -99,16 +92,28 @@ def put_tag(
         response.headers["ETag"] = etag(rev_now)
         return {"revision": rev_now, "changed": False, "tag": before}
     rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"tag {name}")
+    out = converge_tag(session, name, req.description, wanted_members)
+    check_export(session)  # a tag named like a hierarchy group is a 409 here
+    _audit(session, principal, rev, "tag.set", "tag", name, before, out)
+    return _finish(response, rev, {"tag": out})
+
+
+def converge_tag(session: Session, name: str, description: str | None, members: list[str], restore_ids: list[int] | None = None) -> dict[str, Any]:
+    """Create or converge tag ``name``: ``description`` replaced, live members exactly
+    ``members`` (paths; 404 for one that is not live). Memberships of deleted nodes are left
+    alone; ``restore_ids`` adds membership rows for such node ids (a revert of a tag delete
+    puts back the ones the delete removed). Returns ``tag_out``. Shared with ``ais.revert``."""
     nodes: dict[str, Node] = {}
-    for path in wanted_members:
+    for path in members:
         node = live_node_by_path(session, path)
         if node is None:
             raise HTTPException(404, f"node {path} does not exist")
         nodes[path] = node
+    tag = session.scalar(select(Tag).where(Tag.name == name))
     if tag is None:
         tag = Tag(name=name)
         session.add(tag)
-    tag.description = req.description
+    tag.description = description
     session.flush()
     current = {
         tm.node_id: tm
@@ -122,11 +127,30 @@ def put_tag(
             session.delete(tm)
     for node_id in keep - set(current):
         session.add(TagMember(tag_id=tag.id, node_id=node_id))
+    if restore_ids:
+        existing = set(session.scalars(select(TagMember.node_id).where(TagMember.tag_id == tag.id)))
+        for node_id in set(restore_ids) - existing - keep:
+            if session.get(Node, node_id) is not None:
+                session.add(TagMember(tag_id=tag.id, node_id=node_id))
     session.flush()
-    check_export(session)  # a tag named like a hierarchy group is a 409 here
-    out = tag_out(session, tag)
-    _audit(session, principal, rev, "tag.set", "tag", name, before, out)
-    return _finish(response, rev, {"tag": out})
+    return tag_out(session, tag)
+
+
+def remove_tag(session: Session, tag: Tag) -> dict[str, Any]:
+    """Delete ``tag`` and every membership row; returns the ``tag.delete`` audit row's
+    ``before``: ``tag_out`` plus ``deleted_members`` (``[{id, path}]``), the memberships of
+    nodes that are deleted now, which ``tag_out`` leaves out and a revert puts back (a
+    restore of those nodes then brings them back into the tag)."""
+    before = tag_out(session, tag)
+    gone = session.execute(
+        select(Node.id, Node.path).join(TagMember, TagMember.node_id == Node.id).where(TagMember.tag_id == tag.id, Node.deleted_rev.is_not(None))
+    ).all()
+    if gone:
+        before["deleted_members"] = [{"id": i, "path": p} for i, p in sorted(gone)]
+    session.execute(delete(TagMember).where(TagMember.tag_id == tag.id))
+    session.delete(tag)
+    session.flush()
+    return before
 
 
 @router.delete("/tags/{name}")
@@ -139,9 +163,6 @@ def delete_tag(
 ) -> dict[str, Any]:
     rev = begin_write(session, if_match, actor=principal.actor, message=f"delete tag {name}")
     tag = _get_tag(session, name)
-    before = tag_out(session, tag)
-    session.execute(delete(TagMember).where(TagMember.tag_id == tag.id))
-    session.delete(tag)
-    session.flush()
+    before = remove_tag(session, tag)
     _audit(session, principal, rev, "tag.delete", "tag", name, before, None)
     return _finish(response, rev, {"name": name})

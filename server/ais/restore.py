@@ -101,10 +101,12 @@ def restore_subtree(
     actor: str,
     source: str,
     message: str | None = None,
+    rev: Revision | None = None,
 ) -> RestoreResult:
     """Bring the subtree at ``path`` back as it was at ``revision`` (default: the last
-    revision before its latest delete) under one new revision. Raises ``RestoreError``
-    (with the HTTP status) or ``ImportError_`` (422: a value its definition now rejects)."""
+    revision before its latest delete) under one new revision, or under ``rev`` (a revert
+    undoing a delete shares its one revision). Raises ``RestoreError`` (with the HTTP
+    status) or ``ImportError_`` (422: a value its definition now rejects)."""
     path = path.strip()
     if not path or path == ROOT:
         raise RestoreError(422, "the root cannot be restored: give the path of a deleted subtree, such as all.commercial.prod.dc1")
@@ -151,9 +153,11 @@ def restore_subtree(
             )
 
     tree = export_tree(session, revision, path)
-    result = import_tree_report(session, tree, actor=actor, message=message or f"restore {path} from revision {revision}")
+    shared = rev is not None
+    result = import_tree_report(session, tree, actor=actor, message=message or f"restore {path} from revision {revision}", rev=rev)
     rev = result.revision
-    rev.source = source  # the importer says "import"; this revision is a restore from this client
+    if not shared:
+        rev.source = source  # the importer says "import"; this revision is a restore from this client
 
     new_by_path = {
         n.path: n

@@ -12,7 +12,8 @@
   subtree without ``recursive``) carries the server's message (a structured detail's
   ``message``). 401/403 name the token; 422 and 404 carry the server's detail.
 * Sends ``X-AIS-Source: module`` and one ``X-Request-ID`` per task so audit rows can be tied
-  to the run.
+  to the run, and ``X-AIS-Change`` from the ``change`` option (or ``AIS_CHANGE``) so the
+  revisions of one change can be listed and reverted together.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ def client_argument_spec():
         token=dict(type="str", no_log=True),
         validate_certs=dict(type="bool", default=True),
         timeout=dict(type="int", default=30),
+        change=dict(type="str"),
     )
 
 
@@ -64,6 +66,7 @@ class Client(object):
         self.request_id = uuid.uuid4().hex
         self.revision = params.get("expect_revision")  # None: read lazily before the first write
         self.message = params.get("revision_message")
+        self.change = params.get("change") or os.environ.get("AIS_CHANGE") or None
         if not self.base:
             module.fail_json(msg="url is required (option url or AIS_URL)")
         if not self.token:
@@ -81,10 +84,13 @@ class Client(object):
         }
         if if_match is not None:
             headers["If-Match"] = '"%d"' % if_match
+        if self.change:
+            headers["X-AIS-Change"] = self.change
         return headers
 
-    def request(self, method, path, body=None, if_match=None, allow=(404,)):
-        """Return ``(status, data)``. Non-2xx statuses not in ``allow`` fail the module."""
+    def request(self, method, path, body=None, if_match=None, allow=(404,), keep_body=False):
+        """Return ``(status, data)``. Non-2xx statuses not in ``allow`` fail the module; an
+        allowed one returns ``data`` None unless ``keep_body`` (then FastAPI's ``detail``)."""
         url = self.base + API + path
         data = json.dumps(body) if body is not None else None
         resp, info = fetch_url(self.module, url, data=data, headers=self._headers(if_match), method=method, timeout=self.timeout)
@@ -104,8 +110,14 @@ class Client(object):
         if 200 <= status < 300:
             return status, parsed
         if status in allow:
+            if keep_body:
+                return status, parsed.get("detail") if isinstance(parsed, dict) else parsed
             return status, None
         self._fail(status, parsed, info, url)
+
+    def fail(self, status, detail, url=""):
+        """Fail the task the way a refused request does (``detail`` = FastAPI's ``detail``)."""
+        self._fail(status, {"detail": detail}, {}, url)
 
     def _fail(self, status, parsed, info, url):
         detail = parsed.get("detail") if isinstance(parsed, dict) else parsed

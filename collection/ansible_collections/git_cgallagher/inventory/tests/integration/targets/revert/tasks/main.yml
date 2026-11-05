@@ -1,0 +1,129 @@
+---
+# revert: writes tagged with a change id, the revisions filter, check mode (dry run), revert of a
+# change, repeat (already reverted), revert of one revision, refusals, cleanup.
+- name: One change id for this run (set_fact pins it; a templated var is re-evaluated on every use)
+  ansible.builtin.set_fact:
+    it_change: "it-revert-{{ '%Y%m%d%H%M%S' | strftime }}"
+
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: A group, tagged with the change id
+      git_cgallagher.inventory.node:
+        path: all.commercial.prod.dc1.it_revert
+        vars: {it_revert_var: 1}
+        change: "{{ it_change }}"
+    - name: A value on it, same change
+      git_cgallagher.inventory.variable:
+        path: all.commercial.prod.dc1.it_revert
+        key: it_revert_other
+        value: [a, b]
+        change: "{{ it_change }}"
+      register: second
+
+    - name: The change's revisions
+      ansible.builtin.uri:
+        url: "{{ ais_url }}/api/v1/revisions?change={{ it_change }}"
+        headers:
+          Authorization: "Bearer {{ ais_token }}"
+      register: revs
+    - ansible.builtin.assert:
+        that:
+          - revs.json | length == 2
+          - revs.json | map(attribute='change') | unique == [it_change]
+          - revs.json[0].id == second.revision
+
+    - name: Revert the change in check mode (a dry run)
+      git_cgallagher.inventory.revert:
+        revert_change: "{{ it_change }}"
+      check_mode: true
+      register: chk
+    - name: Still there
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.prod.dc1.it_revert
+      register: after_chk
+    - ansible.builtin.assert:
+        that:
+          - chk is changed
+          - chk.reverted | length == 2
+          - chk.operations | map(attribute='action') | list == ['variable.unset', 'node.delete']
+          - after_chk.exists
+
+    - name: Revert the change
+      git_cgallagher.inventory.revert:
+        revert_change: "{{ it_change }}"
+        change: "{{ it_change }}-undo"
+        revision_message: integration revert
+      register: undone
+    - name: Revert it again (already reverted)
+      git_cgallagher.inventory.revert:
+        revert_change: "{{ it_change }}"
+      register: again
+    - name: Gone
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.prod.dc1.it_revert
+      register: gone
+    - ansible.builtin.assert:
+        that:
+          - undone is changed
+          - undone.operations | length == 2
+          - again is not changed
+          - again.reverted_by == [undone.revision]
+          - not gone.exists
+
+    - name: Revert the revert (by revision) brings it back
+      git_cgallagher.inventory.revert:
+        revision: "{{ undone.revision }}"
+      register: redone
+    - name: Back
+      git_cgallagher.inventory.node_info:
+        path: all.commercial.prod.dc1.it_revert
+      register: back
+    - ansible.builtin.assert:
+        that:
+          - redone is changed
+          - back.exists
+          - back.node.vars.it_revert_other == ['a', 'b']
+
+    - name: A later write to the same key
+      git_cgallagher.inventory.variable:
+        path: all.commercial.prod.dc1.it_revert
+        key: it_revert_other
+        value: [c]
+    - name: Reverting the change now conflicts
+      git_cgallagher.inventory.revert:
+        revision: "{{ redone.revision }}"
+      register: conflict
+      ignore_errors: true
+    - name: A change id nothing carries
+      git_cgallagher.inventory.revert:
+        revert_change: it-no-such-change
+      register: missing
+      ignore_errors: true
+    - name: An invalid change id on a write
+      git_cgallagher.inventory.variable:
+        path: all.commercial.prod.dc1.it_revert
+        key: it_revert_bad
+        value: 1
+        change: "not a change id"
+      register: bad
+      ignore_errors: true
+    - ansible.builtin.assert:
+        that:
+          - conflict is failed
+          - conflict.status == 409
+          - "'force=true' in conflict.msg"
+          - conflict.conflicts | length >= 1
+          - missing is failed
+          - missing.status == 404
+          - bad is failed
+          - bad.status == 400
+          - "'not a change id' not in bad.msg"
+  always:
+    - name: Cleanup
+      git_cgallagher.inventory.node:
+        path: all.commercial.prod.dc1.it_revert
+        state: absent
+        recursive: true
