@@ -58,10 +58,16 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
 
   const onSaved = (key: string, r: WriteResult) => {
     setEditing(null);
+    const hint = r.warnings?.find((w) => w.key === key);
     setMsg(
-      r.changed
-        ? { kind: "ok", text: `Saved ${key}: revision ${r.revision}.` }
-        : { kind: "ok", text: `No change: ${key} already had that value (revision ${r.revision}).` },
+      !r.changed
+        ? { kind: "ok", text: `No change: ${key} already had that value (revision ${r.revision}).` }
+        : hint
+          ? {
+              kind: "warn",
+              text: `Saved ${key}: revision ${r.revision}. ${hint.message} If ${key} is right, declare it on the Variables page to stop this warning.`,
+            }
+          : { kind: "ok", text: `Saved ${key}: revision ${r.revision}.` },
     );
     load();
   };

@@ -312,7 +312,7 @@ test("revert a change set and then the revert, from the Revisions page", async (
 });
 
 // Issue 23: where is a key set, which hosts have which value, and its history by key alone.
-// Last in the file and asserts no revision numbers; it writes its own e2e_gpu key first.
+// Asserts no revision numbers; it writes its own e2e_gpu key first.
 test("variable search: where set, hosts by value, links from the tree, variables and node pages", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("E-mail").fill(EMAIL);
@@ -383,4 +383,32 @@ test("variable search: where set, hosts by value, links from the tree, variables
   await expect(page).toHaveURL(/#\/search\?key=packages$/);
   await expect(page.getByRole("columnheader", { name: "Emits (folded)" })).toBeVisible();
   await expect(page.locator('table.setters tr[data-path="all"]')).toContainText("- vim");
+});
+
+// Issue 24: a key one swap away from a declared one is saved, and the page says "did you mean".
+// Asserts no revision numbers.
+test("saving an undeclared key that looks like a typo shows the hint", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill(EMAIL);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  await page.goto("/#/tree?path=all.federal");
+  await expect(page.getByRole("heading", { level: 1, name: "federal" })).toBeVisible();
+  // packages is declared in seed.yml; pakcages is not
+  await page.getByRole("button", { name: "Add variable" }).click();
+  await page.getByRole("combobox", { name: "Key" }).fill("pakcages");
+  await page.getByRole("textbox", { name: "Value" }).fill('["aide"]');
+  await page.getByRole("button", { name: "Save" }).click();
+  const hint = page.getByRole("alert");
+  await expect(hint).toContainText("Saved pakcages: revision ");
+  await expect(hint).toContainText("pakcages at all.federal is not declared; did you mean packages (declared)?");
+  await expect(page.locator('table.vars:not(.inherited) tr[data-key="pakcages"]')).toBeVisible(); // stored anyway
+
+  // a declared key saves with a plain confirmation
+  await page.getByRole("button", { name: "Edit packages" }).click();
+  await page.getByRole("textbox", { name: "Value" }).fill('["aide", "audit"]');
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("status")).toContainText("Saved packages: revision ");
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });

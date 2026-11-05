@@ -50,6 +50,17 @@ export interface RenderResult {
 export interface WriteResult {
   revision: number;
   changed: boolean;
+  /** Undeclared keys the write stored that look like typos of known ones (server issue 24). */
+  warnings?: KeyWarning[];
+  warnings_total?: number;
+}
+
+export interface KeyWarning {
+  key: string;
+  path: string;
+  did_you_mean: string;
+  declared: boolean;
+  message: string;
 }
 
 export interface RevisionRow {
