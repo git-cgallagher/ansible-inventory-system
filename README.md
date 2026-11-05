@@ -57,6 +57,13 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
   the distribution of values. Both take `subtree`, `revision` and paging; `ais vars` and the
   `variable_info` module are the same search, and the UI has a Search page with "where set"
   links on the Variables and node pages.
+- **Typo warnings and strict mode.** A write that stores an undeclared key close to a declared
+  one (or to an undeclared key many nodes set: `AIS_TYPO_MIN_NODES`, default 5) still succeeds, with `warnings: [{key, path,
+  did_you_mean, declared, message}]` in the response, an Ansible warning (and `key_warnings`) in
+  the modules, a line on stderr from the CLI and a hint in the UI. `AIS_STRICT_KEYS=true`
+  refuses keys that are neither declared nor set anywhere yet (422 with the hint); restores and
+  reverts are never refused. `ais lint` / `GET /api/v1/vars/lint` list the likely typos already
+  in the tree.
 - **Move/rename** (`POST /api/v1/nodes/{id}/move`) rewrites the subtree's paths as new
   temporal rows, so the previous revision still shows the old tree; node ids change.
 - **Tags** (`PUT /api/v1/tags/{name}` with member paths) are extra var-less groups under `all`
@@ -118,6 +125,7 @@ export AIS_TOKEN="$(../.venv/bin/ais token create --user me@example.com)"   # pr
 ../.venv/bin/ais render --path all.commercial.lab.dc1.web --facts '{"os_family": "RedHat"}'
 ../.venv/bin/ais export-tree --subtree all.federal > federal.yml   # import format; --revision, --as, --no-hosts
 ../.venv/bin/ais vars packages                       # where a key is set; --hosts, --value, --subtree, --revision
+../.venv/bin/ais lint                                # undeclared keys that look like typos (exit 1 when any)
 ```
 
 Open `http://127.0.0.1:8000/` for the web UI once it is built (next section). API docs at
@@ -319,12 +327,12 @@ port for a TLS proxy); see section 3 of the getting-started guide.
 |---|---|---|
 | Export / render | `GET /api/v1/export` (ETag, `If-None-Match` → 304), `POST /api/v1/render` (`host` or mock `path`, `overrides`, `facts`, `revision`) | viewer |
 | Tree export | `GET /api/v1/tree?subtree=&revision=&as=&ancestor_vars=&hosts=&format=json\|yaml`: the import format (`POST /import`'s `tree`); ETag, `X-AIS-Revision` | viewer |
-| Variable search | `GET /api/v1/vars?key=&value=&subtree=&revision=&limit=&offset=`: the nodes that set the key themselves (own `value`; `effective` = the fold each emits for merge/append keys; `above_subtree` for the subtree's ancestors). `GET /api/v1/vars/hosts?…` (same parameters): each host's resolved value with `from` (and `sources` for a fold), `total`/`with_key`/`without_key` and the `values` distribution over the whole scope. `value` is JSON (`550.90` a number, `"550.90"` a string; text that is not JSON is a plain string); hosts match the whole resolved value | viewer |
+| Variable search | `GET /api/v1/vars?key=&value=&subtree=&revision=&limit=&offset=`: the nodes that set the key themselves (own `value`; `effective` = the fold each emits for merge/append keys; `above_subtree` for the subtree's ancestors). `GET /api/v1/vars/hosts?…` (same parameters): each host's resolved value with `from` (and `sources` for a fold), `total`/`with_key`/`without_key` and the `values` distribution over the whole scope. `value` is JSON (`550.90` a number, `"550.90"` a string; text that is not JSON is a plain string); hosts match the whole resolved value. `GET /api/v1/vars/lint`: undeclared keys that look like typos of known ones (`keys` with `did_you_mean`, `declared`, `nodes`, `paths`) | viewer |
 | Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions[?change=&before=&limit=]` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
 | Revert (`If-Match`) | `POST /api/v1/revisions/{id}/revert`, `POST /api/v1/changes/{change}/revert` (`force`, `dry_run`, `message`; 201): one new revision; 409 `conflict` (with `conflicts`) when a later revision changed the same things, 409 `already reverted`, 422 when nothing recorded can be inverted; `dry_run` needs no `If-Match` and adds `hosts` | editor |
-| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts; `?dry_run=true` needs no `If-Match`), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`) | editor |
+| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts; `?dry_run=true` needs no `If-Match`), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`). Writes that store values answer `warnings` + `warnings_total` (undeclared keys that look like typos); with `AIS_STRICT_KEYS=true` a new undeclared key is a 422 `undeclared key` (restore and revert excepted) | editor |
 | Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&change=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had (across moves, renames and restores); `key=` alone = that variable's set/unset rows on every node and its definition's rows; `subtree=` = rows whose recorded path (as written then) is at or below it | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |
 | Open | `GET /healthz` (`status`, `version`, `oidc`), `GET /` + `/assets/…` (the built web UI, static files only) | none |

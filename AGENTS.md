@@ -132,6 +132,17 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   `load_snapshot(keys=)` holds only those keys: never export or `check_export` such a snapshot.
   `value=` is JSON with its type (`550.90` ≠ `"550.90"`; non-JSON text = a plain string); nodes
   match their own value, hosts the whole resolved value. Read-only: no revision, no audit row.
+- **Every write that stores values reviews its undeclared keys** (`ais.keycheck.review` over
+  the rows with `created_rev` = the write's revision, after `check_export`, through
+  `api_write.review_keys` in the routes): `PUT …/vars/{key}`, `POST /nodes`, `POST /import` (dry
+  run too), `POST /nodes/restore`, both revert routes, and `ais import`/`restore`/`revert`. The
+  answer carries `warnings` + `warnings_total` (no-op `PUT`s return before and carry neither). A
+  new write path that stores values calls it too. **Strict mode** (`AIS_STRICT_KEYS`, global on
+  purpose: no stored flag to revert) refuses only keys live on no node before the revision, and
+  **restores and reverts pass `strict=False`**: an undo must never be refused
+  (`test_revert.py`'s round trip runs every kind with strict on to hold that). The "close" rule
+  (declared ≤ 2 edits, widely used undeclared ≤ 1 and more used than the key, less for short
+  keys) is the one `lint` uses; keep them one function (`Candidates.suggest`).
 - **Audit rows know their variable.** `audit.record` sets `audit_log.key` for `node_variable`
   rows (`target_id` = `"<node id>/<key>"`, key = everything after the first `/`) and
   `variable_definition` rows (the name); migration 0007 backfilled older rows the same way.
@@ -227,6 +238,7 @@ cd examples && export AIS_DATABASE_URL=sqlite:///./ais.db
 export AIS_TOKEN="$(../.venv/bin/ais token create --user me@example.com)"   # shown once
 ../.venv/bin/ais serve                                 # from examples/
 ../.venv/bin/ais vars packages --hosts --subtree all.federal   # variable search (GET /api/v1/vars[/hosts]); --value, --revision, --json
+../.venv/bin/ais lint                                  # undeclared keys that look like typos (GET /api/v1/vars/lint); exit 1 when any
 ../.venv/bin/ansible-inventory --graph                 # examples/ansible.cfg sets collections_path; token from AIS_TOKEN
 docker compose -f deploy/compose.yml up --build        # PostgreSQL + API + UI on :8000 (verified 2026-11-01, phase 3: Playwright smoke passed against it)
 docker compose -f deploy/compose.yml exec api ais user create admin@example.com --role admin --no-password
@@ -268,6 +280,11 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `source`, both as context variables), `record(session, …)`, `audit_out`, `as_utc` (query
   datetimes: naive = UTC, so `since`/`until` work on SQLite's naive strings and PostgreSQL's
   timestamptz alike).
+- `server/ais/keycheck.py` — `distance` (optimal string alignment with a limit), `Candidates`
+  (declared names + undeclared keys on ≥ `AIS_TYPO_MIN_NODES` nodes, top `MAX_WIDELY_USED`;
+  `suggest`), `review(session, rev_id, strict=)` → `KeyReview` (`body()`, `lines()` for the CLI)
+  or `UndeclaredKeys` (`detail` = the 422 body), `lint` (`GET /api/v1/vars/lint`, `ais lint`),
+  `strict_keys()`. Tests: `tests/test_keycheck.py`.
 - `server/ais/varsearch.py` — `where_set` (the nodes that set a key, own value, `effective`
   fold, `above_subtree`) and `host_values` (each host's resolved value, `from`/`sources`, counts
   and the `values` distribution), `parse_value`/`Wanted` (the `value=` rule), `canonical`.
@@ -500,6 +517,13 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - **A templated play var is re-evaluated on every use.** `vars: {id: "x-{{ '%s' | strftime }}"}`
   gave each task of the `revert` integration target a different change id. Pin such values with
   `set_fact` first.
+- **Ansible reserves a module result's `warnings`** for plain strings (each is passed to
+  `module.warn`; a dict there breaks). The server's structured `warnings` therefore reach module
+  results as `key_warnings`, and `Client.collect` calls `module.warn(message)` once per entry.
+  A registered result's `warnings` list does hold those messages (the `variable` target asserts it).
+- **`select(Node.path).join(Node, …)` with the filter on `NodeVariable` fails** ("Don't know how
+  to join to Node"): the select's only entity is the join target. Start from the variable table
+  with `.select_from(NodeVariable)`.
 - **A module named `import` works** (ansible-test sanity and AnsiballZ both load it by path)
   even though it is a Python keyword; it cannot be imported with a plain `import` statement,
   which nothing needs.

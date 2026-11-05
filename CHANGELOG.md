@@ -3,6 +3,22 @@
 ## Unreleased
 
 ### Added
+- **Typo warnings and strict mode** (#24, warn on undeclared keys that look like typos). A write
+  that stores an undeclared key close to a known one still succeeds and answers `warnings`
+  (`key`, `path`, `did_you_mean`, `declared`, `message`) and `warnings_total`: `PUT
+  /api/v1/nodes/{id}/vars/{key}`, `POST /nodes` (its `vars`), `POST /import` (dry runs too; one
+  entry per key and path, every key before any key's second path, at most 50), `POST
+  /nodes/restore` and both revert routes. Known keys are the declared ones (close = up to 2
+  edits after lower-casing and reading `-` as `_`; optimal string alignment, so a swap of two
+  neighbours is 1) and undeclared keys set on at least `AIS_TYPO_MIN_NODES` nodes (default 5;
+  `0` = off) and on more nodes than the new key (up to 1 edit). Short keys get less slack (1
+  edit up to 6 characters, none up to 3). The `variable`, `node`, `host`, `import` and `revert`
+  modules raise each as an Ansible warning and return `key_warnings`; `ais import`, `ais
+  restore` and `ais revert` print them on stderr; the UI's node page shows the hint after a
+  save. **`AIS_STRICT_KEYS=true`** refuses keys that are neither declared nor set on any node
+  yet (422 `undeclared key`, with the suggestion and how to declare one); existing undeclared
+  keys keep working, and restores and reverts are never refused. **`ais lint`** (exit 1 when
+  it finds any) and `GET /api/v1/vars/lint` (viewer) list the likely typos already in the tree.
 - **Variable search** (#23, variable search). `GET /api/v1/vars?key=` (viewer) lists the nodes
   that set a key in their own variables, by path, with their values, `effective` (the fold each
   emits) for merge/append keys, and with `subtree` the ancestors that set it (`above_subtree`).
