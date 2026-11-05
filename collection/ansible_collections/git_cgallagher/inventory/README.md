@@ -33,6 +33,7 @@ ansible-inventory -i inventory.yml --host web01
 | `variable_definition` | declare a variable's merge strategy (`replace`, `merge`, `append`, `unique_append`) and `json_schema` (enforced on every write) | editor |
 | `node_move` | move and/or rename a node with its subtree (`path` → `new_path`; ids change) | editor |
 | `import` | bulk-import a tree (the `ais import` format) under one revision; additive; check mode is a server dry run | editor |
+| `revert` | undo one revision (`revision`) or every revision of a change id (`revert_change`) as one revision; refuses on later conflicting writes unless `force`; check mode is a server dry run; already reverted = not changed | editor |
 | `node_info` | a node with its variables and children (missing is not an error) | viewer |
 | `render_info` | effective variables of a real host or a mock host at a path, with provenance and Jinja render | viewer |
 
@@ -40,7 +41,9 @@ All writes are idempotent, support check mode and `--diff`, and are optimistical
 the module reads the server's current revision (or takes `expect_revision`), sends it as
 `If-Match`, and fails with both revisions if the inventory moved in between. Writes are audited
 server-side with `source=module` and a per-task request id. `revision_message` is recorded on
-the revision.
+the revision, and `change` (every module, or `AIS_CHANGE`) is sent as `X-AIS-Change` and recorded
+as the revision's change id, so the revisions of one change can be listed
+(`GET /api/v1/revisions?change=`) and undone together with `revert`.
 
 ```yaml
 - hosts: localhost

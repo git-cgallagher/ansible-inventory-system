@@ -37,6 +37,7 @@ options:
       - 1 to 64 characters from letters, digits and C(._:+@-), starting with a letter or digit. Defaults to the
         E(AIS_CHANGE) environment variable.
     type: str
+    version_added: "0.4.0"
 """
 
     # Options shared by the modules that write.
