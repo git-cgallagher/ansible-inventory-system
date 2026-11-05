@@ -83,7 +83,7 @@ export default function App() {
       body = <DiffView params={route.params} />;
       break;
     case "revisions":
-      body = <RevisionsView />;
+      body = <RevisionsView params={route.params} />;
       break;
     case "audit":
       body = <AuditView params={route.params} />;

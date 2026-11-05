@@ -58,6 +58,41 @@ export interface RevisionRow {
   source: string;
   ts: string;
   message: string | null;
+  /** The writer's change id (`X-AIS-Change`), if it gave one. */
+  change: string | null;
+}
+
+/** One inverse operation of a revert: the audit row it records (or would, in a dry run). */
+export interface RevertOperation {
+  reverts: number;
+  action: string;
+  target_type: string;
+  target_id: string;
+  summary: string;
+  before: unknown;
+  after: unknown;
+}
+
+export interface RevertConflict {
+  revision: number;
+  action: string;
+  target: string;
+  actor: string;
+  reverting: number;
+  on: string;
+  already_reverted: boolean;
+}
+
+/** `POST /revisions/{id}/revert` and `/changes/{change}/revert` (dry run: `hosts` too). */
+export interface RevertResult {
+  revision: number;
+  dry_run: boolean;
+  reverted: number[];
+  operations: RevertOperation[];
+  forced_over: RevertConflict[];
+  notes: string[];
+  hosts_changed?: number;
+  hosts?: { host: string; status: string; added?: Record<string, unknown>; removed?: Record<string, unknown>; changed?: Record<string, unknown> }[];
 }
 
 /** A revision where a host's resolved variables changed (`GET /hosts/{name}/snapshots`). */
@@ -89,6 +124,7 @@ export interface AuditRow {
   source: string | null;
   request_id: string | null;
   revision: number | null;
+  change: string | null;
 }
 
 /** Inventory keys the server adds itself; never shown as a variable. */
