@@ -56,4 +56,8 @@ notes:
   - Every write is optimistically locked. If the inventory moves between the module's read and its write
     (another editor, a UI edit), the server answers 409 and the module fails with both revisions; re-run the task.
   - Writes are audited server-side with C(source=module) and a per-task request id.
+  - In check mode the module asks the server for a dry run of each write it would make (C(dry_run=true)), so the
+    server's checks apply (schemas, strict keys, the delete guard, name collisions) and nothing is written. The
+    result's C(impact) says which hosts the change would reach, and C(--diff) prints a short summary. C(changed) is
+    still decided from what the module read. O(expect_revision), when given, is sent with the dry run too.
 """

@@ -38,7 +38,9 @@ ansible-inventory -i inventory.yml --host web01
 | `render_info` | effective variables of a real host or a mock host at a path, with provenance and Jinja render | viewer |
 | `variable_info` | where a key is set (nodes and their own values) and, with `hosts: true`, every host's resolved value with the node it comes from; `value` filters (JSON-typed: `"550.90"` is not `550.90`), `subtree`, `revision`, `limit` | viewer |
 
-All writes are idempotent, support check mode and `--diff`, and are optimistically locked:
+All writes are idempotent, support check mode and `--diff` (check mode is the server's dry run
+of each write: the server's checks apply, nothing is written, and the result's `impact` lists
+the hosts the change would reach; `--diff` prints a summary), and are optimistically locked:
 the module reads the server's current revision (or takes `expect_revision`), sends it as
 `If-Match`, and fails with both revisions if the inventory moved in between. Writes are audited
 server-side with `source=module` and a per-task request id. `revision_message` is recorded on

@@ -29,6 +29,12 @@ changes to the resolver, the exporter, snapshots or the plugin.
 6. **Every host's value of one variable over the whole tree** (`GET /api/v1/vars/hosts`
    without `subtree`) is 1.3–2.2 s: it loads every node in scope, like the export. With a
    datacenter as `subtree` it is 0.03 s. See [Variable search](#variable-search-2026-11-05-issue-23).
+7. **A write's dry run costs what the write costs, plus its impact.** The impact itself is
+   bounded (0.06 s at a datacenter, 0.4–1.1 s at `all`), but the dry run also runs the
+   write and its export check (3.1–3.3 s at 100k hosts). A move or a delete also pays
+   `api_write.live_subtree`, which reads every live node as ORM objects to find the subtree
+   (about 2 s here): the rename below spends 5.6 s, of which 0.4 s is the impact. See
+   [Write previews](#write-previews-2026-11-05-issue-25).
 
 ## Results, 100k hosts on PostgreSQL 16 (compose)
 
@@ -116,6 +122,50 @@ enough with a subtree; snapshots stay the source for per-host history and diffs.
 DESC LIMIT 50` is an index scan backward, 0.2 ms; adding `subtree` (the recorded path,
 `coalesce(after->>'path', before->>'path')`, unindexed) filters the key's rows, 1.8 ms.
 
+### Write previews (2026-11-05, issue 25)
+
+Every write's `dry_run` runs the write in its transaction, computes `impact` (`ais.impact`) and
+rolls back. Measured like the variable-search lines: `ais serve` on the host (Python 3.14, one
+worker) against the generated tree in a PostgreSQL 16 container. The first column is
+`bench/benchmark.py`'s wall clock (median of 5) for the five dry runs it times, and the
+in-process total for the `DELETE` and tag lines; the next two come from timing the same
+requests in process (median of 3), split into the impact and the export check.
+
+| Dry run | Seconds | Impact part | Export check | Impact |
+|---|---:|---:|---:|---|
+| `PUT packages` (unique_append fold) at `all` | 4.33 | 1.08 | 3.12 | 100,000 hosts change |
+| `PUT ntp_server` at `all` | 3.74 | 0.42 | 3.16 | 0 hosts: every datacenter sets it |
+| `PUT ntp_server` at `all.b0.prod.dc0` | 3.32 | 0.06 | 3.24 | 1,680 hosts change |
+| `DELETE` a variable at `all.b0.prod.dc0` | 0.07 | 0.06 | — | 1,680 hosts (this route runs no export check) |
+| rename `all.b0.prod.dc0` (`move`) | 5.61 | 0.39 | 3.13 | 1,680 hosts change groups |
+| `packages` strategy to `replace` (`PUT /variables`) | 1.17 | 1.10 | — | 100,000 hosts (no export check) |
+| tag `all.b0.prod.dc0` (`PUT /tags`) | 3.34 | 0.07 | 3.25 | 1,680 hosts join the tag group |
+
+How the impact stays bounded (the revert preview it replaces resolved every host under the
+reverted paths in full, and every host in the tree when a definition was involved):
+
+- **Only what the write can change.** The helper reads back what the revision touched: value
+  rows opened or closed (path + key), node rows opened or closed (a create, move, delete or
+  restore), and the state that is not temporal (strategies, tag memberships, `inventory_name`)
+  as noted before the write and after it. A value at P: the hosts under P, that key only. A
+  move: the hosts under the old and new paths, and only the keys set above them or inside the
+  moved subtree. A strategy change: the hosts under the nodes that set the key. A schema-only
+  change: nothing.
+- **Light rows.** Every non-host node (9,917 here) and the hosts in scope are read as six
+  plain columns, not ORM objects, and only the keys in scope are read. Unless the revision
+  opened or closed node rows, the before and after sides share the same rows.
+- **One comparison per setter, not per host.** A host's value of a key is the emitted value of
+  the deepest node on its chain that sets it (`resolver._emitted`, the variable-search rule).
+  Hosts with no value of their own share their parent's "who sets what" map, so 100,000 hosts
+  under one change come down to a few thousand distinct comparisons. Values are compared as
+  canonical JSON.
+- **Exact counts, capped lists.** Every affected host is counted; only the first 200 by path
+  are built into the answer (`heapq.nsmallest`).
+
+What is left at the root is reading 110k light rows twice and folding the setters of a fold
+key (18,400 distinct `packages` setters here, most of the 1.08 s). That is about a third of
+the export check the write itself runs, so it was not worth more.
+
 ## Before and after
 
 | | before | after |
@@ -175,5 +225,5 @@ $C down -v      # the volume holds the 100k tree; drop it when done
 
 `generate.py` refuses a database that already holds nodes. Run the benchmark on a freshly
 generated tree, or the "first at this revision" line measures a revision whose snapshots
-already exist. The benchmark writes one variable (`bench_marker`) when `AIS_EDITOR_TOKEN` is
-set.
+already exist. When `AIS_EDITOR_TOKEN` is set, the benchmark runs the five dry runs above
+(nothing written) and then writes one variable (`bench_marker`).

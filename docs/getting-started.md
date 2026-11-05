@@ -378,7 +378,10 @@ an empty test server.
 
 Sign in as an editor or admin. From a node's page you can add a child, move or rename it
 (with its subtree), delete a subtree (the dialog says how many nodes and hosts go, and
-confirms exactly that many), and edit its variables as JSON or YAML. The page shows
+confirms exactly that many), and edit its variables as JSON or YAML. Saving a value, removing
+one, a move and a delete first show how many hosts the change reaches, with the list on
+demand, and the confirmation is refused if someone wrote in between ([Preview a
+change](#preview-a-change)). The page shows
 each inherited value greyed out, with the node it comes from. If someone saved first, the page
 says so, reloads, and keeps your text for you to re-apply.
 
@@ -386,7 +389,8 @@ says so, reloads, and keeps your text for you to re-apply.
 
 The `git_cgallagher.inventory` collection manages the inventory from a playbook. Every module
 supports check mode and `--diff`, changes nothing when nothing differs, and needs an **editor**
-token:
+token. Check mode asks the server for a dry run of each write, so it refuses what the write
+would refuse and returns `impact` (the hosts the change reaches; `--diff` prints a summary):
 
 ```yaml
 - hosts: localhost
@@ -556,6 +560,79 @@ in `errors` with "does not run in the server render". The value is still fine: a
 evaluates it normally on the controller. Facts you pass are data, never templates, as in
 Ansible.
 
+### Preview a change
+
+The render answers "what would this host get?". The other question before a write is "which
+hosts does this change reach?": a value set on `all.commercial` reaches every commercial host
+that doesn't set it lower down. Every write route takes **`dry_run`**: the server runs the
+write in a transaction with every check the real write runs (the schema, strict mode, the
+delete guard, name collisions), measures what it would do to the hosts, and rolls it back.
+Nothing is written, no revision is used up, no audit row is left.
+
+```bash
+TOKEN=$(cat ~/.config/ais/editor.token)
+id=$(curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/api/v1/nodes/all.commercial | jq .id)
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -X PUT "http://127.0.0.1:8000/api/v1/nodes/$id/vars/compliance_profile?dry_run=true" \
+  -d '{"value": "cis-level2"}' | jq .impact
+```
+
+```json
+{
+  "total": 4, "vars_changed": 4, "added": 0, "removed": 0, "regrouped": 0, "moved": 0,
+  "hosts": [
+    {"host": "lab-web01", "path": "all.commercial.lab.dc1.web.lab-web01", "status": "changed",
+     "added": {}, "removed": {}, "changed": {"compliance_profile": {"from": "cis-level1", "to": "cis-level2"}}},
+    "…"
+  ],
+  "groups": [], "groups_total": 0, "limit": 200, "truncated": false
+}
+```
+
+- `dry_run=true` is a query parameter on `POST /nodes`, `PATCH /nodes/{id}`, `POST
+  /nodes/{id}/move`, `DELETE /nodes/{id}`, `PUT`/`DELETE /nodes/{id}/vars/{key}`,
+  `PUT`/`DELETE /variables/{name}` and `PUT`/`DELETE /tags/{name}`; `POST /import`, `POST
+  /nodes/restore` and the two revert routes take `"dry_run": true` in the body.
+- The answer is the body the real write would give (ids a create or move would allocate are
+  `null`), with `dry_run: true`, `revision` = the revision it is based on, and **`impact`**.
+  A refusal is the same status and message the write would give.
+- `impact` has the same shape for every write. `total` is the number of distinct hosts
+  affected; `vars_changed`, `added`, `removed` (a create, delete or restore), `regrouped` (a
+  move, a rename, an `inventory_name` or a tag) and `moved` count them by kind. `hosts` lists
+  them by path: the keys that appear (`added`), disappear (`removed`) or change (`changed`,
+  `from`/`to`), the groups the host `joined` and `left`, and `moved_from`. `groups` counts the
+  hosts that join or leave each group. The lists stop at `limit` (200) with `truncated: true`;
+  the counts are always exact.
+- A dry run needs no `If-Match`. If you send one it must be current (409 otherwise), which is
+  how the UI makes sure the preview matches the page. Then send the real write with
+  `If-Match` = the dry run's `revision`: if anything changed in between, it refuses with 409
+  and you preview again.
+- A schema-only or description-only change to a declaration changes no host (`total: 0`); a
+  strategy change reaches every host whose value comes from more than one node.
+
+The web UI does this for you: **Save** on a variable, **Remove**, **Move / rename** and
+**Delete** on a node, and **Save** / **Undeclare** on the Variables page show "This changes N
+hosts" (expand it for the list) before the confirm button writes. The modules use the dry run
+in check mode, and `--check --diff` prints the summary:
+
+```text
+TASK [Lower the log level for commercial prod] ***
+impact: 3 host(s) affected, 3 vars changed
+  db01: changed (log_level: "warning" -> "error")
+  web01: changed (log_level: "warning" -> "error")
+  web02: changed (log_level: "warning" -> "error")
+```
+
+`ais import --dry-run`, `ais restore --dry-run` and `ais revert --dry-run` print the same
+counts and the first hosts.
+
+How much does it cost? The preview resolves only the hosts and keys the write can change (a
+value at one node: the hosts under it, that key; a strategy change: the hosts under the nodes
+that set it), so at 100,000 hosts it adds 0.06 s for a datacenter and about 1 s for a value at
+`all` that reaches every host. The rest of a dry run costs what the write costs, mostly the
+export check every structural or value write runs (about 3 s at that size). See
+[docs/scale.md](scale.md).
+
 ## 8. Use it from playbooks
 
 An inventory source is a YAML file whose name ends in `inventory.yml`, `inventory.yaml`,
@@ -705,8 +782,9 @@ Roles are global: there's no "editor of `all.federal` only" yet.
   all, 21 of them host(s)") unless the call confirms: `?recursive=true`, or `?expect_count=45`,
   which must equal the number of nodes deleted, the node included (a wrong count refuses even
   with `recursive`). A host or an empty group deletes without either. `?dry_run=true` lists
-  what would go and writes nothing (no `If-Match`). The module wants `recursive: true`; the
-  UI's Delete shows the node and host counts and sends them as the confirmation.
+  what would go and its `impact` on the hosts, and writes nothing (no `If-Match` needed; see
+  [Preview a change](#preview-a-change)). The module wants `recursive: true`; the UI's Delete
+  shows the node and host counts and sends them as the confirmation.
 - **Restore a deleted subtree** with one call. It comes back as it was at the last revision
   before its latest delete (or at the `revision` you give): every node, its own values, node
   `meta` and its tag memberships, under one new revision:
@@ -719,7 +797,8 @@ Roles are global: there's no "editor of `all.federal` only" yet.
   ais restore all.commercial.prod.dc1 --revision 40 --message "dc1 as it was before the migration"
   ```
 
-  `"dry_run": true` (or `--dry-run`) reports the counts and writes nothing. Each host then
+  `"dry_run": true` (or `--dry-run`) reports the counts and the `impact` (the hosts that
+  come back) and writes nothing. Each host then
   resolves as it did at that revision, as long as nothing above the subtree changed since:
   the restore never rolls the parents back. It refuses, writing nothing, when something lives
   at the path now (it never overwrites: delete or move that first, or copy the old version
@@ -839,7 +918,8 @@ revision's `message` is).
 curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"dry_run": true}' \
   http://127.0.0.1:8000/api/v1/changes/SRE-1234/revert
 # {"revision": 61, "dry_run": true, "reverted": [57, 58, 60], "operations": [...],
-#  "hosts_changed": 21, "hosts": [{"host": "web01", "status": "changed", "changed": {...}}, ...]}
+#  "impact": {"total": 21, "vars_changed": 20, "removed": 1, ..., "hosts": [{"host": "web01", "status": "changed", ...}]}}
+#  (hosts_changed and hosts, older names for impact.total and impact.hosts, are still there)
 curl -s -X POST -H "$H" -H 'If-Match: "61"' -H 'X-AIS-Change: SRE-1234-rollback' \
   -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8000/api/v1/changes/SRE-1234/revert
 curl -s -X POST -H "$H" -H 'If-Match: "62"' -H 'Content-Type: application/json' -d '{}' \

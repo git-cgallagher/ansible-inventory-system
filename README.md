@@ -73,10 +73,19 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
   kinds and own values, the declarations they use, and tags. Importing it reproduces the
   inventory, so backup, cloning (`as=` re-roots the copy, `hosts=false` leaves hosts out) and keeping the tree in Git
   are one call each. The import format takes `tags:` (member paths, additive).
+- **Preview any write** (`dry_run`): every write route runs the write with all its checks,
+  answers what it would do and rolls back. The answer's `impact` is the same everywhere: the
+  hosts whose resolved variables change (per-host `added`/`removed`/`changed` keys, `from` →
+  `to`), hosts added or removed, hosts that join or leave groups, exact counts, and the first
+  200 hosts. No `If-Match` needed; one that is sent must be current. Then send the write with
+  `If-Match` = the preview's `revision`, and it refuses if anything changed in between. The
+  UI shows "This changes N hosts" before saving; module check mode is the server's dry run
+  and `--diff` prints the summary. It resolves only the hosts and keys a write can change:
+  0.06 s for a value at a datacenter, about 1 s at `all` with 100k hosts.
 - **Delete asks first, restore is one call.** `DELETE /api/v1/nodes/{id}` refuses (409, with
   the node and host counts) to delete a node that has descendants unless the call says
   `recursive=true` or gives `expect_count` = the subtree's size; `dry_run=true` lists what would
-  go. `POST /api/v1/nodes/restore {path, revision?}` (or `ais restore PATH`) brings a deleted
+  go and its `impact`. `POST /api/v1/nodes/restore {path, revision?}` (or `ais restore PATH`) brings a deleted
   subtree back as it was at a revision (default: the last one before the delete), with its own
   values, node meta and tag memberships, and links the new node ids to the old ones so the audit
   history from before the delete stays visible. It never overwrites a live node.
@@ -88,8 +97,8 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
   first, each recorded as an ordinary audit row (so a revert can be reverted too). Every write
   kind reverts exactly (variables, nodes incl. moves, deletes and restores, definitions, tags,
   imports). It refuses (409, listing them) when a later revision changed the same node, key,
-  definition or tag, unless `force=true`; `dry_run=true` lists the operations and the hosts whose
-  resolved vars would change. `ais revert` and the `revert` module do the same; the UI has a
+  definition or tag, unless `force=true`; `dry_run=true` lists the operations and their `impact`
+  on the hosts. `ais revert` and the `revert` module do the same; the UI has a
   Revert button on each revision and on a change.
 - **Variable schemas**: a definition's `json_schema` is enforced on every write of that key
   (API, import, modules), and a new schema is refused while any live value violates it.
@@ -169,8 +178,10 @@ npm run dev                            # or: hot reload on :5173, API proxied to
   shows each resolved value, where it came from, the Jinja result and per-key template errors.
 - **Structure** (editor role): add a child, move or rename a node with its subtree, delete a
   subtree (the dialog shows how many nodes and hosts go and confirms that count), from the node
-  page.
-- **Variables**: declare a variable's merge strategy, description and JSON Schema.
+  page. Saving or removing a value, a move and a delete first show how many hosts it changes
+  (expand for the list); the confirmation carries the preview's revision as `If-Match`.
+- **Variables**: declare a variable's merge strategy, description and JSON Schema (a save or an
+  undeclare shows the hosts it changes first).
 - **Tags**: create, edit and delete tags and their member paths.
 - **Tokens**: mint API tokens for the plugin and the modules (capped role, expiry; the secret is
   shown once) and revoke them.
@@ -331,8 +342,9 @@ port for a TLS proxy); see section 3 of the getting-started guide.
 | Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions[?change=&before=&limit=]` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
-| Revert (`If-Match`) | `POST /api/v1/revisions/{id}/revert`, `POST /api/v1/changes/{change}/revert` (`force`, `dry_run`, `message`; 201): one new revision; 409 `conflict` (with `conflicts`) when a later revision changed the same things, 409 `already reverted`, 422 when nothing recorded can be inverted; `dry_run` needs no `If-Match` and adds `hosts` | editor |
-| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts; `?dry_run=true` needs no `If-Match`), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `POST /import` (`dry_run: true` needs no `If-Match`; a no-op answers 200 `changed: false`). Writes that store values answer `warnings` + `warnings_total` (undeclared keys that look like typos); with `AIS_STRICT_KEYS=true` a new undeclared key is a 422 `undeclared key` (restore and revert excepted) | editor |
+| Revert (`If-Match`) | `POST /api/v1/revisions/{id}/revert`, `POST /api/v1/changes/{change}/revert` (`force`, `dry_run`, `message`; 201): one new revision; 409 `conflict` (with `conflicts`) when a later revision changed the same things, 409 `already reverted`, 422 when nothing recorded can be inverted; `dry_run` needs no `If-Match` and adds `impact` (and `hosts_changed`/`hosts`, its older names) | editor |
+| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `PUT/DELETE /tags/{name}`, `POST /import` (a no-op answers 200 `changed: false`). Writes that store values answer `warnings` + `warnings_total` (undeclared keys that look like typos); with `AIS_STRICT_KEYS=true` a new undeclared key is a 422 `undeclared key` (restore and revert excepted) | editor |
+| Dry run (any write) | `?dry_run=true` on every write route above (and on tags); `"dry_run": true` in the body of `POST /import`, `/nodes/restore` and the revert routes. Runs the write and every check it runs, rolls back, answers 200 with the write's body (ids it would allocate `null`), `dry_run: true`, `revision` = the base revision, and `impact`: `total`, `vars_changed`, `added`, `removed`, `regrouped`, `moved`, `hosts` (by path, with `added`/`removed`/`changed` keys, `joined`/`left` groups, `moved_from`), `groups` (`joined`/`left` counts), `groups_total`, `limit` (200), `truncated`. Refuses exactly what the write refuses. No `If-Match` needed; one that is sent must be current (409) | editor |
 | Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&change=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had (across moves, renames and restores); `key=` alone = that variable's set/unset rows on every node and its definition's rows; `subtree=` = rows whose recorded path (as written then) is at or below it | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |
 | Open | `GET /healthz` (`status`, `version`, `oidc`), `GET /` + `/assets/…` (the built web UI, static files only) | none |
