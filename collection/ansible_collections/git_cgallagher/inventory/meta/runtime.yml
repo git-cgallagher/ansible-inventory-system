@@ -11,3 +11,4 @@ action_groups:
     - node_move
     - import
     - revert
+    - variable_info

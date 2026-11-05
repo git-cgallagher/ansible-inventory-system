@@ -36,6 +36,7 @@ ansible-inventory -i inventory.yml --host web01
 | `revert` | undo one revision (`revision`) or every revision of a change id (`revert_change`) as one revision; refuses on later conflicting writes unless `force`; check mode is a server dry run; already reverted = not changed | editor |
 | `node_info` | a node with its variables and children (missing is not an error) | viewer |
 | `render_info` | effective variables of a real host or a mock host at a path, with provenance and Jinja render | viewer |
+| `variable_info` | where a key is set (nodes and their own values) and, with `hosts: true`, every host's resolved value with the node it comes from; `value` filters (JSON-typed: `"550.90"` is not `550.90`), `subtree`, `revision`, `limit` | viewer |
 
 All writes are idempotent, support check mode and `--diff`, and are optimistically locked:
 the module reads the server's current revision (or takes `expect_revision`), sends it as

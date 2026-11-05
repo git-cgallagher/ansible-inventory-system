@@ -1,0 +1,133 @@
+---
+# variable_info: where a key is set, hosts by resolved value (replace and a fold), value types,
+# subtree, revision pinning, limit, check mode, failures. Its own subtree on the shared server.
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  vars:
+    it_tree:
+      variables:
+        it_vars_pkgs: {merge_strategy: unique_append}
+      all:
+        children:
+          it_vars:
+            vars: {it_vars_drv: "560.35", it_vars_pkgs: [base]}
+            children:
+              prod:
+                children:
+                  dc1:
+                    children:
+                      gpu:
+                        vars: {it_vars_drv: "550.90", it_vars_pkgs: [cuda]}
+                        hosts:
+                          it-vars01: {}
+                          it-vars02: {it_vars_drv: 550.9}
+                    hosts:
+                      it-vars03: {}
+  block:
+    - name: Create the subtree
+      git_cgallagher.inventory.import:
+        tree: "{{ it_tree }}"
+      register: imported
+
+    - name: Where is it set
+      git_cgallagher.inventory.variable_info:
+        key: it_vars_drv
+      register: where
+    - name: Hosts with the string 550.90, in check mode (an info module never changes anything)
+      git_cgallagher.inventory.variable_info:
+        key: it_vars_drv
+        value: "550.90"
+        subtree: all.it_vars
+        hosts: true
+      check_mode: true
+      register: old
+    - name: The number 550.90 is a different value
+      git_cgallagher.inventory.variable_info:
+        key: it_vars_drv
+        value: 550.90
+        hosts: true
+      register: number
+    - name: A fold variable matches the folded value on hosts, the own value on nodes
+      git_cgallagher.inventory.variable_info:
+        key: it_vars_pkgs
+        value: [base, cuda]
+        subtree: all.it_vars
+        hosts: true
+      register: fold
+    - name: Limit
+      git_cgallagher.inventory.variable_info:
+        key: it_vars_drv
+        subtree: all.it_vars
+        hosts: true
+        limit: 1
+      register: limited
+    - ansible.builtin.assert:
+        that:
+          - where is not changed
+          - where.strategy == 'replace' and not where.declared
+          - where.nodes | map(attribute='path') | list == ['all.it_vars', 'all.it_vars.prod.dc1.gpu', 'all.it_vars.prod.dc1.gpu.it-vars02']
+          - where.nodes_total == 3 and not where.truncated
+          - old is not changed
+          - old.hosts | map(attribute='host') | list == ['it-vars01']
+          - old.hosts[0].from == 'all.it_vars.prod.dc1.gpu'
+          - old.hosts_total == 1 and old.with_key == 3 and old.without_key == 0
+          - old.value_counts | length == 3
+          - old.nodes | map(attribute='path') | list == ['all.it_vars.prod.dc1.gpu']
+          - number.hosts | map(attribute='host') | list == ['it-vars02']
+          - fold.strategy == 'unique_append' and fold.declared
+          - fold.hosts | map(attribute='host') | list == ['it-vars01', 'it-vars02']
+          - fold.hosts[0].sources == ['all.it_vars', 'all.it_vars.prod.dc1.gpu']
+          - fold.nodes == []
+          - limited.hosts | length == 1 and limited.hosts_total == 3 and limited.truncated
+
+    - name: Change the group's value
+      git_cgallagher.inventory.variable:
+        path: all.it_vars.prod.dc1.gpu
+        key: it_vars_drv
+        value: "555.00"
+    - name: Pinned to the import's revision
+      git_cgallagher.inventory.variable_info:
+        key: it_vars_drv
+        value: "550.90"
+        revision: "{{ imported.revision }}"
+        hosts: true
+      register: pinned
+    - name: Now
+      git_cgallagher.inventory.variable_info:
+        key: it_vars_drv
+        value: "550.90"
+        subtree: all.it_vars
+        hosts: true
+      register: now
+    - ansible.builtin.assert:
+        that:
+          - pinned.revision == imported.revision
+          - pinned.hosts | map(attribute='host') | list == ['it-vars01']
+          - now.hosts == [] and now.nodes == []
+
+    - name: Failure - unknown subtree
+      git_cgallagher.inventory.variable_info:
+        key: it_vars_drv
+        subtree: all.it_vars_nope
+      register: nope
+      ignore_errors: true
+    - name: Failure - no key
+      git_cgallagher.inventory.variable_info:
+      register: nokey
+      ignore_errors: true
+    - ansible.builtin.assert:
+        that:
+          - nope is failed and nope.status == 404
+          - nokey is failed
+  always:
+    - name: Cleanup the subtree
+      git_cgallagher.inventory.node:
+        path: all.it_vars
+        state: absent
+        recursive: true
+    - name: Cleanup the definition
+      git_cgallagher.inventory.variable_definition:
+        name: it_vars_pkgs
+        state: absent

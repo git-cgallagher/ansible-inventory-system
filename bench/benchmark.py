@@ -10,6 +10,9 @@ Measures, against ``--url`` with a viewer token (``AIS_TOKEN``):
 * tree export in the import format (``GET /api/v1/tree``): the whole tree as JSON and as
   YAML, and the subtree as YAML;
 * single-host render (``POST /render {host}``, Jinja on) and a mock render at a path;
+* variable search (``GET /api/v1/vars``, ``/vars/hosts``) for ``--key``: where it is set in
+  the whole tree, every host's resolved value (whole tree, with ``--value``, and the subtree),
+  and a fold key (``packages``) for every host;
 * ``ansible-inventory --graph`` through the real plugin (fetch + parse into Ansible's
   inventory, which is what a playbook run pays), with the ETag store off and warm (304);
 * ``ansible-inventory --list``: the same plus ansible-core computing every host's variables
@@ -92,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", required=True, help="a host name to render")
     p.add_argument("--subtree", required=True, help="a subtree path to export")
     p.add_argument("--path", required=True, help="a path for the mock render")
+    p.add_argument("--key", default="app_port", help="a variable to search for (GET /api/v1/vars)")
+    p.add_argument("--value", default="9003", help="a value of --key to match (JSON)")
     p.add_argument("--repeat", type=int, default=5)
     p.add_argument("--skip-ansible", action="store_true")
     args = p.parse_args(argv)
@@ -149,6 +154,21 @@ def main(argv: list[str] | None = None) -> int:
     med, last = timed(lambda: (lambda r: (r[0], r))(api.call("POST", "/api/v1/render", {"path": args.path, "template": False})), args.repeat)
     assert last[1] == 200, last[2][:200]
     row("render mock path (node page read)", med)
+
+    from urllib.parse import urlencode
+
+    for label, route, params in (
+        (f"where is {args.key} set, whole tree", "/api/v1/vars", {"key": args.key}),
+        (f"hosts with {args.key}, whole tree (first page)", "/api/v1/vars/hosts", {"key": args.key}),
+        (f"hosts with {args.key}={args.value}, whole tree", "/api/v1/vars/hosts", {"key": args.key, "value": args.value}),
+        (f"hosts with {args.key}, {args.subtree}", "/api/v1/vars/hosts", {"key": args.key, "subtree": args.subtree}),
+        ("hosts with packages (unique_append fold), whole tree", "/api/v1/vars/hosts", {"key": "packages"}),
+    ):
+        med, last = timed(lambda: (lambda r: (r[0], r))(api.call("GET", f"{route}?{urlencode(params)}")), args.repeat)
+        assert last[1] == 200, last[2][:200]
+        doc = json.loads(last[2])
+        note = f"{doc['total']} nodes" if "nodes" in doc else f"{doc['total']} hosts match, {doc['with_key']} have it, {len(doc['values'])} values"
+        row(label, med, note)
 
     editor = os.environ.get("AIS_EDITOR_TOKEN")
     if editor:

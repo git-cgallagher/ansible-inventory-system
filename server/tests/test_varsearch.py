@@ -106,7 +106,8 @@ def test_where_set_lists_each_node_that_sets_the_key_itself(deep, viewer):
         ("all.b2.dev.dc9.h7", "host", "550.90"),
     ]
     assert all("effective" not in n and "above_subtree" not in n for n in out["nodes"])
-    assert _where(viewer, "nope") == {**_where(viewer, "nope"), "total": 0, "nodes": [], "strategy": "replace", "declared": False}
+    nope = _where(viewer, "nope")
+    assert (nope["total"], nope["nodes"], nope["strategy"], nope["declared"]) == (0, [], "replace", False)
 
 
 def test_where_set_gives_each_setters_fold_like_the_exporter(deep, viewer, session):
