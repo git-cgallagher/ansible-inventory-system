@@ -120,7 +120,12 @@ def main():
     if module.check_mode:
         data = client.preview("PUT", "/nodes/%d/vars/%s" % (node["id"], key), {"value": p["value"]})
         module.exit_json(
-            changed=True, value=p["value"], diff=with_impact(diff, data.get("impact")), impact=data.get("impact"), revision=data["revision"], key_warnings=client.key_warnings
+            changed=True,
+            value=p["value"],
+            diff=with_impact(diff, data.get("impact")),
+            impact=data.get("impact"),
+            revision=data["revision"],
+            key_warnings=client.key_warnings,
         )
     data = client.write("PUT", "/nodes/%d/vars/%s" % (node["id"], key), {"value": p["value"]})
     module.exit_json(changed=True, value=data["value"], diff=diff, revision=client.revision, key_warnings=client.key_warnings)

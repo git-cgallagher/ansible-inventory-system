@@ -100,7 +100,14 @@ revision:
 
 from ansible.module_utils.basic import AnsibleModule
 
-from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, ensure_node, merge_impacts, remove_node, with_impact, write_argument_spec
+from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import (
+    Client,
+    ensure_node,
+    merge_impacts,
+    remove_node,
+    with_impact,
+    write_argument_spec,
+)
 
 
 def find_host(client, name):
