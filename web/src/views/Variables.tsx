@@ -3,6 +3,7 @@ import { api, ApiError, errorText } from "../api";
 import { Notice, Spinner, StrategyBadge, Value } from "../components";
 import { useApp } from "../context";
 import { latestRevision } from "../hooks";
+import { href } from "../router";
 import type { Definition, Revisioned, Strategy, WriteResult } from "../types";
 import { STRATEGIES, canEdit } from "../types";
 import { formatValue, parseValue } from "../value";
@@ -90,7 +91,7 @@ export function VariablesView() {
             <th>Strategy</th>
             <th>Description</th>
             <th>Schema</th>
-            {editable && <th aria-label="Actions" />}
+            <th aria-label="Actions" />
           </tr>
         </thead>
         <tbody>
@@ -111,22 +112,27 @@ export function VariablesView() {
                 </td>
                 <td>{d.description}</td>
                 <td>{d.json_schema ? <Value value={d.json_schema} block /> : <span className="muted">none</span>}</td>
-                {editable && (
-                  <td className="actions">
-                    <button type="button" className="small" onClick={() => setEditing(d)} aria-label={`Edit ${d.name}`}>
-                      Edit
-                    </button>
-                    {confirm === d.name ? (
-                      <button type="button" className="small danger" onClick={() => remove(d.name)} aria-label={`Confirm undeclaring ${d.name}`}>
-                        Confirm
+                <td className="actions">
+                  <a className="small" href={href("search", { key: d.name })} aria-label={`Where is ${d.name} set`} title="The nodes that set it and every host's resolved value">
+                    where set
+                  </a>
+                  {editable && (
+                    <>
+                      <button type="button" className="small" onClick={() => setEditing(d)} aria-label={`Edit ${d.name}`}>
+                        Edit
                       </button>
-                    ) : (
-                      <button type="button" className="small secondary" onClick={() => setConfirm(d.name)} aria-label={`Undeclare ${d.name}`}>
-                        Undeclare
-                      </button>
-                    )}
-                  </td>
-                )}
+                      {confirm === d.name ? (
+                        <button type="button" className="small danger" onClick={() => remove(d.name)} aria-label={`Confirm undeclaring ${d.name}`}>
+                          Confirm
+                        </button>
+                      ) : (
+                        <button type="button" className="small secondary" onClick={() => setConfirm(d.name)} aria-label={`Undeclare ${d.name}`}>
+                          Undeclare
+                        </button>
+                      )}
+                    </>
+                  )}
+                </td>
               </tr>
             ),
           )}

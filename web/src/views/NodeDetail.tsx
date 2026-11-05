@@ -177,6 +177,9 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
                     </td>
                     <td>{same(mine, effective) ? <span className="muted">same</span> : <Value value={effective} />}</td>
                     <td className="actions">
+                      <a className="small" href={href("search", { key: k })} aria-label={`Where is ${k} set`} title="Every node that sets this key and every host's value">
+                        where set
+                      </a>
                       {editable && (
                         <>
                           <button type="button" className="small" onClick={() => setEditing({ key: k, value: mine })} aria-label={`Edit ${k}`}>
@@ -232,6 +235,9 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
                     <Provenance entries={data.provenance[k] ?? []} />
                   </td>
                   <td className="actions">
+                    <a className="small" href={href("search", { key: k })} aria-label={`Where is ${k} set`} title="Every node that sets this key and every host's value">
+                      where set
+                    </a>
                     {editable && !editing && (() => {
                       // A fold variable adds to what is inherited, so start from an empty contribution.
                       const fold = (defs.get(k)?.merge_strategy ?? "replace") !== "replace";
