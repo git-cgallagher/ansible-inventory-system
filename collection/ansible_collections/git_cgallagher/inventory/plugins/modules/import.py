@@ -92,6 +92,15 @@ tags:
   returned: always
   type: list
   elements: str
+key_warnings:
+  description:
+    - Undeclared keys this task wrote that look like typos of a declared key or of an undeclared key many nodes set,
+      one per key and path, each with C(key), C(path), C(did_you_mean), C(declared) and C(message). Each is also an
+      Ansible warning. The write still happened; declare the key (M(git_cgallagher.inventory.variable_definition)) to
+      silence it, or fix the key.
+  returned: always
+  type: list
+  elements: dict
 revision:
   description: Inventory revision after the task (the import's, or the current one when nothing changed).
   returned: always
@@ -112,6 +121,7 @@ def main():
     body = {"tree": p["tree"]}
     if module.check_mode:
         _status, data = client.request("POST", "/import", body=dict(body, dry_run=True), allow=())
+        client.collect(data)
     else:
         data = client.write("POST", "/import", body)
     summary = dict((k, data.get(k)) for k in ("nodes_created", "variables_set", "definitions", "tags"))
@@ -119,6 +129,7 @@ def main():
         changed=bool(data.get("changed")),
         revision=data.get("revision"),
         diff={"before": {}, "after": summary} if data.get("changed") else {"before": {}, "after": {}},
+        key_warnings=client.key_warnings,
         **summary
     )
 

@@ -74,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     vrs.add_argument("--limit", type=int, help="at most this many rows (default: all)")
     vrs.add_argument("--offset", type=int, default=0)
     vrs.add_argument("--json", action="store_true", help="print the API's JSON document instead of a table")
+    lnt = sub.add_parser("lint", help="list undeclared keys that look like typos of known ones (GET /api/v1/vars/lint); exit 1 when any")
+    lnt.add_argument("--json", action="store_true", help="print the API's JSON document instead of lines")
     snp = sub.add_parser("snapshots", help="per-host snapshot history").add_subparsers(dest="snap_cmd", required=True)
     snp.add_parser("run", help="run background passes now until the newest revision is passed")
     snp.add_parser("status", help="newest revision, newest passed revision, last pass")
@@ -138,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "vars":
         return _vars(args)
+    if args.cmd == "lint":
+        return _lint(args)
     if args.cmd == "snapshots":
         from ais import snapshots
 
@@ -166,7 +170,7 @@ def _import(args: argparse.Namespace) -> int:
     leaves one ``import`` audit row otherwise."""
     import yaml
 
-    from ais import audit
+    from ais import audit, keycheck
     from ais.locking import lock_for_write
     from ais.resolver import current_revision
 
@@ -178,9 +182,11 @@ def _import(args: argparse.Namespace) -> int:
         try:
             result = import_tree_report(s, tree, actor="cli", message=args.message)
             build_export(load_snapshot(s))
-        except (ImportError_, ValueError) as exc:
+            keys = keycheck.review(s, result.revision.id, strict=keycheck.strict_keys())
+        except (ImportError_, ValueError) as exc:  # keycheck.UndeclaredKeys is a ValueError
             s.rollback()
             raise SystemExit(f"import refused: {exc}")
+        _print_warnings(keys)
         summary = result.summary()
         counts = (
             f"{result.nodes_created} nodes created, {result.variables_set} variables set, "
@@ -213,7 +219,7 @@ def _restore(args: argparse.Namespace) -> int:
     """The CLI twin of ``POST /api/v1/nodes/restore``: takes the write lock, refuses what the
     API refuses (with its message), checks the export, and leaves one ``node.restore`` audit
     row whose ``restored`` map keeps the subtree's history (``ais.restore``)."""
-    from ais import audit
+    from ais import audit, keycheck
     from ais.api_write import live_vars, node_out
     from ais.locking import lock_for_write
     from ais.models import Node
@@ -228,6 +234,7 @@ def _restore(args: argparse.Namespace) -> int:
         except (RestoreError, ImportError_, ValueError) as exc:
             s.rollback()
             raise SystemExit(f"restore refused: {exc}")
+        _print_warnings(keycheck.review(s, result.revision.id, strict=False))
         summary = result.summary()
         counts = f"{summary['nodes']} nodes ({summary['hosts']} hosts), {summary['variables_set']} variables, {len(summary['tags'])} tags"
         if args.dry_run:
@@ -256,6 +263,7 @@ def _revert(args: argparse.Namespace) -> int:
     """The CLI twin of ``POST /api/v1/revisions/{id}/revert`` and ``POST /changes/{id}/revert``:
     takes the write lock, refuses what the API refuses (conflicts unless ``--force``), checks
     the export, and leaves the same audit rows (``source=cli``)."""
+    from ais import keycheck
     from ais.locking import lock_for_write
     from ais.revert import RevertError, revert, revisions_of_change
 
@@ -276,6 +284,7 @@ def _revert(args: argparse.Namespace) -> int:
         except (RevertError, ValueError) as exc:
             s.rollback()
             raise SystemExit(f"revert refused: {exc}")
+        _print_warnings(keycheck.review(s, result.revision.id, strict=False))
         for op in result.operations:
             print(f"  revision {op['reverts']}: {op['summary']}")
         for c in result.conflicts:
@@ -292,6 +301,33 @@ def _revert(args: argparse.Namespace) -> int:
             return 0
         print(f"reverted {label} as revision {result.revision.id}: {len(result.operations)} operation(s)")
     return 0
+
+
+def _print_warnings(review) -> None:
+    """Near-miss key warnings (``ais.keycheck``) on stderr, so stdout stays the summary."""
+    for line in review.lines():
+        print(line, file=sys.stderr)
+
+
+def _lint(args: argparse.Namespace) -> int:
+    """The CLI twin of ``GET /api/v1/vars/lint``: undeclared keys that look like typos. Exits
+    1 when it finds any, so a pipeline can gate on it."""
+    from ais import keycheck
+    from ais.resolver import current_revision
+
+    with session_scope() as s:
+        keys = keycheck.lint(s)
+        rev = current_revision(s)
+    if args.json:
+        json.dump({"revision": rev, "total": len(keys), "keys": keys, "strict": keycheck.strict_keys()}, sys.stdout, indent=2)
+        print()
+    else:
+        for k in keys:
+            known = "declared" if k["declared"] else "widely used, not declared"
+            more = f" (+{k['nodes'] - len(k['paths'])} more)" if k["nodes"] > len(k["paths"]) else ""
+            print(f"{k['key']}: did you mean {k['did_you_mean']} ({known})? set on {k['nodes']} node(s): {', '.join(k['paths'])}{more}")
+        print(f"{len(keys)} likely typo(s) at revision {rev}", file=sys.stderr)
+    return 1 if keys else 0
 
 
 def _export_tree(args: argparse.Namespace) -> int:

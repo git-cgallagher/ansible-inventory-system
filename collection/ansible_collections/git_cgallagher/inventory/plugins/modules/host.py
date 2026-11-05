@@ -70,6 +70,15 @@ host:
   description: The host node as the server returns it (with its live variables); empty when absent.
   returned: always
   type: dict
+key_warnings:
+  description:
+    - Undeclared keys this task wrote that look like typos of a declared key or of an undeclared key many nodes set,
+      one per key and path, each with C(key), C(path), C(did_you_mean), C(declared) and C(message). Each is also an
+      Ansible warning. The write still happened; declare the key (M(git_cgallagher.inventory.variable_definition)) to
+      silence it, or fix the key.
+  returned: always
+  type: list
+  elements: dict
 revision:
   description: Inventory revision after the task.
   returned: always
@@ -113,9 +122,10 @@ def main():
 
     if p["state"] == "absent":
         if existing is None:
-            module.exit_json(changed=False, host={}, revision=client.current_revision())
+            module.exit_json(changed=False, host={}, revision=client.current_revision(), key_warnings=[])
         changed, _deleted = remove_node(client, module, existing["path"])
-        module.exit_json(changed=changed, host={}, revision=client.revision if client.revision is not None else client.current_revision(),
+        module.exit_json(changed=changed, host={}, key_warnings=[],
+                         revision=client.revision if client.revision is not None else client.current_revision(),
                          diff={"before": {"path": existing["path"]}, "after": {}})
 
     if existing is not None and p["parent_path"] and existing["path"] != "%s.%s" % (p["parent_path"], p["name"]):
@@ -128,7 +138,8 @@ def main():
         if p[key] is not None:
             variables[key] = p[key]
     changed, node, diff = ensure_node(client, module, path, kind="host", variables=variables, purge_vars=p["purge_vars"])
-    module.exit_json(changed=changed, host=node, diff=diff, revision=client.revision if client.revision is not None else client.current_revision())
+    revision = client.revision if client.revision is not None else client.current_revision()
+    module.exit_json(changed=changed, host=node, diff=diff, revision=revision, key_warnings=client.key_warnings)
 
 
 if __name__ == "__main__":

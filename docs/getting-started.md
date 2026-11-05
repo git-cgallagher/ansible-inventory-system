@@ -469,6 +469,59 @@ only some of them.
 Change a strategy with care: it changes the value every host below sees. Render a few hosts
 first (next section).
 
+### Typos: "did you mean …?"
+
+Because declaring is optional, a misspelled key is a valid new key: `log_levle` would be stored,
+nothing would read it, and the real `log_level` would stay as it was. So every write that stores
+values checks the undeclared keys it wrote against the keys the inventory already knows, and
+when one is close it still writes it but says so:
+
+```json
+{"revision": 42, "changed": true, "key": "log_levle", "value": "debug",
+ "warnings": [{"key": "log_levle", "path": "all.commercial.staging", "did_you_mean": "log_level",
+               "declared": true, "message": "log_levle at all.commercial.staging is not declared; did you mean log_level (declared)?"}],
+ "warnings_total": 1}
+```
+
+- **Where you see it.** In that `warnings` list on `PUT …/vars/{key}`, `POST /nodes` (its
+  `vars`), `POST /import` (dry runs too), `POST /nodes/restore` and the revert routes; as an
+  Ansible warning plus `key_warnings` in the result of the `variable`, `node`, `host`, `import`
+  and `revert` modules; on stderr from `ais import`, `ais restore` and `ais revert`; and in the
+  UI's notice after you save a variable. An import lists each key and path once, every key
+  before any key's second path, at most 50, and `warnings_total` counts them all.
+- **What counts as close.** Both keys are compared in lower case with `-` read as `_`. A key is
+  close to a **declared** key within 2 edits (insert, delete, change or swap two neighbouring
+  characters), and to an **undeclared key that at least `AIS_TYPO_MIN_NODES` nodes set** (default
+  5, `0` turns this off) within 1 edit, and only when that key is set on more nodes than the
+  new one. Short keys get less slack: 1 edit up to 6 characters, none (case and `-`/`_` only) up
+  to 3. That is why `ansible_port` is not reported as a typo of `ansible_host` (2 edits, and
+  undeclared), while `gpu_drvier` next to a `gpu_driver` that 20 nodes set is.
+- **Silence it by declaring the key** (or fix the spelling and delete the typo). Declared keys
+  never warn.
+- **Clean up what is already there** with `ais lint` (exit status 1 when it finds something, so a
+  pipeline can gate on it) or `GET /api/v1/vars/lint`: every live undeclared key that looks like
+  a typo, with its suggestion, how many nodes set it and the first paths. Then `ais vars <key>`
+  shows where it is set.
+
+### Strict mode
+
+Set `AIS_STRICT_KEYS=true` on the server to refuse **new** undeclared keys: a write whose key is
+not declared and is set on no node yet gets a 422 that names the key, the likely intended one,
+and how to declare it:
+
+```json
+{"detail": {"error": "undeclared key",
+            "message": "strict mode (AIS_STRICT_KEYS) refuses keys that are not declared and not set anywhere yet: log_levle (did you mean log_level?). To add a new key, declare it first: PUT /api/v1/variables/log_levle, ... Nothing was written",
+            "keys": [{"key": "log_levle", "paths": ["all.commercial.staging"], "nodes": 1, "did_you_mean": "log_level"}]}}
+```
+
+Keys already in the tree keep working: reads, renders, deletes, and new values for them, on any
+node. So you can turn strict mode on over an existing inventory, then tidy up with `ais lint`.
+Restores and reverts are never refused (they put back what was there before, and every change
+must stay undoable); they still warn. Strict mode is one server-wide setting, not per business
+or subtree: a per-subtree flag would be one more thing to store, revert and explain, for a
+policy that is really about how the whole server is run.
+
 ## 7. Check a change before it lands
 
 Render a real host, a mock host, a past revision, or "what if" overrides, without writing
@@ -849,6 +902,8 @@ revision still answers exactly. `ais snapshots status` shows how far it has got.
 | `AIS_DATABASE_URL` | — (required) | `postgresql+psycopg://user:pass@host:5432/db`, or `sqlite:///path.db` for trials |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1,::1` (`*` in `compose.prod.yml`) | peers whose `X-Forwarded-For` is trusted (uvicorn) |
 | `AIS_MAX_DEPTH` | `32` | deepest allowed node (minimum 4) |
+| `AIS_STRICT_KEYS` | off | `true` refuses keys that are neither declared nor set anywhere yet (section 6) |
+| `AIS_TYPO_MIN_NODES` | `5` | an undeclared key set on this many nodes counts as known for "did you mean" warnings; `0` = only declared keys |
 | `AIS_SESSION_TTL_HOURS` | `12` | lifetime of a UI sign-in |
 | `AIS_LOGIN_MAX_FAILURES` / `_PER_IP` / `AIS_LOGIN_WINDOW_SECONDS` | `5` / `20` / `300` | failed-login limiter; `0` turns a limit off |
 | `AIS_SNAPSHOTS` | on | `off` stops the per-host history task (history is then computed on demand) |

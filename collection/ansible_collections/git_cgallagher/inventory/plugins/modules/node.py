@@ -95,6 +95,15 @@ deleted:
   returned: when state=absent and changed
   type: list
   elements: str
+key_warnings:
+  description:
+    - Undeclared keys this task wrote that look like typos of a declared key or of an undeclared key many nodes set,
+      one per key and path, each with C(key), C(path), C(did_you_mean), C(declared) and C(message). Each is also an
+      Ansible warning. The write still happened; declare the key (M(git_cgallagher.inventory.variable_definition)) to
+      silence it, or fix the key.
+  returned: always
+  type: list
+  elements: dict
 revision:
   description: Inventory revision after the task (the last write's, or the current one when nothing changed).
   returned: always
@@ -123,12 +132,14 @@ def main():
     p = module.params
     if p["state"] == "absent":
         changed, deleted = remove_node(client, module, p["path"], recursive=p["recursive"])
-        module.exit_json(changed=changed, node={}, deleted=deleted, revision=client.revision if client.revision is not None else client.current_revision(),
+        module.exit_json(changed=changed, node={}, deleted=deleted, key_warnings=[],
+                         revision=client.revision if client.revision is not None else client.current_revision(),
                          diff={"before": {"path": p["path"], "deleted": deleted} if changed else {}, "after": {}})
     changed, node, diff = ensure_node(
         client, module, p["path"], kind=p["kind"], inventory_name=p["inventory_name"], meta=p["meta"], variables=p["vars"], purge_vars=p["purge_vars"]
     )
-    module.exit_json(changed=changed, node=node, diff=diff, revision=client.revision if client.revision is not None else client.current_revision())
+    revision = client.revision if client.revision is not None else client.current_revision()
+    module.exit_json(changed=changed, node=node, diff=diff, revision=revision, key_warnings=client.key_warnings)
 
 
 if __name__ == "__main__":

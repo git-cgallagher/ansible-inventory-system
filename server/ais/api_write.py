@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais import audit, schema
+from ais import audit, keycheck, schema
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.importer import ImportError_, check_kind, check_name, check_position, definition_doc, infer_kind, live_node_by_path
@@ -109,6 +109,16 @@ def _set_var(session: Session, node: Node, key: str, value: Any, rev: Revision) 
         current.deleted_rev = rev.id
     session.add(NodeVariable(node_id=node.id, key=key, value=value, created_rev=rev.id))
     return True
+
+
+def review_keys(session: Session, rev: Revision, *, strict: bool | None = None) -> dict[str, Any]:
+    """``warnings``/``warnings_total`` for the undeclared keys ``rev`` wrote that look like
+    typos (``ais.keycheck``). In strict mode (``AIS_STRICT_KEYS``, unless ``strict`` says
+    otherwise: restores and reverts pass False) a new undeclared key refuses the write (422)."""
+    try:
+        return keycheck.review(session, rev.id, strict=keycheck.strict_keys() if strict is None else strict).body()
+    except keycheck.UndeclaredKeys as exc:
+        raise HTTPException(422, exc.detail) from exc
 
 
 def _check_value(session: Session, key: str, value: Any, path: str) -> None:
@@ -206,9 +216,10 @@ def create_node(
     for key, value in req.vars.items():
         _set_var(session, node, key, value, rev)
     check_export(session)
+    keys = review_keys(session, rev)
     out = node_out(node, req.vars)
     _audit(session, principal, rev, "node.create", "node", node.id, None, out)
-    return _finish(response, rev, {"node": out})
+    return _finish(response, rev, {"node": out, **keys})
 
 
 @router.patch("/nodes/{node_id}")
@@ -455,13 +466,14 @@ def restore_node(
     except ImportError_ as exc:
         raise HTTPException(422, str(exc)) from exc
     check_export(session)
+    keys = review_keys(session, result.revision, strict=False)  # a restore puts back what was there
     summary = result.summary()
     if req.dry_run:
         restored = [{"path": r["path"], "old_id": r["old_id"]} for r in result.restored]
         session.rollback()
         rev_now = current_revision(session)
         response.headers["ETag"] = etag(rev_now)
-        return {"revision": rev_now, "changed": True, "dry_run": True, **summary, "restored": restored}
+        return {"revision": rev_now, "changed": True, "dry_run": True, **summary, "restored": restored, **keys}
     rev = result.revision
     root = session.get(Node, result.restored[0]["id"])
     out = node_out(root, live_vars(session, root.id))  # type: ignore[arg-type]
@@ -476,7 +488,7 @@ def restore_node(
         {**out, **summary, "restored": result.restored},
     )
     response.status_code = 201
-    return _finish(response, rev, {"dry_run": False, "node": out, **summary, "restored": result.restored})
+    return _finish(response, rev, {"dry_run": False, "node": out, **summary, "restored": result.restored, **keys})
 
 
 # ------------------------------------------------------------------ variables
@@ -518,9 +530,10 @@ def put_var(
     _set_var(session, node, key, req.value, rev)
     session.flush()
     check_export(session)
+    keys = review_keys(session, rev)
     before = {"path": node.path, "key": key, "value": current[key]} if key in current else None
     _audit(session, principal, rev, "variable.set", "node_variable", _var_target(node, key), before, {"path": node.path, "key": key, "value": req.value})
-    return _finish(response, rev, {"node_id": node.id, "key": key, "value": req.value})
+    return _finish(response, rev, {"node_id": node.id, "key": key, "value": req.value, **keys})
 
 
 @router.delete("/nodes/{node_id}/vars/{key}")
