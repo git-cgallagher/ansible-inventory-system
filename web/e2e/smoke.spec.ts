@@ -39,10 +39,12 @@ test("login, keyboard tree, inherited vars, locked edit with a conflict, render,
   await expect(inherited.locator('tr[data-key="packages"]')).toContainText("unique append");
   await expect(page.locator(".rev")).toHaveText("revision 1");
 
-  // --- edit with If-Match: revision 1 → 2
+  // --- edit with If-Match: revision 1 → 2 (Save shows the dry run's impact, then confirm)
   await page.getByRole("button", { name: "Edit log_level" }).click();
   await page.getByRole("textbox", { name: "Value" }).fill('"error"');
   await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByTestId("impact-total")).toHaveText("This changes 3 hosts");
+  await page.getByRole("button", { name: "Confirm save" }).click();
   await expect(page.getByRole("status")).toContainText("revision 2");
   await expect(own.locator('tr[data-key="log_level"]')).toContainText("error");
 
@@ -60,12 +62,13 @@ test("login, keyboard tree, inherited vars, locked edit with a conflict, render,
     });
     if (!r.ok) throw new Error(`concurrent write failed: ${r.status}`);
   });
-  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Save" }).click(); // the preview already refuses: the page is stale
   await expect(page.getByRole("alert")).toContainText("server is at 3");
   await expect(page.locator(".rev")).toHaveText("revision 3");
   await expect(inherited.locator('tr[data-key="e2e_marker"]')).toContainText("bumped");
   await expect(page.getByRole("textbox", { name: "Value" })).toHaveValue('"warning"');
   await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Confirm save" }).click();
   await expect(page.getByRole("status")).toContainText("revision 4");
   await expect(own.locator('tr[data-key="log_level"]')).toContainText("warning");
 
@@ -130,6 +133,8 @@ test("structure, definitions, tags and tokens from the UI; history follows a mov
   await page.getByRole("combobox", { name: "Key" }).fill("redis_port");
   await page.getByRole("textbox", { name: "Value" }).fill("6379");
   await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByTestId("impact-total")).toHaveText("This changes no host."); // a group with no host yet
+  await page.getByRole("button", { name: "Confirm save" }).click();
   const own = page.locator("table.vars:not(.inherited)");
   await expect(own.locator('tr[data-key="redis_port"]')).toContainText("6379");
 
@@ -138,6 +143,8 @@ test("structure, definitions, tags and tokens from the UI; history follows a mov
   await page.getByRole("textbox", { name: "New parent path" }).fill("all.commercial.lab.dc1");
   await page.getByRole("textbox", { name: "New name" }).fill("e2e_cache2");
   await page.getByRole("button", { name: "Move", exact: true }).click();
+  await expect(page.getByTestId("impact-total")).toHaveText("This changes no host.");
+  await page.getByRole("button", { name: "Confirm move" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "e2e_cache2" })).toBeVisible();
   await expect(page).toHaveURL(/path=all\.commercial\.lab\.dc1\.e2e_cache2/);
   await expect(page.getByRole("status")).toContainText("Moved all.commercial.prod.dc1.e2e_cache");
@@ -165,6 +172,7 @@ test("structure, definitions, tags and tokens from the UI; history follows a mov
   await page.getByRole("combobox", { name: "Merge strategy" }).selectOption("replace");
   await page.getByRole("textbox", { name: "JSON Schema" }).fill('{"type": "integer"}');
   await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Confirm save" }).click();
   await expect(page.getByRole("status")).toContainText("Saved e2e_port");
   await expect(page.locator('tr[data-name="e2e_port"]')).toContainText("integer");
   await page.goto("/#/tree?path=all.commercial.prod");
@@ -400,6 +408,9 @@ test("saving an undeclared key that looks like a typo shows the hint", async ({ 
   await page.getByRole("combobox", { name: "Key" }).fill("pakcages");
   await page.getByRole("textbox", { name: "Value" }).fill('["aide"]');
   await page.getByRole("button", { name: "Save" }).click();
+  // the preview already says so, before anything is written
+  await expect(page.getByRole("form", { name: "Edit variable pakcages" })).toContainText("did you mean packages (declared)?");
+  await page.getByRole("button", { name: "Confirm save" }).click();
   const hint = page.getByRole("alert");
   await expect(hint).toContainText("Saved pakcages: revision ");
   await expect(hint).toContainText("pakcages at all.federal is not declared; did you mean packages (declared)?");
@@ -409,6 +420,88 @@ test("saving an undeclared key that looks like a typo shows the hint", async ({ 
   await page.getByRole("button", { name: "Edit packages" }).click();
   await page.getByRole("textbox", { name: "Value" }).fill('["aide", "audit"]');
   await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Confirm save" }).click();
   await expect(page.getByRole("status")).toContainText("Saved packages: revision ");
   await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+// Issue 25: edits, removals, moves and declaration changes show how many hosts they change before
+// saving, and the save is based on the previewed revision, so a write in between refuses.
+test("previews say how many hosts a change reaches; a write in between refuses the save", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill(EMAIL);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("tree", { name: "Inventory tree" })).toBeVisible();
+
+  // all.commercial sets compliance_profile; its hosts: web01, web02, db01 (prod) and lab-web01 (lab)
+  await page.goto("/#/tree?path=all.commercial");
+  await expect(page.getByRole("heading", { level: 1, name: "commercial" })).toBeVisible();
+  const rev = Number((await page.locator(".rev").textContent())?.replace("revision ", ""));
+  await page.getByRole("button", { name: "Edit compliance_profile" }).click();
+  await page.getByRole("textbox", { name: "Value" }).fill('"cis-level2"');
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByTestId("impact-total")).toHaveText(/^This changes \d+ hosts$/);
+  const total = Number((await page.getByTestId("impact-total").textContent())?.match(/\d+/)?.[0]);
+  expect(total).toBeGreaterThanOrEqual(4);
+  await page.getByText(/^Show (all \d+|it)$/).click();
+  const listed = page.getByRole("list", { name: "Hosts this changes" });
+  await expect(listed).toContainText("db01 changed (compliance_profile: cis-level1 → cis-level2)");
+  await expect(page.locator(".rev")).toHaveText(`revision ${rev}`); // the preview wrote nothing
+
+  // someone writes after the preview: the confirmation (If-Match = the preview's revision) refuses
+  await page.evaluate(async () => {
+    const s = JSON.parse(sessionStorage.getItem("ais.session")!);
+    const auth = { Authorization: `Bearer ${s.token}` };
+    const cur = (await (await fetch("/api/v1/revisions?limit=1", { headers: auth })).json())[0].id;
+    const node = await (await fetch("/api/v1/nodes/all.federal", { headers: auth })).json();
+    const r = await fetch(`/api/v1/nodes/${node.id}/vars/e2e_between`, {
+      method: "PUT",
+      headers: { ...auth, "If-Match": `"${cur}"`, "Content-Type": "application/json" },
+      body: JSON.stringify({ value: 1 }),
+    });
+    if (!r.ok) throw new Error(`concurrent write failed: ${r.status}`);
+  });
+  const sent = page.waitForRequest((r) => r.method() === "PUT" && r.url().includes("/vars/compliance_profile") && !r.url().includes("dry_run"));
+  await page.getByRole("button", { name: "Confirm save" }).click();
+  expect((await sent).headers()["if-match"]).toBe(`"${rev}"`);
+  await expect(page.getByRole("alert")).toContainText(`server is at ${rev + 1}`);
+  await expect(page.locator(".rev")).toHaveText(`revision ${rev + 1}`);
+  await expect(page.getByRole("button", { name: "Save" })).toBeVisible(); // back to step one, text kept
+  await expect(page.getByRole("textbox", { name: "Value" })).toHaveValue('"cis-level2"');
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Confirm save" }).click();
+  await expect(page.getByRole("status")).toContainText(`Saved compliance_profile: revision ${rev + 2}`);
+
+  // remove: the preview row, then the write
+  await page.goto("/#/tree?path=all.commercial.prod.dc1");
+  await expect(page.getByRole("heading", { level: 1, name: "dc1" })).toBeVisible();
+  await page.getByRole("button", { name: "Remove dns_servers" }).click();
+  const removing = page.getByRole("row", { name: "Removing dns_servers", exact: true });
+  await expect(removing.getByTestId("impact-total")).toHaveText("This changes 3 hosts");
+  await expect(removing).toContainText("3 get different variables");
+  await page.getByRole("button", { name: "Confirm removing dns_servers" }).click();
+  await expect(page.getByRole("status")).toContainText("Removed dns_servers from all.commercial.prod.dc1");
+
+  // a move lists the hosts that change groups
+  await page.goto("/#/tree?path=all.commercial.prod.dc1.db");
+  await expect(page.getByRole("heading", { level: 1, name: "db" })).toBeVisible();
+  await page.getByRole("button", { name: "Move / rename" }).click();
+  await page.getByRole("textbox", { name: "New name" }).fill("database");
+  await page.getByRole("button", { name: "Move", exact: true }).click();
+  await expect(page.getByTestId("impact-total")).toHaveText("This changes 1 host");
+  await expect(page.getByTestId("impact")).toContainText("1 change groups");
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  // a strategy change on the Variables page reaches every host that has the key
+  await page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Variables" }).click();
+  await page.getByRole("button", { name: "Edit packages" }).click();
+  await page.getByRole("combobox", { name: "Merge strategy" }).selectOption("replace");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByTestId("impact-total")).toHaveText(/^This changes \d+ hosts$/);
+  await page.getByRole("combobox", { name: "Merge strategy" }).selectOption("append");
+  await expect(page.getByTestId("impact")).toHaveCount(0); // an edit drops the preview
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Undeclare packages" }).click();
+  await expect(page.getByRole("row", { name: "Undeclaring packages", exact: true }).getByTestId("impact-total")).toHaveText(/^This changes \d+ hosts$/);
 });

@@ -1,15 +1,17 @@
 import { useState, type KeyboardEvent } from "react";
 import { api } from "../api";
-import { StrategyBadge } from "../components";
+import { ImpactSummary, StrategyBadge } from "../components";
 import { useApp } from "../context";
 import type { InvNode, WriteResult } from "../types";
 import { formatValue, parseValue, type Format } from "../value";
 
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** Edit one key at one node as JSON or YAML. The write carries `If-Match` with the
- * revision the page shows; on a stale 409 the parent reloads and this form keeps the
- * text so the change can be re-applied. */
+/** Edit one key at one node as JSON or YAML. Save first asks the server for a dry run
+ * (`If-Match` = the revision the page shows) and shows how many hosts the value changes;
+ * "Confirm save" then writes with `If-Match` = that preview's revision, so a change made in
+ * between refuses (409). On a stale 409 the parent reloads and this form keeps the text so
+ * the change can be re-applied. Any edit drops the preview. */
 export function VarEditor(props: {
   node: InvNode;
   keyName: string | null;
@@ -26,6 +28,7 @@ export function VarEditor(props: {
   const [text, setText] = useState(() => formatValue(props.initial, "json"));
   const [problem, setProblem] = useState("");
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<WriteResult | null>(null);
   const def = defs.get(key);
 
   const switchTo = (next: Format) => {
@@ -33,6 +36,7 @@ export function VarEditor(props: {
     try {
       setText(formatValue(parseValue(text, format), next));
       setFormat(next);
+      setPreview(null);
       setProblem("");
     } catch (e) {
       setProblem(`Fix the ${format.toUpperCase()} before switching: ${(e as Error).message}`);
@@ -54,14 +58,18 @@ export function VarEditor(props: {
     }
     setProblem("");
     setBusy(true);
+    const url = `/api/v1/nodes/${props.node.id}/vars/${encodeURIComponent(key)}`;
     try {
-      const r = await api<WriteResult>(`/api/v1/nodes/${props.node.id}/vars/${encodeURIComponent(key)}`, {
-        method: "PUT",
-        body: { value },
-        ifMatch: props.revision,
-      });
-      props.onSaved(key, r);
+      if (preview === null) {
+        const dry = await api<WriteResult>(url, { method: "PUT", body: { value }, ifMatch: props.revision, query: { dry_run: true } });
+        if (dry.changed) setPreview(dry);
+        else props.onSaved(key, dry); // the value is already there: nothing to confirm
+      } else {
+        const r = await api<WriteResult>(url, { method: "PUT", body: { value }, ifMatch: preview.revision });
+        props.onSaved(key, r);
+      }
     } catch (err) {
+      setPreview(null);
       props.onError(err);
     } finally {
       setBusy(false);
@@ -81,7 +89,17 @@ export function VarEditor(props: {
         ) : (
           <label>
             Key{" "}
-            <input value={key} onChange={(e) => setKey(e.target.value.trim())} list="declared-vars" required autoFocus={!props.presetKey} aria-label="Key" />
+            <input
+              value={key}
+              onChange={(e) => {
+                setKey(e.target.value.trim());
+                setPreview(null);
+              }}
+              list="declared-vars"
+              required
+              autoFocus={!props.presetKey}
+              aria-label="Key"
+            />
             <datalist id="declared-vars">
               {[...defs.keys()].map((d) => (
                 <option key={d} value={d} />
@@ -106,7 +124,10 @@ export function VarEditor(props: {
       )}
       <textarea
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setPreview(null);
+        }}
         rows={Math.min(16, Math.max(3, text.split("\n").length + 1))}
         spellCheck={false}
         aria-label="Value"
@@ -117,15 +138,23 @@ export function VarEditor(props: {
           {problem}
         </p>
       )}
+      {preview?.impact && <ImpactSummary impact={preview.impact} />}
+      {preview?.warnings
+        ?.filter((w) => w.key === key)
+        .map((w) => (
+          <p key={`${w.key}@${w.path}`} className="muted hint">
+            {w.message} Saving stores it anyway; declare it on the Variables page if it is right.
+          </p>
+        ))}
       <div className="editor-foot">
         <button type="submit" disabled={busy}>
-          {busy ? "Saving…" : "Save"}
+          {busy ? (preview ? "Saving…" : "Checking…") : preview ? "Confirm save" : "Save"}
         </button>
         <button type="button" className="secondary" onClick={props.onCancel}>
           Cancel
         </button>
         <span className="muted">
-          based on revision {props.revision} · Esc cancels · Ctrl/⌘+Enter saves
+          based on revision {preview?.revision ?? props.revision} · Esc cancels · Ctrl/⌘+Enter {preview ? "confirms" : "saves"}
         </span>
       </div>
     </form>
