@@ -307,6 +307,11 @@ def test_clone_into_new_and_existing_parents(session, built):
     assert kinds["all.ops-tools.web-copy.app-a.shard-01.pod-x"] is NodeKind.group
 
 
+def test_empty_database_is_a_clear_404(viewer):
+    r = viewer.get("/api/v1/tree")
+    assert r.status_code == 404 and "the tree is empty" in r.json()["detail"]
+
+
 def test_as_refusals(session, built):
     with pytest.raises(TreeExportError, match="root cannot be re-rooted"):
         export_tree(session, as_path="all.x")

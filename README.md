@@ -321,8 +321,8 @@ and how to rerun them (`bench/generate.py`, `bench/benchmark.py`).
 
 | Path | What |
 |---|---|
-| `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
-| `server/tests/` | fold property tests, export, auth, writes/locking, render, snapshots, plugin ETag, Ansible parity |
+| `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `tree.py` (tree export in the import format), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
+| `server/tests/` | fold property tests, export, tree export round trips, auth, writes/locking, render, snapshots, plugin ETag, Ansible parity |
 | `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
 | `web/` | React + TypeScript UI (Vite; builds into `server/ais/static`), Playwright smoke in `e2e/` |
 | `examples/` | `seed.yml` tree, `inventory.yml`, `ansible.cfg` |

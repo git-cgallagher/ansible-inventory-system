@@ -99,7 +99,9 @@ def export_tree(
     if new_parts and ancestor_vars:
         raise TreeExportError("'as' and ancestor_vars do not combine: a clone keeps its new parents' values")
     snap = load_snapshot(session, revision, None if subtree == ROOT else subtree)
-    top = snap.by_path[subtree]
+    top = snap.by_path.get(subtree)
+    if top is None:  # only the root can be missing here: load_snapshot checked a subtree
+        raise KeyError("the tree is empty (nothing has been imported)")
 
     def rewrite(path: str) -> str:
         if new_parts is None:
