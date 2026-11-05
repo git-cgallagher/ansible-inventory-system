@@ -21,6 +21,7 @@
         that:
           - chk is changed
           - chk.diff.after.vars.redis_port == 6379
+          - chk.impact.total == 0  # a new group holds no host
           - not after_chk.exists
 
     - name: Create
@@ -173,6 +174,8 @@
           - del_chk is changed
           - del_chk.deleted == ['all.commercial.prod.dc1.it_cache', 'all.commercial.prod.dc1.it_cache.it_cache01']
           - del_chk.diff.before.deleted | length == 2
+          - del_chk.impact.removed == 1 and del_chk.impact.hosts[0].host == 'it_cache01'
+          - "'1 removed' in del_chk.diff.prepared"
           - still.exists
           - deleted is changed
           - deleted.deleted | length == 2

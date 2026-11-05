@@ -61,6 +61,17 @@ definition:
   description: The declaration as stored; empty when absent.
   returned: always
   type: dict
+impact:
+  description:
+    - In check mode, what the change would do to the hosts, from the server's dry run (C(dry_run=true)), which also
+      runs every check the write would and refuses what the write would refuse.
+    - C(total) distinct hosts affected; C(vars_changed), C(added), C(removed), C(regrouped) and C(moved) count them by
+      kind; C(hosts) lists them sorted by path (at most C(limit), C(truncated) says when there were more) with
+      C(status) (C(changed), C(added) or C(removed)), the C(added), C(removed) and C(changed) keys (C(from)/C(to)),
+      the groups it C(joined) and C(left) and C(moved_from); C(groups) counts the hosts that join or leave each group.
+      With C(--diff) a short summary is shown.
+  returned: check mode, when changed
+  type: dict
 revision:
   description: Inventory revision after the task.
   returned: always
@@ -69,7 +80,7 @@ revision:
 
 from ansible.module_utils.basic import AnsibleModule
 
-from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, write_argument_spec
+from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, with_impact, write_argument_spec
 
 
 def main():
@@ -90,16 +101,18 @@ def main():
             module.exit_json(changed=False, definition={}, revision=client.current_revision())
         diff = {"before": current, "after": {}}
         if module.check_mode:
-            module.exit_json(changed=True, definition={}, diff=diff, revision=client.current_revision())
+            data = client.preview("DELETE", "/variables/%s" % p["name"])
+            module.exit_json(changed=True, definition={}, diff=with_impact(diff, data.get("impact")), impact=data.get("impact"), revision=data["revision"])
         client.write("DELETE", "/variables/%s" % p["name"])
         module.exit_json(changed=True, definition={}, diff=diff, revision=client.revision)
     wanted = {"name": p["name"], "merge_strategy": p["merge_strategy"], "description": p["description"], "json_schema": p["json_schema"]}
     if current == wanted:
         module.exit_json(changed=False, definition=current, revision=client.current_revision())
     diff = {"before": current or {}, "after": wanted}
-    if module.check_mode:
-        module.exit_json(changed=True, definition=wanted, diff=diff, revision=client.current_revision())
     body = {"merge_strategy": p["merge_strategy"], "description": p["description"], "json_schema": p["json_schema"]}
+    if module.check_mode:
+        data = client.preview("PUT", "/variables/%s" % p["name"], body)
+        module.exit_json(changed=True, definition=wanted, diff=with_impact(diff, data.get("impact")), impact=data.get("impact"), revision=data["revision"])
     data = client.write("PUT", "/variables/%s" % p["name"], body)
     module.exit_json(changed=True, definition=data["definition"], diff=diff, revision=client.revision)
 

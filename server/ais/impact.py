@@ -49,6 +49,8 @@ counts never are.
 
 from __future__ import annotations
 
+import copy
+import heapq
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -132,6 +134,7 @@ class _Scope:
     roots: set[str] | None  # hosts under these paths; None = every host
     keys: set[str] = field(default_factory=set)
     groups: bool = False
+    structural: bool = False  # node rows opened or closed: the hosts differ between the two sides
 
     @property
     def empty(self) -> bool:
@@ -141,8 +144,19 @@ class _Scope:
 @dataclass
 class _Host:
     path: str
-    values: dict[str, Any]
+    setters: dict[str, int]  # key -> id of the deepest node on the chain that sets it (shared, read-only)
     groups: frozenset[str]
+
+
+@dataclass
+class _State:
+    """One side of the diff: the hosts in scope and how to read a key's value."""
+
+    hosts: dict[str, _Host]
+    snap: Snapshot
+
+    def value(self, key: str, node_id: int) -> Any:
+        return _emitted(self.snap, self.snap.nodes[node_id])[key]  # shared cache: read-only
 
 
 def empty(limit: int = LIMIT) -> dict[str, Any]:
@@ -177,7 +191,10 @@ class Preview:
         scope = _scope(session, self.base, rev, self.fixed, after)
         if scope.empty:
             return empty(limit)
-        return _diff(_capture(session, self.base, self.fixed, scope), _capture(session, rev, after, scope), limit)
+        before_rows = _rows(session, self.base, scope)
+        # Unless R opened or closed node rows, both sides have the same nodes: read them once.
+        after_rows = _rows(session, rev, scope) if scope.structural else before_rows
+        return _diff(_capture(session, self.base, self.fixed, scope, before_rows), _capture(session, rev, after, scope, after_rows), limit)
 
 
 # ------------------------------------------------------------------- scope
@@ -260,68 +277,80 @@ def _scope(session: Session, base: int, rev: int, before: _Fixed, after: _Fixed)
         paths |= _paths_of(session, renamed | retagged)
 
     roots = _roots(paths)
-    return _Scope(None if "all" in roots else roots, keys, groups)
+    return _Scope(None if "all" in roots else roots, keys, groups, structural=bool(moved))
 
 
 # ----------------------------------------------------------------- capture
 
 
-def _capture(session: Session, rev: int, fixed: _Fixed, scope: _Scope) -> dict[str, _Host]:
-    """Every host in scope as of ``rev``: its path, its resolved value of each scope key it
-    has, and (when the scope needs them) its groups. ``fixed`` is the non-temporal state as
-    of ``rev``."""
+def _host_filters(session: Session, scope: _Scope) -> list[Any]:
+    """SQL filters selecting the hosts in scope (one query each), or ``[None]``: every host
+    (then ``_rows`` filters in Python when the scope has many roots)."""
+    if scope.roots is None or len(scope.roots) > _ROOT_QUERIES:
+        return [None]
+    return [or_(Node.path == r, _under(session, r)) for r in sorted(scope.roots)]
+
+
+def _rows(session: Session, rev: int, scope: _Scope) -> tuple[list[_Row], list[_Row]]:
+    """Every non-host node live at ``rev`` (the chains, the group names) and the hosts in scope."""
     live = _live_at(Node, rev)
     groups = [_Row(*r) for r in session.execute(select(*_COLS).where(live, Node.kind != NodeKind.host))]
-    for g in groups:
-        g.inventory_name = fixed.names.get(g.id)
-    host_filters: list[Any] = []
-    if scope.roots is None or len(scope.roots) > _ROOT_QUERIES:
-        host_filters.append(None)
-    else:
-        host_filters.extend(or_(Node.path == r, _under(session, r)) for r in sorted(scope.roots))
     hosts: list[_Row] = []
-    for f in host_filters:
+    for f in _host_filters(session, scope):
         stmt = select(*_COLS).where(live, Node.kind == NodeKind.host)
         hosts.extend(_Row(*r) for r in session.execute(stmt if f is None else stmt.where(f)))
     if scope.roots is not None and len(scope.roots) > _ROOT_QUERIES:
         hosts = [h for h in hosts if _within(h.path, scope.roots)]
+    return groups, hosts
 
-    nodes = {n.id: n for n in groups}
+
+def _capture(session: Session, rev: int, fixed: _Fixed, scope: _Scope, rows: tuple[list[_Row], list[_Row]]) -> _State:
+    """Every host in scope as of ``rev``: its path, the node each scope key comes from, and
+    (when the scope needs them) its groups. ``fixed`` is the non-temporal state as of
+    ``rev``; ``rows`` is ``_rows(session, rev, scope)``."""
+    group_rows, hosts = rows
+    nodes: dict[int, _Row] = {}
+    for g in group_rows:  # a copy per side: the inventory_name is that side's
+        nodes[g.id] = _Row(g.id, g.parent_id, g.kind, g.name, g.path, fixed.names.get(g.id))
     nodes.update((h.id, h) for h in hosts)
     vars_by_node: dict[int, dict[str, Any]] = {}
-    if scope.keys:
-        for chunk in _chunks(sorted(scope.keys)):
-            base_stmt = (
-                select(NodeVariable.node_id, NodeVariable.key, NodeVariable.value)
-                .join(Node, Node.id == NodeVariable.node_id)
-                .where(NodeVariable.key.in_(chunk), _live_at(NodeVariable, rev), live)
-            )
-            # Group values always; host values only in scope (a key set on every host would
-            # otherwise read 100k rows for a write to one of them).
-            stmts = [base_stmt.where(Node.kind != NodeKind.host)]
-            stmts += [base_stmt.where(Node.kind == NodeKind.host, f) if f is not None else base_stmt.where(Node.kind == NodeKind.host) for f in host_filters]
-            for stmt in stmts:
-                for node_id, key, value in session.execute(stmt):
-                    if node_id in nodes:
-                        vars_by_node.setdefault(node_id, {})[key] = value
+    live = _live_at(Node, rev)
+    for chunk in _chunks(sorted(scope.keys)):
+        stmt = (
+            select(NodeVariable.node_id, NodeVariable.key, NodeVariable.value)
+            .join(Node, Node.id == NodeVariable.node_id)
+            .where(NodeVariable.key.in_(chunk), _live_at(NodeVariable, rev), live)
+        )
+        # Group values always; host values only in scope (a key set on every host would
+        # otherwise read 100k rows for a write to one of them).
+        stmts = [stmt.where(Node.kind != NodeKind.host)]
+        stmts += [stmt.where(Node.kind == NodeKind.host) if f is None else stmt.where(Node.kind == NodeKind.host, f) for f in _host_filters(session, scope)]
+        for one in stmts:
+            for node_id, key, value in session.execute(one):
+                if node_id in nodes:
+                    vars_by_node.setdefault(node_id, {})[key] = value
     tags: dict[str, list[int]] = {name: [i for i in ids if i in nodes] for name, ids in fixed.tags.items()}
     snap = Snapshot(rev, nodes, {n.path: n for n in nodes.values()}, vars_by_node, dict(fixed.strategies), tags)  # type: ignore[arg-type]
 
     keys = sorted(scope.keys)
-    setter_memo: dict[int, dict[str, _Row]] = {}
+    setter_memo: dict[int, dict[str, int]] = {}
+    no_setters: dict[str, int] = {}
 
-    def setters(n: _Row) -> dict[str, _Row]:
-        """Deepest node on ``n``'s chain (``n`` included) that sets each key."""
+    def setters(n: _Row) -> dict[str, int]:
+        """Deepest node on ``n``'s chain (``n`` included) that sets each key. A node that sets
+        none of them shares its parent's dict, so hosts under one setter share one object
+        (``_diff`` compares each distinct pair once)."""
         got = setter_memo.get(n.id)
         if got is not None:
             return got
         parent = nodes.get(n.parent_id) if n.parent_id is not None else None
-        out = dict(setters(parent)) if parent is not None else {}
+        out = setters(parent) if parent is not None else no_setters
         own = vars_by_node.get(n.id)
         if own:
-            for k in keys:
-                if k in own:
-                    out[k] = n
+            mine = [k for k in keys if k in own]
+            if mine:
+                out = dict(out)
+                out.update((k, n.id) for k in mine)
         if n.kind is not NodeKind.host:
             setter_memo[n.id] = out
         return out
@@ -350,65 +379,106 @@ def _capture(session: Session, rev: int, fixed: _Fixed, scope: _Scope) -> dict[s
             group_memo[n.id] = frozen
         return frozen
 
-    result: dict[str, _Host] = {}
-    for h in hosts:
-        values = {k: _emitted(snap, s)[k] for k, s in setters(h).items()} if keys else {}  # type: ignore[arg-type]
-        result[h.name] = _Host(h.path, values, groups_of(h) if scope.groups else frozenset())
-    return result
+    none: frozenset[str] = frozenset()
+    out = {h.name: _Host(h.path, setters(h) if keys else no_setters, groups_of(h) if scope.groups else none) for h in hosts}
+    return _State(out, snap)
 
 
 # -------------------------------------------------------------------- diff
 
+def _diff(before: _State, after: _State, limit: int) -> dict[str, Any]:
+    key_memo: dict[tuple[str, int | None, int | None], tuple[str, Any, Any] | None] = {}
 
-def _diff(before: dict[str, _Host], after: dict[str, _Host], limit: int) -> dict[str, Any]:
-    entries: list[tuple[str, str, dict[str, Any]]] = []
+    def key_change(k: str, b: int | None, a: int | None) -> tuple[str, Any, Any] | None:
+        """How key ``k`` differs between a host whose value comes from node ``b`` (before)
+        and node ``a`` (after); None when it does not. Computed once per pair of setters."""
+        memo_key = (k, b, a)
+        if memo_key in key_memo:
+            return key_memo[memo_key]
+        if b is None:
+            got: tuple[str, Any, Any] | None = ("added", None, after.value(k, a))  # type: ignore[arg-type]
+        elif a is None:
+            got = ("removed", before.value(k, b), None)
+        else:
+            bv, av = before.value(k, b), after.value(k, a)
+            got = None if canonical(bv) == canonical(av) else ("changed", bv, av)
+        key_memo[memo_key] = got
+        return got
+
+    pair_memo: dict[tuple[int, int], list[tuple[str, tuple[str, Any, Any]]]] = {}
+
+    def var_changes(b: dict[str, int], a: dict[str, int]) -> list[tuple[str, tuple[str, Any, Any]]]:
+        pair = (id(b), id(a))  # setter dicts are shared and alive for the whole diff
+        got = pair_memo.get(pair)
+        if got is None:
+            got = []
+            for k in sorted(set(b) | set(a)):
+                change = key_change(k, b.get(k), a.get(k))
+                if change is not None:
+                    got.append((k, change))
+            pair_memo[pair] = got
+        return got
+
+    affected: list[tuple[str, str, _Host | None, _Host | None, list[tuple[str, tuple[str, Any, Any]]]]] = []
     counts = Counter[str]()
     joined = Counter[str]()
     left = Counter[str]()
-    for name in set(before) | set(after):
-        b, a = before.get(name), after.get(name)
+    for name in before.hosts.keys() | after.hosts.keys():
+        b, a = before.hosts.get(name), after.hosts.get(name)
         if a is None:
-            assert b is not None
             counts["removed"] += 1
-            left.update(b.groups)
-            entries.append((b.path, name, {"host": name, "path": b.path, "status": "removed"}))
+            left.update(b.groups)  # type: ignore[union-attr]
+            affected.append((b.path, name, b, None, []))  # type: ignore[union-attr]
             continue
         if b is None:
             counts["added"] += 1
             joined.update(a.groups)
-            entries.append((a.path, name, {"host": name, "path": a.path, "status": "added"}))
+            affected.append((a.path, name, None, a, []))
             continue
-        added = {k: v for k, v in a.values.items() if k not in b.values}
-        removed = {k: v for k, v in b.values.items() if k not in a.values}
-        changed = {
-            k: {"from": b.values[k], "to": v} for k, v in a.values.items() if k in b.values and canonical(b.values[k]) != canonical(v)
-        }
-        came, went = a.groups - b.groups, b.groups - a.groups
-        if not (added or removed or changed or came or went or a.path != b.path):
+        changes = var_changes(b.setters, a.setters)
+        regrouped = a.groups != b.groups
+        if not (changes or regrouped or a.path != b.path):
             continue
-        entry: dict[str, Any] = {"host": name, "path": a.path, "status": "changed", "added": added, "removed": removed, "changed": changed}
-        if came or went:
-            entry["joined"] = sorted(came)
-            entry["left"] = sorted(went)
-            counts["regrouped"] += 1
-            joined.update(came)
-            left.update(went)
-        if a.path != b.path:
-            entry["moved_from"] = b.path
-            counts["moved"] += 1
-        if added or removed or changed:
+        if changes:
             counts["vars_changed"] += 1
-        entries.append((a.path, name, entry))
-    entries.sort(key=lambda e: (e[0], e[1]))
-    group_rows = [{"group": g, "joined": joined[g], "left": left[g]} for g in sorted(set(joined) | set(left))]
+        if regrouped:
+            counts["regrouped"] += 1
+            joined.update(a.groups - b.groups)
+            left.update(b.groups - a.groups)
+        if a.path != b.path:
+            counts["moved"] += 1
+        affected.append((a.path, name, b, a, changes))
+
+    def entry(path: str, name: str, b: _Host | None, a: _Host | None, changes: list[tuple[str, tuple[str, Any, Any]]]) -> dict[str, Any]:
+        if a is None:
+            return {"host": name, "path": path, "status": "removed"}
+        if b is None:
+            return {"host": name, "path": path, "status": "added"}
+        out: dict[str, Any] = {
+            "host": name,
+            "path": path,
+            "status": "changed",
+            "added": {k: av for k, (kind, _bv, av) in changes if kind == "added"},
+            "removed": {k: bv for k, (kind, bv, _av) in changes if kind == "removed"},
+            "changed": {k: {"from": bv, "to": av} for k, (kind, bv, av) in changes if kind == "changed"},
+        }
+        if a.groups != b.groups:
+            out["joined"] = sorted(a.groups - b.groups)
+            out["left"] = sorted(b.groups - a.groups)
+        if a.path != b.path:
+            out["moved_from"] = b.path
+        return out
+
+    listed = heapq.nsmallest(limit, affected, key=lambda e: (e[0], e[1]))
+    group_rows = [{"group": g, "joined": joined[g], "left": left[g]} for g in sorted(joined.keys() | left.keys())]
     out = empty(limit)
     out.update({k: counts[k] for k in ("vars_changed", "added", "removed", "regrouped", "moved")})
     out.update(
-        total=len(entries),
-        hosts=[e[2] for e in entries[:limit]],
+        total=len(affected),
+        hosts=[copy.deepcopy(entry(*e)) for e in listed],  # values come from the shared caches
         groups=group_rows[:limit],
         groups_total=len(group_rows),
-        truncated=len(entries) > limit or len(group_rows) > limit,
+        truncated=len(affected) > limit or len(group_rows) > limit,
     )
     return out
 

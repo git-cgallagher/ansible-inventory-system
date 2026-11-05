@@ -101,6 +101,17 @@ key_warnings:
   returned: always
   type: list
   elements: dict
+impact:
+  description:
+    - In check mode, what the change would do to the hosts, from the server's dry run (C(dry_run=true)), which also
+      runs every check the write would and refuses what the write would refuse.
+    - C(total) distinct hosts affected; C(vars_changed), C(added), C(removed), C(regrouped) and C(moved) count them by
+      kind; C(hosts) lists them sorted by path (at most C(limit), C(truncated) says when there were more) with
+      C(status) (C(changed), C(added) or C(removed)), the C(added), C(removed) and C(changed) keys (C(from)/C(to)),
+      the groups it C(joined) and C(left) and C(moved_from); C(groups) counts the hosts that join or leave each group.
+      With C(--diff) a short summary is shown.
+  returned: check mode, when changed
+  type: dict
 revision:
   description: Inventory revision after the task (the import's, or the current one when nothing changed).
   returned: always
@@ -109,7 +120,7 @@ revision:
 
 from ansible.module_utils.basic import AnsibleModule
 
-from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, write_argument_spec
+from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, with_impact, write_argument_spec
 
 
 def main():
@@ -120,17 +131,18 @@ def main():
     p = module.params
     body = {"tree": p["tree"]}
     if module.check_mode:
-        _status, data = client.request("POST", "/import", body=dict(body, dry_run=True), allow=())
-        client.collect(data)
+        data = client.preview("POST", "/import", body, in_body=True)
     else:
         data = client.write("POST", "/import", body)
     summary = dict((k, data.get(k)) for k in ("nodes_created", "variables_set", "definitions", "tags"))
+    extra = {"impact": data["impact"]} if module.check_mode and data.get("changed") and data.get("impact") else {}
+    diff = {"before": {}, "after": summary} if data.get("changed") else {"before": {}, "after": {}}
     module.exit_json(
         changed=bool(data.get("changed")),
         revision=data.get("revision"),
-        diff={"before": {}, "after": summary} if data.get("changed") else {"before": {}, "after": {}},
+        diff=with_impact(diff, extra.get("impact")),
         key_warnings=client.key_warnings,
-        **summary
+        **dict(summary, **extra)
     )
 
 

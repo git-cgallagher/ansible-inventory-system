@@ -290,7 +290,9 @@ def test_cli_restore(tmp_path):
         con.execute(f"UPDATE node SET deleted_rev = 2 WHERE path = '{EAST}' OR path LIKE '{EAST}.%'")
         con.execute(f"UPDATE node_variable SET deleted_rev = 2 WHERE node_id IN (SELECT id FROM node WHERE deleted_rev = 2)")
     out = _ais(db, "restore", EAST, "--dry-run")
-    assert out.stdout == f"dry run: would restore {EAST} as of revision 1: 8 nodes (3 hosts), 15 variables, 2 tags\n"
+    lines = out.stdout.splitlines()
+    assert lines[0] == f"dry run: would restore {EAST} as of revision 1: 8 nodes (3 hosts), 15 variables, 2 tags"
+    assert lines[1] == "impact: 3 host(s) affected, 3 added" and len(lines) == 5 and all(": added [" in line for line in lines[2:])
     out = _ais(db, "restore", EAST)
     assert out.stdout.startswith(f"restored {EAST} as of revision 1 as revision 3: 8 nodes")
     with sqlite3.connect(db) as con:

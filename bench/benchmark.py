@@ -18,8 +18,11 @@ Measures, against ``--url`` with a viewer token (``AIS_TOKEN``):
 * ``ansible-inventory --list``: the same plus ansible-core computing every host's variables
   (vars plugins, ``host_vars`` globs, a JSON dump of everything). A playbook never does this;
   it is listed because it is the obvious thing people time.
-* with ``--editor-token`` (``AIS_EDITOR_TOKEN``), one variable write (lock + revision +
-  the exporter check every write runs), then the export and the snapshot pass after it.
+* with ``--editor-token`` (``AIS_EDITOR_TOKEN``), dry runs (``?dry_run=true``: the write,
+  the exporter check and the ``impact`` preview, rolled back) of a value change at ``all``
+  and at ``--subtree``, a rename of ``--subtree`` and a strategy change; then one variable
+  write (lock + revision + the exporter check every write runs), then the export and the
+  snapshot pass after it.
 
 Prints a Markdown table (wall-clock seconds, median of ``--repeat`` runs where repeating
 means something). Not part of CI; results go in ``docs/scale.md``.
@@ -177,6 +180,24 @@ def main(argv: list[str] | None = None) -> int:
         node_id = json.loads(raw)["id"]
         _dt, _s, raw, _e = ed.call("GET", "/api/v1/revisions?limit=1")
         rev = json.loads(raw)[0]["id"]
+
+        def node_id_of(path: str) -> int:
+            return json.loads(ed.call("GET", f"/api/v1/nodes/{path}")[2])["id"]
+
+        root_id, sub_id = node_id_of("all"), node_id_of(args.subtree)
+        sub_parent, _sep, sub_name = args.subtree.rpartition(".")
+        for label, method, route, body in (
+            ("dry run: PUT packages (fold) at all", "PUT", f"/api/v1/nodes/{root_id}/vars/packages", {"value": ["vim"]}),
+            ("dry run: PUT ntp_server at all", "PUT", f"/api/v1/nodes/{root_id}/vars/ntp_server", {"value": "ntp.example.com"}),
+            (f"dry run: PUT ntp_server at {args.subtree}", "PUT", f"/api/v1/nodes/{sub_id}/vars/ntp_server", {"value": "ntp.example.com"}),
+            (f"dry run: rename {args.subtree}", "POST", f"/api/v1/nodes/{sub_id}/move", {"name": f"{sub_name}x"}),
+            ("dry run: packages strategy to replace", "PUT", "/api/v1/variables/packages", {"merge_strategy": "replace"}),
+        ):
+            med, last = timed(lambda: (lambda r: (r[0], r))(ed.call(method, f"{route}?dry_run=true", body)), args.repeat)
+            assert last[1] == 200, last[2][:200]
+            imp = json.loads(last[2])["impact"]
+            row(label, med, f"{imp['total']} hosts affected ({imp['vars_changed']} vars, {imp['regrouped']} groups), {len(imp['hosts'])} listed")
+
         dt, status, raw, _e = ed.call("PUT", f"/api/v1/nodes/{node_id}/vars/bench_marker", {"value": time.time()}, headers={"If-Match": f'"{rev}"'})
         assert status == 200, raw[:200]
         row("variable write (PUT, includes the exporter check)", dt)

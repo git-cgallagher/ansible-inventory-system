@@ -39,6 +39,7 @@
           - chk.definitions == ['it_import_port']
           - chk.tags == ['it_import_tag']
           - chk.diff.after.nodes_created == 4
+          - chk.impact.added >= 1
           - not after_chk.exists
 
     - name: Import

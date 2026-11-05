@@ -55,6 +55,7 @@
     - ansible.builtin.assert:
         that:
           - chk is changed
+          - chk.impact.total == 0  # set nowhere yet: no host changes
           - decl is changed and decl.definition.merge_strategy == 'unique_append'
           - decl2 is not changed
           - decl3 is changed and decl3.diff.before.merge_strategy == 'unique_append' and decl3.definition.json_schema.type == 'array'

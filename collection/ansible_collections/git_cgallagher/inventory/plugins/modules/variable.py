@@ -66,6 +66,17 @@ key_warnings:
   returned: always
   type: list
   elements: dict
+impact:
+  description:
+    - In check mode, what the change would do to the hosts, from the server's dry run (C(dry_run=true)), which also
+      runs every check the write would and refuses what the write would refuse.
+    - C(total) distinct hosts affected; C(vars_changed), C(added), C(removed), C(regrouped) and C(moved) count them by
+      kind; C(hosts) lists them sorted by path (at most C(limit), C(truncated) says when there were more) with
+      C(status) (C(changed), C(added) or C(removed)), the C(added), C(removed) and C(changed) keys (C(from)/C(to)),
+      the groups it C(joined) and C(left) and C(moved_from); C(groups) counts the hosts that join or leave each group.
+      With C(--diff) a short summary is shown.
+  returned: check mode, when changed
+  type: dict
 revision:
   description: Inventory revision after the task.
   returned: always
@@ -74,7 +85,7 @@ revision:
 
 from ansible.module_utils.basic import AnsibleModule
 
-from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, write_argument_spec
+from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, with_impact, write_argument_spec
 
 
 def main():
@@ -99,14 +110,18 @@ def main():
             module.exit_json(changed=False, revision=client.current_revision(), key_warnings=[])
         diff = {"before": {key: current[key]}, "after": {}}
         if module.check_mode:
-            module.exit_json(changed=True, diff=diff, revision=client.current_revision(), key_warnings=[])
+            data = client.preview("DELETE", "/nodes/%d/vars/%s" % (node["id"], key))
+            module.exit_json(changed=True, diff=with_impact(diff, data.get("impact")), impact=data.get("impact"), revision=data["revision"], key_warnings=[])
         client.write("DELETE", "/nodes/%d/vars/%s" % (node["id"], key))
         module.exit_json(changed=True, diff=diff, revision=client.revision, key_warnings=[])
     if present and current[key] == p["value"]:
         module.exit_json(changed=False, value=current[key], revision=client.current_revision(), key_warnings=[])
     diff = {"before": {key: current[key]} if present else {}, "after": {key: p["value"]}}
     if module.check_mode:
-        module.exit_json(changed=True, value=p["value"], diff=diff, revision=client.current_revision(), key_warnings=[])
+        data = client.preview("PUT", "/nodes/%d/vars/%s" % (node["id"], key), {"value": p["value"]})
+        module.exit_json(
+            changed=True, value=p["value"], diff=with_impact(diff, data.get("impact")), impact=data.get("impact"), revision=data["revision"], key_warnings=client.key_warnings
+        )
     data = client.write("PUT", "/nodes/%d/vars/%s" % (node["id"], key), {"value": p["value"]})
     module.exit_json(changed=True, value=data["value"], diff=diff, revision=client.revision, key_warnings=client.key_warnings)
 
