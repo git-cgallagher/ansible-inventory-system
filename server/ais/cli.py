@@ -8,7 +8,7 @@ import json
 import sys
 
 from ais.db import init_db, session_scope
-from ais.importer import import_file
+from ais.importer import ImportError_, import_tree_report
 from ais.resolver import build_export, load_snapshot, resolve
 
 
@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     imp = sub.add_parser("import", help="import a YAML tree")
     imp.add_argument("file")
     imp.add_argument("--message")
+    imp.add_argument("--dry-run", action="store_true", help="report what the import would change, write nothing")
     exp = sub.add_parser("export", help="print the plugin export as JSON")
     exp.add_argument("--revision", type=int)
     exp.add_argument("--subtree")
@@ -74,11 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         init_db()
         return 0
     if args.cmd == "import":
-        init_db()
-        with session_scope() as s:
-            rev = import_file(s, args.file, actor="cli", message=args.message)
-            print(f"imported as revision {rev.id}")
-        return 0
+        return _import(args)
     if args.cmd == "export":
         with session_scope() as s:
             json.dump(build_export(load_snapshot(s, args.revision, args.subtree)), sys.stdout, indent=2)
@@ -115,6 +112,42 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "token":
         return _token(args)
     return 1
+
+
+def _import(args: argparse.Namespace) -> int:
+    """The CLI twin of ``POST /api/v1/import``: takes the write lock, refuses a tree that
+    no longer exports, writes nothing when nothing changed (or ``--dry-run``), and
+    leaves one ``import`` audit row otherwise."""
+    import yaml
+
+    from ais import audit
+    from ais.locking import lock_for_write
+    from ais.resolver import current_revision
+
+    init_db()
+    with open(args.file) as fh:
+        tree = yaml.safe_load(fh)
+    with session_scope() as s:
+        lock_for_write(s)
+        try:
+            result = import_tree_report(s, tree, actor="cli", message=args.message)
+            build_export(load_snapshot(s))
+        except (ImportError_, ValueError) as exc:
+            s.rollback()
+            raise SystemExit(f"import refused: {exc}")
+        summary = {"nodes_created": result.nodes_created, "variables_set": result.variables_set, "definitions": result.definitions_changed}
+        counts = f"{result.nodes_created} nodes created, {result.variables_set} variables set, {len(result.definitions_changed)} definitions changed"
+        if args.dry_run or not result.changed:
+            s.rollback()
+            if args.dry_run:
+                print(f"dry run: would change {counts}" if result.changed else "dry run: nothing to change")
+            else:
+                print(f"nothing to change (revision {current_revision(s)})")
+            return 0
+        rev = result.revision
+        audit.record(s, actor="cli", action="import", target_type="tree", target_id="all", after={"revision": rev.id, **summary}, source="cli", revision=rev.id)
+        print(f"imported as revision {rev.id}: {counts}")
+    return 0
 
 
 def _user(args: argparse.Namespace) -> int:

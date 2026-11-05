@@ -1,0 +1,676 @@
+# Getting started
+
+This guide takes you from nothing to a running inventory server that your playbooks use. It
+covers the ideas behind the tree, a first local run, a PostgreSQL deployment, how to model an
+estate, every way of writing to it, and how to run it day to day. The [README](../README.md)
+is the short reference; this is the long walk.
+
+Everything here was run against 0.3.0. Commands assume a checkout of this repository as the
+current directory unless a step says otherwise.
+
+- [1. The ideas in five minutes](#1-the-ideas-in-five-minutes)
+- [2. Try it locally](#2-try-it-locally)
+- [3. Run it for real (PostgreSQL)](#3-run-it-for-real-postgresql)
+- [4. Design your tree](#4-design-your-tree)
+- [5. Put data in](#5-put-data-in)
+- [6. Declare variables](#6-declare-variables)
+- [7. Check a change before it lands](#7-check-a-change-before-it-lands)
+- [8. Use it from playbooks](#8-use-it-from-playbooks)
+- [9. Secrets](#9-secrets)
+- [10. Users, roles and tokens](#10-users-roles-and-tokens)
+- [11. History, diffs and the audit log](#11-history-diffs-and-the-audit-log)
+- [12. Operating it](#12-operating-it)
+- [13. Limits and known gaps](#13-limits-and-known-gaps)
+- [14. Troubleshooting](#14-troubleshooting)
+
+## 1. The ideas in five minutes
+
+### One tree, one path per host
+
+Every node lives at exactly one place in a single tree, written as a dotted path:
+
+```
+all                                   depth 0  (kind: all)
+└── commercial                        depth 1  (kind: business)
+    └── prod                          depth 2  (kind: tier)
+        └── dc1                       depth 3  (kind: datacenter)
+            └── web                   depth 4+ (kind: group, may nest freely)
+                ├── web01             leaf     (kind: host)
+                └── web02
+```
+
+`web01`'s path is `all.commercial.prod.dc1.web.web01`. A node has one parent, never two, so a
+variable at `all.commercial.prod` applies to commercial production only. There is no
+`all.prod` that both businesses share. That is deliberate: in a strict tree, the order
+variables apply in is simply "top to bottom", with no ties to break.
+
+The first three levels below `all` are named by their **kind**: business, tier and
+datacenter. When you import a tree the kind comes from the depth. Below a datacenter,
+groups nest as deep as you need (`web.edge.eu`, …), and hosts are always leaves.
+
+### Ansible does the merging
+
+The inventory plugin hands Ansible the real group tree with each node's variables on its own
+group. Ansible's normal rule, deeper groups override shallower ones, then yields exactly the
+top-to-bottom order above. The server never re-implements Ansible's precedence. A test
+(`server/tests/test_parity.py`) checks that the server's answer for every host equals
+`ansible-inventory --host`. A second test checks that a playbook sees the same templated value
+as the server's render.
+
+Group names are the path joined with `_`, minus `all`: `all.commercial.prod.dc1.web` is the
+group `commercial_prod_dc1_web`. That keeps `commercial/prod/dc1/web` and
+`federal/prod/dc2/web` apart. The plugin also adds variable-free **tag groups** for targeting:
+
+| Tag group | Contains |
+|---|---|
+| `business_commercial`, `business_federal` | every host under that business |
+| `tier_prod`, `tier_lab`, … | every host in that tier, across businesses |
+| `datacenter_dc1`, … | every host in that datacenter, across businesses and tiers |
+| your own tags (section 5) | every host under the member paths you choose |
+
+Tag groups never carry variables. They exist so that `--limit tier_prod` works. They don't
+let a variable sneak in sideways.
+
+### Some variables add up instead of replacing
+
+Ansible replaces a variable wholesale when a deeper group sets it. That's right for
+`http_port` but wrong for a package list that each level adds to. Here you declare, per
+variable, how it combines down the path:
+
+| Strategy | Combines | Example result for `web02` in `examples/seed.yml` |
+|---|---|---|
+| `replace` (default) | deepest value wins, as in Ansible | `dns_servers: [10.1.0.2, 10.1.0.3]` (set at `all`, replaced at `dc1`) |
+| `merge` | dictionaries merge key by key, recursively | `sysctl: {net.ipv4.ip_forward: 0, vm.swappiness: 10}` (`all` set both, `commercial.prod` changed one) |
+| `append` | lists concatenate, ancestors first | — |
+| `unique_append` | lists concatenate, skipping items already present | `packages: [vim, curl, awscli, nginx, tcpdump]` (from `all`, `commercial`, `web`, and `web02` itself) |
+
+The server works these out and sends the running total at every node that contributes. So
+when Ansible does its usual replace, the deepest node already holds the combined value.
+Ansible never needs to know merging happened.
+
+### Every change is a revision
+
+Every write creates an immutable, numbered **revision**. Nothing is overwritten in place, so
+any revision can be exported, rendered or diffed exactly as it was. Each write must say which
+revision it was based on (`If-Match: "<revision>"`). If someone else wrote first, the write is
+refused with 409 rather than silently undoing their change. The modules and the web UI handle
+this for you.
+
+### The render answers "what would this host get?"
+
+`POST /api/v1/render` (also the UI's Render page and the `render_info` module) shows a host's
+resolved variables. For each one it shows which node it came from, and the result of
+evaluating any Jinja in it. It works for real hosts and for **mock hosts**: "a new machine at
+`all.federal.prod.dc2.web`", with your own overrides and facts. You can check a change before
+any real host exists.
+
+## 2. Try it locally
+
+You need Python 3.12–3.14 (not 3.15: ansible-core 2.21 does not import there) and `git`. This
+uses SQLite and needs no other services.
+
+```bash
+git clone https://github.com/git-cgallagher/ansible-inventory-system.git
+cd ansible-inventory-system
+python3 -m venv .venv && .venv/bin/pip install -e ./server
+export PATH="$PWD/.venv/bin:$PATH"
+export AIS_DATABASE_URL="sqlite:///$PWD/ais.db"
+```
+
+Load the example tree. Importing creates and migrates the database too:
+
+```bash
+ais import examples/seed.yml
+# imported as revision 1
+```
+
+Create an admin who can sign in to the UI. You'll be prompted for the password twice:
+
+```bash
+ais user create admin@example.com --role admin
+```
+
+Then create a separate token-only account for Ansible to read with. A **viewer** can export
+and render but not write. A token is printed once. Keep tokens outside the checkout, so they
+can never be committed:
+
+```bash
+ais user create ansible@example.com --role viewer --no-password
+mkdir -p ~/.config/ais && chmod 700 ~/.config/ais
+ais token create --user ansible@example.com --name laptop > ~/.config/ais/viewer.token
+ais token create --user admin@example.com --name cli --role editor > ~/.config/ais/editor.token
+```
+
+Start the server in a second terminal and leave it running. That terminal needs the same two
+settings:
+
+```bash
+cd ansible-inventory-system
+export PATH="$PWD/.venv/bin:$PATH" AIS_DATABASE_URL="sqlite:///$PWD/ais.db"
+ais serve            # http://127.0.0.1:8000, API docs at /docs
+```
+
+Back in the first terminal:
+
+Point Ansible at it. `examples/` has a ready `inventory.yml` and `ansible.cfg` that uses the
+collection straight from this checkout:
+
+```bash
+cd examples
+export AIS_TOKEN="$(cat ~/.config/ais/viewer.token)"
+ansible-inventory --graph
+ansible-inventory --host web02
+```
+
+`--host web02` shows the merged `packages` and `sysctl` from the table in section 1, plus
+`inventory_revision: 1`. That variable is on every host, so every play run records the
+revision it ran against.
+
+Ask about a host that doesn't exist yet:
+
+```bash
+ais render --path all.federal.prod.dc2.web --facts '{"os_family": "RedHat"}'
+```
+
+**The web UI** is a separate build step when you run from a checkout (the container image in
+section 3 includes it). You need Node 22 or newer:
+
+```bash
+cd web && npm ci && npm run build && cd ..
+```
+
+Restart `ais serve`, open `http://127.0.0.1:8000/` and sign in as `admin@example.com`.
+
+## 3. Run it for real (PostgreSQL)
+
+`deploy/compose.yml` runs PostgreSQL 16 and the API. The image builds the web UI in, and the
+database schema is created or migrated every time the API starts. On its own, it uses the
+development password `ais` and publishes port 8000 on every interface. That's fine on a
+laptop and nowhere else.
+
+`deploy/compose.prod.yml` layers the production settings on top:
+
+- it reads the database password from `AIS_DB_PASSWORD`;
+- it publishes the API on `127.0.0.1:8000` only, for a TLS proxy on the same host;
+- it trusts that proxy's `X-Forwarded-For`;
+- it restarts both containers after a reboot.
+
+Set the password from your secret store when you start the stack, never in a file in git.
+`POSTGRES_PASSWORD` only takes effect when the database volume is first created, so choose it
+before the first `up`.
+
+```bash
+export AIS_DB_PASSWORD="$(your-secret-tool get ais-db-password)"
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml up --build -d
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml exec api ais user create admin@example.com --role admin
+```
+
+(`ports: !override` needs Docker Compose 2.24 or newer.)
+
+The `ais` CLI inside the container talks to the same database. Every command in section 2
+works there with `docker compose … exec api` in front of it. The `user create` prompt needs a
+terminal, which `exec` provides.
+
+### TLS
+
+The server speaks plain HTTP. Put a reverse proxy in front of it to terminate TLS. Tokens and
+passwords travel in every request, so never expose port 8000 directly. For example, with
+[Caddy](https://caddyserver.com/) on the same host:
+
+```
+inventory.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+The API takes the client's address from `X-Forwarded-For` only when the request comes from
+an address in `FORWARDED_ALLOW_IPS`. Otherwise the failed-login limiter sees every client as
+the proxy, and 20 failed logins from anyone lock everyone out for five minutes.
+
+`compose.prod.yml` sets it to `*`. That's safe only because the port is published on loopback,
+so the only peer is your proxy. Inside the container, the proxy appears as Docker's bridge
+gateway (for example `172.19.0.1`), not `127.0.0.1`. If you publish the port more widely, or
+run the proxy on another machine, set `FORWARDED_ALLOW_IPS` to the proxy's address instead.
+
+Then point the plugin at `https://inventory.example.com`. `validate_certs` is on by default;
+keep it on.
+
+### First thing to load
+
+Either import your own tree (section 5) or start from the example:
+
+```bash
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml cp examples/seed.yml api:/tmp/seed.yml
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml exec api ais import /tmp/seed.yml
+```
+
+## 4. Design your tree
+
+**Rule of thumb: a variable lives at the highest node where it is true for everything
+below.** If it differs between two children, push it down to them. If every child sets the
+same value, lift it up.
+
+**Order of the top levels.** Business → tier → datacenter is the fixed spine. It reflects the
+usual order of "who differs from whom most": a federal estate's compliance settings differ
+from commercial in every tier, and prod differs from lab in every datacenter. Put a value at
+the level where it really varies:
+
+| Where | Typical variables |
+|---|---|
+| `all` | NTP, base packages, default DNS, organisation-wide `sysctl` |
+| business (`all.federal`) | compliance profile, logging destination, approved repositories |
+| tier (`all.federal.prod`) | log level, monitoring thresholds, change windows, backup schedule |
+| datacenter (`…prod.dc2`) | DNS servers, site code, NTP override, proxy, subnets |
+| group (`…dc2.web`, `…web.edge`) | the role's ports, packages, tuning |
+| host | its address (`ansible_host`), and anything truly one-off |
+
+**Names.** Node names are letters, digits, `_` and `-` (up to 255 characters). Keep them
+short: the group name joins the whole path. A host name must be unique across the tree,
+because Ansible addresses hosts by name.
+
+**Depth and length limits.** A node can be at most 32 levels deep (`all` is 0;
+`AIS_MAX_DEPTH` raises it) and its path at most 1,500 bytes. At 30-character names the path
+limit is reached around 48 levels, long before any sane design needs it. Both are refused up
+front with a 422 that names the limit.
+
+**Hosts belong to one group.** If a machine is both "web" and "monitoring agent", that's a
+variable or a tag, not a second parent. Use a **tag** (section 5) for cross-cutting
+*targeting* ("all canary hosts"), and a variable for cross-cutting *configuration*.
+
+**Precedence against the rest of Ansible.** Everything here is *inventory* variables, and
+Ansible ranks them as such:
+
+- **Group variables** (every node above a host) lose to a playbook's `group_vars/` files.
+- **Host variables** (set on the host itself, like `ansible_host`) beat a playbook's
+  `group_vars/` files but lose to its `host_vars/` files.
+- Both lose to play `vars`, role vars, `set_fact` and `-e`.
+
+Keep those for things that really belong to a play, or the inventory stops being the one
+place to look.
+
+## 5. Put data in
+
+There are four ways in. They all go through the same checks (names, kinds, limits, schemas,
+locking) and all leave an audit trail.
+
+### YAML import (bulk, and the easiest start)
+
+```yaml
+variables:                      # optional: declarations (section 6)
+  packages: {merge_strategy: unique_append, description: OS packages; each level adds its own}
+
+all:
+  vars: {ntp_server: time.example.com, packages: [vim, curl]}
+  children:
+    commercial:                 # depth 1 → business
+      vars: {compliance_profile: cis-level1}
+      children:
+        prod:                   # depth 2 → tier
+          children:
+            dc1:                # depth 3 → datacenter
+              vars: {dns_servers: [10.1.0.2, 10.1.0.3]}
+              children:
+                web:            # depth 4+ → group
+                  vars: {http_port: 8080, packages: [nginx]}
+                  hosts:
+                    web01: {ansible_host: 10.1.1.11}
+                    web02: {ansible_host: 10.1.1.12, packages: [tcpdump]}
+```
+
+```bash
+ais import my-tree.yml --message "initial load"
+```
+
+An import is **additive**. It creates what's missing and sets the variables it names. It never
+deletes, moves or changes a node's kind. Importing the same file twice is not a change: the
+second run says `nothing to change` and writes no revision. To see what an import would do
+without writing anything, use `ais import my-tree.yml --dry-run`,
+`POST /api/v1/import {"tree": …, "dry_run": true}`, or the `import` module in check mode.
+
+A node may say `kind: group` explicitly, for example a group straight under a business when
+that business has no tiers. A child must always be of a deeper kind than its parent.
+
+### The web UI
+
+Sign in as an editor or admin. From a node's page you can add a child, move or rename it
+(with its subtree), delete a subtree, and edit its variables as JSON or YAML. The page shows
+each inherited value greyed out, with the node it comes from. If someone saved first, the page
+says so, reloads, and keeps your text for you to re-apply.
+
+### Ansible modules (inventory as code)
+
+The `git_cgallagher.inventory` collection manages the inventory from a playbook. Every module
+supports check mode and `--diff`, changes nothing when nothing differs, and needs an **editor**
+token:
+
+```yaml
+- hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: https://inventory.example.com      # or AIS_URL; token from AIS_TOKEN
+  tasks:
+    - git_cgallagher.inventory.node:
+        path: all.commercial.prod.dc1.cache
+        vars: {redis_port: 6379}
+    - git_cgallagher.inventory.host:
+        name: cache01
+        parent_path: all.commercial.prod.dc1.cache
+        ansible_host: 10.1.3.11
+    - git_cgallagher.inventory.variable:
+        path: all.commercial.prod
+        key: log_level
+        value: error
+```
+
+The modules are `node`, `host`, `variable`, `variable_definition`, `node_move`, `import`,
+`node_info` and `render_info`. `ansible-doc git_cgallagher.inventory.<name>` documents each.
+Install the collection from the GitHub release (it is not on Ansible Galaxy):
+
+```bash
+ansible-galaxy collection install \
+  https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.3.0/git_cgallagher-inventory-0.3.0.tar.gz
+```
+
+### The REST API
+
+Everything the UI and modules do is in the API, documented live at `/docs`. Reads need a
+viewer token; writes need an editor token and `If-Match`:
+
+```bash
+H="Authorization: Bearer $(cat ~/.config/ais/editor.token)"
+REV=$(curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/revisions?limit=1' | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
+NODE=$(curl -s -H "$H" http://127.0.0.1:8000/api/v1/nodes/all.commercial.prod | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+curl -s -H "$H" -H "If-Match: \"$REV\"" -H 'Content-Type: application/json' \
+  -X PUT "http://127.0.0.1:8000/api/v1/nodes/$NODE/vars/log_level" -d '{"value": "error"}'
+```
+
+A write answers with the new revision (also its `ETag`). Send that as the next `If-Match`.
+
+### Tags
+
+Tags are named sets of paths for `--limit` and `hosts:` patterns. A member that's a group
+brings in every host under it. They have an API and a UI page, but no module yet:
+
+```bash
+curl -s -H "$H" -H "If-Match: \"$REV\"" -H 'Content-Type: application/json' -X PUT \
+  http://127.0.0.1:8000/api/v1/tags/canary \
+  -d '{"description": "first to get changes", "members": ["all.commercial.lab", "all.commercial.prod.dc1.web.web01"]}'
+```
+
+`ansible-playbook site.yml --limit canary` then runs on every lab host plus `web01`.
+
+## 6. Declare variables
+
+A variable doesn't need declaring to be used. Declare one when it should **merge or append**
+(section 1), when you want a **description** shown in the UI, or when you want its values
+**checked against a JSON Schema**:
+
+```yaml
+- git_cgallagher.inventory.variable_definition:
+    name: http_port
+    merge_strategy: replace
+    description: Port the web role listens on.
+    json_schema: {type: integer, minimum: 1, maximum: 65535}
+```
+
+The schema is checked on every write of that key, from every route: API, UI, import and
+modules. A new schema is refused while any stored value already breaks it, so the tree never
+holds a value its own schema rejects. Each node's own contribution is checked, not the merged
+result. So for a `merge` dictionary, don't mark keys `required`: a deeper node normally sets
+only some of them.
+
+Change a strategy with care: it changes the value every host below sees. Render a few hosts
+first (next section).
+
+## 7. Check a change before it lands
+
+Render a real host, a mock host, a past revision, or "what if" overrides, without writing
+anything:
+
+```bash
+# a real host now
+ais render --host web02
+# a host that doesn't exist yet, with facts the templates need
+ais render --path all.federal.prod.dc2.web --facts '{"default_ipv4": {"address": "10.2.1.99"}}'
+# the API form, with what-if overrides
+curl -s -H "Authorization: Bearer $(cat ~/.config/ais/viewer.token)" -H 'Content-Type: application/json' \
+  -X POST http://127.0.0.1:8000/api/v1/render \
+  -d '{"path": "all.federal.prod.dc2.web", "mock_hostname": "fed-web99", "overrides": {"http_port": 8443}}'
+```
+
+The answer has:
+
+- `chain`: the groups, top to bottom.
+- `resolved`: the merged values, before Jinja.
+- `provenance`: for each key, which node set it. For merge/append keys, every node that
+  contributed.
+- `rendered`: the values after Jinja, with mock or supplied facts and `inventory_hostname`,
+  `group_names` and friends.
+- `errors`: each key that failed to evaluate, and why.
+
+**What the render will not do.** It runs on the server, for anyone with a viewer token, so it
+never touches the server itself. It evaluates expressions and ordinary filters. It doesn't run
+lookups (`lookup`, `query`). It refuses filters and tests that read files or the environment
+(`expandvars`, `fileglob`, `is file`, …), as well as collection filters. Such a key shows up
+in `errors` with "does not run in the server render". The value is still fine: a playbook
+evaluates it normally on the controller. Facts you pass are data, never templates, as in
+Ansible.
+
+## 8. Use it from playbooks
+
+An inventory source is a YAML file whose name ends in `inventory.yml`, `inventory.yaml`,
+`ais.yml` or `ais.yaml`:
+
+```yaml
+# inventory/ais.yml
+plugin: git_cgallagher.inventory.db
+url: https://inventory.example.com
+# subtree: all.federal.prod      # only this part of the tree
+# revision: 1234                 # pin to an exact revision (reproducible reruns)
+```
+
+```ini
+# ansible.cfg
+[defaults]
+inventory = inventory/ais.yml
+```
+
+Give it a **viewer** token through `AIS_TOKEN` (or the `token` option, but keep it out of
+git). Then use the qualified groups and tag groups as usual:
+
+```bash
+export AIS_TOKEN="$(your-secret-tool get ais-ci-token)"
+ansible-playbook site.yml --limit commercial_prod_dc1_web
+ansible-playbook site.yml --limit 'tier_prod:&datacenter_dc1'
+ansible-playbook patch.yml --limit canary
+```
+
+Points worth knowing:
+
+- **Every host gets `inventory_revision`.** Log it, or put it in a change record. To rerun
+  exactly what ran before, pin `revision:`.
+- **`subtree`** exports only part of the tree. That's much faster on a big estate, and handy
+  for giving a team only its own business.
+- **Revalidation.** The plugin keeps the last export in `~/.cache/ais` (`etag_store`) and asks
+  the server whether it changed. An unchanged inventory costs one tiny request. Ansible's own
+  inventory cache (`cache: true`) also works on top of it.
+- **Templates are evaluated on the controller.** A stored `"{{ ansible_host }}:{{ http_port }}"`
+  reaches a play as `10.1.1.11:8080`, exactly as the render showed. This includes lookups,
+  which is how secrets work (next section). It also means that anyone who can write the
+  inventory can run code on every controller that uses it, the same as anyone who can push to
+  a YAML inventory in git. Hand out the editor role accordingly.
+- Use **one** inventory server per inventory. Mixing another source in is allowed by Ansible,
+  but its groups and variables then interleave with this one's precedence.
+
+## 9. Secrets
+
+**Don't store secret values in the inventory.** Every viewer can read every value: export and
+render return them, and history keeps them forever. There is no Ansible Vault support:
+vault-encrypted values do not survive the JSON export.
+
+Instead, store a **lookup** that fetches the secret on the controller when the play runs:
+
+```yaml
+all:
+  children:
+    commercial:
+      vars:
+        db_password: "{{ lookup('community.hashi_vault.hashi_vault', 'secret/data/commercial/db:password') }}"
+        # or AWS SSM, across accounts, with git_cgallagher.aws:
+        # db_password: "{{ lookup('git_cgallagher.aws.ssm_parameter', '/commercial/db/password', account='123456789012', role_name='ParamReader', region='us-east-1') }}"
+```
+
+The inventory then holds only *where* the secret lives. A playbook resolves it on the
+controller, with the controller's credentials. The render shows these keys under `errors`
+("lookup() does not run in the server render"), which is expected. Put the lookup at the
+level where the secret differs, like any other variable.
+
+## 10. Users, roles and tokens
+
+| Role | Can |
+|---|---|
+| `viewer` | export, render, read nodes, variables, revisions, snapshots, diffs, tags |
+| `editor` | everything a viewer can, plus every write, and read the audit log |
+| `admin` | everything an editor can, plus manage users |
+
+Roles are global: there's no "editor of `all.federal` only" yet.
+
+- **People** sign in to the UI with e-mail and password: `ais user create … --role editor`,
+  or `POST /api/v1/users` as an admin. Disable someone with
+  `PATCH /api/v1/users/{id} {"is_active": false}`; their tokens stop working too. A UI session lasts 12 hours
+  (`AIS_SESSION_TTL_HOURS`).
+- **Machines** use tokens. Create a token-only user (`--no-password`) per consumer, such as CI
+  or AWX. Mint its token with a capped role and an expiry, and store it in that consumer's
+  secret store:
+
+  ```bash
+  ais token create --user ci@example.com --name awx --role viewer --expires-days 90
+  ais token list
+  ais token revoke 7
+  ```
+
+  People can mint their own tokens on the UI's Tokens page. A token's secret is shown once
+  and stored only as a hash.
+- **Single sign-on (OIDC)** is implemented but has **never been tested against a real
+  provider**. Treat it as unavailable until it has been. The settings are in section 12.
+- Failed logins are limited per e-mail (5) and per client address (20) in a 5-minute window,
+  with a 429 and `Retry-After` (`AIS_LOGIN_MAX_FAILURES`, `AIS_LOGIN_MAX_FAILURES_PER_IP`,
+  `AIS_LOGIN_WINDOW_SECONDS`).
+
+## 11. History, diffs and the audit log
+
+- **Revisions:** `GET /api/v1/revisions` lists every revision with its actor, source (`api`,
+  `ui`, `module`, `cli`) and message. In the UI, see the Revisions page.
+- **Any revision, exactly:** `ais export --revision 12`, `ais render --host web01 --revision
+  12`, or the plugin's `revision:` option.
+- **A host's own history:** `GET /api/v1/hosts/web01/snapshots` lists the revisions where
+  `web01`'s variables actually changed. `GET /api/v1/diff?host=web01&from=12&to=40` says what
+  changed between two revisions. The UI's Diff page does both.
+- **Who did what:** `GET /api/v1/audit` (editor role) has one row per change and per sign-in,
+  token or user event, with before and after values. Filter by actor, action, node (following
+  it across moves and renames), revision or time. In the UI, a node's or variable's "history"
+  link opens it.
+- **Undo** is a new change, not a rewind: look up the old value in the diff or audit log and
+  write it back. History is never rewritten.
+
+Per-host history is kept by a background task in the API process. It stores a host's state
+only in the revisions where it changed. A revision it skipped is computed on demand, so every
+revision still answers exactly. `ais snapshots status` shows how far it has got.
+
+## 12. Operating it
+
+### Settings
+
+| Variable | Default | What |
+|---|---|---|
+| `AIS_DATABASE_URL` | — (required) | `postgresql+psycopg://user:pass@host:5432/db`, or `sqlite:///path.db` for trials |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1,::1` (`*` in `compose.prod.yml`) | peers whose `X-Forwarded-For` is trusted (uvicorn) |
+| `AIS_MAX_DEPTH` | `32` | deepest allowed node (minimum 4) |
+| `AIS_SESSION_TTL_HOURS` | `12` | lifetime of a UI sign-in |
+| `AIS_LOGIN_MAX_FAILURES` / `_PER_IP` / `AIS_LOGIN_WINDOW_SECONDS` | `5` / `20` / `300` | failed-login limiter; `0` turns a limit off |
+| `AIS_SNAPSHOTS` | on | `off` stops the per-host history task (history is then computed on demand) |
+| `AIS_SNAPSHOT_POLL_SECONDS` | `10` | how often that task checks for missed writes |
+| `AIS_WEB_DIR` | built-in | serve the UI from another directory |
+| `AIS_OIDC_ISSUER`, `AIS_OIDC_CLIENT_ID`, `AIS_OIDC_CLIENT_SECRET`, `AIS_SECRET_KEY` | unset | OIDC sign-in (untested; all four enable it); also `AIS_OIDC_AUTO_PROVISION=1`, `AIS_OIDC_DEFAULT_ROLE`, `AIS_OIDC_REDIRECT_URL`, `AIS_COOKIE_SECURE` |
+
+On the Ansible side: `AIS_URL`, `AIS_TOKEN` and `AIS_ETAG_STORE` feed the plugin and modules.
+
+### Backups
+
+There's no built-in backup. The whole state, history included, is the PostgreSQL database, so
+back that up:
+
+```bash
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml exec -T db \
+  pg_dump -U ais -Fc ais > "ais-$(date +%F).dump"
+```
+
+Restore into a stopped API, then start it again:
+
+```bash
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml stop api
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml exec -T db \
+  pg_restore -U ais -d ais --clean --if-exists < ais-2026-11-05.dump
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml start api
+```
+
+A restore returns everything to the moment of the dump, users and tokens included. A token
+minted after the dump stops working. Test a restore before you need one. A dump holds password
+and token hashes, so store it as carefully as the database.
+
+### Upgrades
+
+Read `CHANGELOG.md`, back up, check out the new tag, and rebuild. Schema migrations run
+automatically when the API starts:
+
+```bash
+git fetch --tags && git checkout v0.3.0
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml up --build -d
+curl -s https://inventory.example.com/healthz     # {"status":"ok","version":"0.3.0",…}
+```
+
+Upgrade the collection on your controllers to the same version (section 5).
+
+### Health and size
+
+- `GET /healthz` needs no token and returns `{"status": "ok", "version": …}`. Use it for
+  monitoring.
+- Run **one** API process. The login limiter and the history task live in that process, and
+  `ais serve` starts exactly one.
+- Measured at 100,000 hosts on PostgreSQL (`docs/scale.md`): a full export takes about 3.5
+  seconds, a subtree export about 0.06 s, a render about 0.02 s, and each write about 3.3 s,
+  because every write re-checks the whole tree.
+
+## 13. Limits and known gaps
+
+As of 0.3.0:
+
+- **OIDC is untested** against a real provider. Use local accounts and tokens.
+- **Roles are global.** No per-subtree permissions.
+- **No secret storage.** Store lookups instead (section 9).
+- **No published container image.** Build from a tagged checkout.
+- **No `tag` module.** Use the API or UI.
+- **No user-management page.** Use the CLI or `/api/v1/users`.
+- **Writes slow down with size.** About 3.3 s each at 100,000 hosts.
+- **Render cost isn't capped.** A deliberately huge template (`{{ 'a' * 10**9 }}`) from any
+  viewer can use that much memory in the API process. Only give tokens to people and systems
+  you trust not to do that.
+- **Inventory precedence is Ansible's.** Playbook `group_vars`, play vars and `-e` still
+  override it (section 4).
+
+## 14. Troubleshooting
+
+| You see | Means | Do |
+|---|---|---|
+| `401` / plugin says "rejected the token" | missing, wrong, expired or revoked token | check `AIS_TOKEN`; `ais token list` |
+| `403` | the token's role is too low | writes need editor; the audit log needs editor; users need admin |
+| `428 Precondition Required` | a write without `If-Match` | send `If-Match: "<revision>"` |
+| `409` on a write | someone wrote since your revision | re-read, re-apply, retry with the new revision |
+| `422` naming depth or bytes | a node would exceed `AIS_MAX_DEPTH` or the 1,500-byte path limit | shorten names or flatten |
+| `422 … does not match its json_schema` | the value breaks the variable's schema | fix the value, or the schema |
+| `429` with `Retry-After` | too many failed logins | wait; check `FORWARDED_ALLOW_IPS` if it hits everyone |
+| a render error "does not run in the server render" | the value uses a lookup or a file/env filter | expected; a playbook evaluates it (section 7) |
+| a playbook prints `{{ … }}` literally | collection older than 0.3.0 with ansible-core 2.19+ | upgrade the collection |
+| `the web UI is not built` at `/` | running from a checkout without building `web/` | `cd web && npm ci && npm run build` |
+| export error about a group name collision | two paths produce the same `_`-joined name (e.g. `a.b_c` and `a_b.c`) | rename one node |
