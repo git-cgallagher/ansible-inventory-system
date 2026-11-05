@@ -95,12 +95,15 @@ ROLE_RANK = {Role.viewer: 0, Role.editor: 1, Role.admin: 2}
 
 class Revision(Base):
     __tablename__ = "revision"
+    __table_args__ = (Index("ix_revision_change", "change"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     actor: Mapped[str] = mapped_column(String(255), default="system")
     source: Mapped[str] = mapped_column(String(32), default="cli")  # ui|api|module|cli|import
     ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     message: Mapped[str | None] = mapped_column(Text)
+    # The client's change id (``X-AIS-Change``): groups the revisions of one change set.
+    change: Mapped[str | None] = mapped_column(String(64))
 
 
 _LIVE = text("deleted_rev IS NULL")
@@ -256,6 +259,8 @@ class AuditLog(Base):
         Index("ix_audit_actor", "actor"),
         Index("ix_audit_action", "action"),
         Index("ix_audit_target", "target_type", "target_id"),
+        Index("ix_audit_change", "change"),
+        Index("ix_audit_revision", "revision"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
@@ -269,6 +274,7 @@ class AuditLog(Base):
     source: Mapped[str] = mapped_column(String(32), default="api")  # api|module|cli|login|import
     request_id: Mapped[str | None] = mapped_column(String(64))
     revision: Mapped[int | None] = mapped_column(ForeignKey("revision.id", name="fk_audit_revision"))
+    change: Mapped[str | None] = mapped_column(String(64))  # the revision's change id, on inventory writes
 
 
 # -------------------------------------------------------------------- snapshots

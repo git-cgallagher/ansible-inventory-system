@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ais import audit, schema
 from ais.auth import Principal, require
 from ais.db import get_session
-from ais.importer import ImportError_, check_kind, check_name, check_position, infer_kind, live_node_by_path
+from ais.importer import ImportError_, check_kind, check_name, check_position, definition_doc, infer_kind, live_node_by_path
 from ais.locking import IfMatch, begin_write, check_precondition, etag
 from ais.models import PATH_SEP, MergeStrategy, Node, NodeKind, NodeVariable, Revision, Role, TagMember, VariableDefinition
 from ais.resolver import build_export, current_revision, load_snapshot
@@ -266,7 +266,20 @@ def move_node(
         new_parent = get_live_node(session, node.parent_id)  # type: ignore[arg-type]
     else:
         new_parent = _resolve_parent(session, req.parent_id, req.parent_path)
-    new_name = req.name or node.name
+    before, out, moved = move_subtree(session, rev, node, new_parent, req.name or node.name)
+    check_export(session)
+    _audit(session, principal, rev, "node.move", "node", node.id, before, {**out, "moved": moved})
+    return _finish(response, rev, {"node": out, "moved": moved})
+
+
+def move_subtree(session: Session, rev: Revision, node: Node, new_parent: Node, new_name: str) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Close ``node``'s live subtree and reopen it as ``new_parent``/``new_name`` under ``rev``
+    (new ids; values, ``meta`` and tag memberships carried over). Returns the ``node.move``
+    audit row's ``before``, the new root (``node_out``) and the ``moved`` map. Refuses (422/409)
+    the root, a no-op, a move under its own subtree, a bad name or kind, a taken path, a node
+    that would be too deep. Shared by ``POST /nodes/{id}/move`` and ``ais.revert``."""
+    if node.kind is NodeKind.all:
+        raise HTTPException(422, "the root cannot be moved or renamed")
     if new_parent.id == node.parent_id and new_name == node.name:
         raise HTTPException(422, f"{node.path} is already there under that name")
     if new_parent.path == node.path or new_parent.path.startswith(node.path + PATH_SEP):
@@ -321,13 +334,10 @@ def move_node(
     for tm in old_members:
         session.add(TagMember(tag_id=tm.tag_id, node_id=id_map[tm.node_id]))
     session.flush()
-    check_export(session)
 
     moved = [{"old_id": o.id, "id": n.id, "from": o.path, "to": n.path} for o, n in zip(old_rows, new_rows)]
     root = new_rows[0]
-    out = node_out(root, live_vars(session, root.id))
-    _audit(session, principal, rev, "node.move", "node", node.id, before, {**out, "moved": moved})
-    return _finish(response, rev, {"node": out, "moved": moved})
+    return before, node_out(root, live_vars(session, root.id)), moved
 
 
 def _delete_guard(node: Node, subtree: list[Node], recursive: bool, expect_count: int | None) -> None:
@@ -393,15 +403,24 @@ def delete_node(
         rev_now = current_revision(session)
         response.headers["ETag"] = etag(rev_now)
         return {"revision": rev_now, "changed": True, "dry_run": True, "deleted": paths, **counts}
+    before = delete_subtree(session, rev, node, subtree)
+    _audit(session, principal, rev, "node.delete", "node", node.id, before, None)
+    return _finish(response, rev, {"dry_run": False, "deleted": paths, **counts})
+
+
+def delete_subtree(session: Session, rev: Revision, node: Node, subtree: list[Node] | None = None) -> dict[str, Any]:
+    """Close ``node``'s live subtree and its live values under ``rev``; returns the
+    ``node.delete`` audit row's ``before``. The caller applied ``_delete_guard`` (or, in a
+    revert, knows the subtree is exactly what the reverted write created)."""
+    subtree = live_subtree(session, node) if subtree is None else subtree
     ids = [n.id for n in subtree]
-    before = {**node_out(node, live_vars(session, node.id)), "subtree": paths}
+    before = {**node_out(node, live_vars(session, node.id)), "subtree": [n.path for n in subtree]}
     for n in subtree:
         n.deleted_rev = rev.id
     for nv in session.scalars(select(NodeVariable).where(NodeVariable.node_id.in_(ids), NodeVariable.deleted_rev.is_(None))):
         nv.deleted_rev = rev.id
     session.flush()
-    _audit(session, principal, rev, "node.delete", "node", node.id, before, None)
-    return _finish(response, rev, {"dry_run": False, "deleted": paths, **counts})
+    return before
 
 
 class NodeRestore(BaseModel):
@@ -539,7 +558,7 @@ class DefinitionPut(BaseModel):
 
 
 def definition_out(d: VariableDefinition) -> dict[str, Any]:
-    return {"name": d.name, "merge_strategy": d.merge_strategy.value, "description": d.description, "json_schema": d.json_schema}
+    return definition_doc(d)  # type: ignore[return-value]
 
 
 @router.put("/variables/{name}")
@@ -564,19 +583,32 @@ def put_definition(
         response.headers["ETag"] = etag(rev_now)
         return {"revision": rev_now, "changed": False, "definition": before}
     rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"declare variable {name}")
+    out = set_definition(session, name, wanted)
+    _audit(session, principal, rev, "definition.set", "variable_definition", name, before, out)
+    return _finish(response, rev, {"definition": out})
+
+
+def set_definition(session: Session, name: str, wanted: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Declare ``name`` as ``wanted`` (``definition_out``'s shape), or undeclare it when
+    ``wanted`` is None; every live value of the key must satisfy the new schema (422).
+    Returns the definition as it now is. Shared by the routes and ``ais.revert``."""
+    definition = session.get(VariableDefinition, name)
+    if wanted is None:
+        if definition is not None:
+            session.delete(definition)
+            session.flush()
+        return None
     definition = definition or VariableDefinition(name=name)
-    definition.merge_strategy = req.merge_strategy
-    definition.description = req.description
-    definition.json_schema = req.json_schema
+    definition.merge_strategy = MergeStrategy(wanted["merge_strategy"])
+    definition.description = wanted.get("description")
+    definition.json_schema = wanted.get("json_schema")
     session.add(definition)
     session.flush()
     try:
         schema.check_live(session, keys={name})  # a new schema must accept every live value
     except schema.SchemaViolation as exc:
         raise HTTPException(422, str(exc)) from exc
-    out = definition_out(definition)
-    _audit(session, principal, rev, "definition.set", "variable_definition", name, before, out)
-    return _finish(response, rev, {"definition": out})
+    return definition_out(definition)
 
 
 @router.delete("/variables/{name}")
@@ -592,7 +624,6 @@ def delete_definition(
     if definition is None:
         raise HTTPException(404, f"variable {name!r} is not declared")
     before = definition_out(definition)
-    session.delete(definition)
-    session.flush()
+    set_definition(session, name, None)
     _audit(session, principal, rev, "definition.delete", "variable_definition", name, before, None)
     return _finish(response, rev, {"name": name})

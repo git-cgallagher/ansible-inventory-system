@@ -33,6 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ais import schema
+from ais.audit import current_change
 
 from ais.models import (
     LEVEL_ORDER,
@@ -196,6 +197,11 @@ class ImportResult:
     variables_set: int = 0
     definitions_changed: list[str] = field(default_factory=list)
     tags_changed: list[str] = field(default_factory=list)
+    # What the changed definitions and tags were before (None: did not exist). Definitions and
+    # tags are not temporal, so the ``import`` audit row records this as its ``before``;
+    # it is what a revert of the import puts back (``ais.revert``).
+    definitions_before: dict[str, Any] = field(default_factory=dict)
+    tags_before: dict[str, Any] = field(default_factory=dict)
 
     @property
     def changed(self) -> bool:
@@ -210,22 +216,52 @@ class ImportResult:
             "tags": self.tags_changed,
         }
 
+    def before(self) -> dict[str, Any]:
+        """The ``import`` audit row's ``before``: the changed definitions and tags as they
+        were (``ais.revert`` needs it; nodes and values are temporal rows already)."""
+        return {"definitions": self.definitions_before, "tags": self.tags_before}
+
+
+def definition_doc(d: VariableDefinition | None) -> dict[str, Any] | None:
+    """A definition as the API and the audit log show it (``definition.set`` rows)."""
+    if d is None:
+        return None
+    return {"name": d.name, "merge_strategy": d.merge_strategy.value, "description": d.description, "json_schema": d.json_schema}
+
+
+def tag_doc(session: Session, tag: Tag | None) -> dict[str, Any] | None:
+    """A tag as the API and the audit log show it: name, description, live member paths."""
+    if tag is None:
+        return None
+    members = session.scalars(
+        select(Node.path).join(TagMember, TagMember.node_id == Node.id).where(TagMember.tag_id == tag.id, Node.deleted_rev.is_(None))
+    )
+    return {"name": tag.name, "description": tag.description, "members": sorted(members)}
+
 
 def import_tree(session: Session, data: dict[str, Any], *, actor: str = "import", message: str | None = None) -> Revision:
     return import_tree_report(session, data, actor=actor, message=message).revision
 
 
-def import_tree_report(session: Session, data: dict[str, Any], *, actor: str = "import", message: str | None = None) -> ImportResult:
-    """Import ``data`` under one new revision. Additive: creates missing nodes and sets
-    the given variables, definitions and tag memberships; never deletes, moves or re-kinds
-    anything, and never removes a tag member."""
+def import_tree_report(
+    session: Session, data: dict[str, Any], *, actor: str = "import", message: str | None = None, rev: Revision | None = None
+) -> ImportResult:
+    """Import ``data`` under one new revision (or under ``rev``, which a revert passes so
+    that its restores share its one revision; the counts are then this import's own).
+    Additive: creates missing nodes and sets the given variables, definitions and tag
+    memberships; never deletes, moves or re-kinds anything, and never removes a tag member."""
     if not isinstance(data, dict) or "all" not in data:
         raise ImportError_("top-level 'all' is required")
-    rev = Revision(actor=actor, source="import", message=message or "bulk import")
-    session.add(rev)
-    session.flush()
+    nodes_before = variables_before = 0
+    if rev is None:
+        rev = Revision(actor=actor, source="import", message=message or "bulk import", change=current_change())
+        session.add(rev)
+        session.flush()
+    else:
+        nodes_before, variables_before = _created_counts(session, rev)
 
     changed_defs: list[str] = []
+    defs_before: dict[str, Any] = {}
     for name, spec in (data.get("variables") or {}).items():
         spec = spec or {}
         try:
@@ -242,6 +278,7 @@ def import_tree_report(session: Session, data: dict[str, Any], *, actor: str = "
         wanted = (strategy, spec.get("description"), json_schema)
         if definition is not None and (definition.merge_strategy, definition.description, definition.json_schema) == wanted:
             continue
+        defs_before[name] = definition_doc(definition)
         definition = definition or VariableDefinition(name=name)
         definition.merge_strategy, definition.description, definition.json_schema = wanted
         session.add(definition)
@@ -250,17 +287,29 @@ def import_tree_report(session: Session, data: dict[str, Any], *, actor: str = "
     root = get_or_create_node(session, None, "all", NodeKind.all, rev)
     _import_node(session, root, data["all"], rev)
     session.flush()
-    changed_tags = _import_tags(session, data.get("tags"))
+    tags_before: dict[str, Any] = {}
+    changed_tags = _import_tags(session, data.get("tags"), tags_before)
     try:
         schema.check_live(session, keys=set(changed_defs), created_rev=rev.id)
     except schema.SchemaViolation as exc:
         raise ImportError_(str(exc)) from exc
+    nodes_after, variables_after = _created_counts(session, rev)
     return ImportResult(
         revision=rev,
-        nodes_created=session.scalar(select(func.count()).select_from(Node).where(Node.created_rev == rev.id)) or 0,
-        variables_set=session.scalar(select(func.count()).select_from(NodeVariable).where(NodeVariable.created_rev == rev.id)) or 0,
+        nodes_created=nodes_after - nodes_before,
+        variables_set=variables_after - variables_before,
         definitions_changed=sorted(changed_defs),
         tags_changed=sorted(changed_tags),
+        definitions_before={k: defs_before[k] for k in sorted(changed_defs)},
+        tags_before={k: tags_before[k] for k in sorted(changed_tags)},
+    )
+
+
+def _created_counts(session: Session, rev: Revision) -> tuple[int, int]:
+    session.flush()
+    return (
+        session.scalar(select(func.count()).select_from(Node).where(Node.created_rev == rev.id)) or 0,
+        session.scalar(select(func.count()).select_from(NodeVariable).where(NodeVariable.created_rev == rev.id)) or 0,
     )
 
 
@@ -268,11 +317,13 @@ def import_tree_report(session: Session, data: dict[str, Any], *, actor: str = "
 _PATH_CHUNK = 5000
 
 
-def _import_tags(session: Session, spec: Any) -> list[str]:
+def _import_tags(session: Session, spec: Any, before: dict[str, Any] | None = None) -> list[str]:
     """``tags: {name: {description, members: [path, ...]}}``, after the tree (members may
     be nodes the same import created). Additive: creates a missing tag, sets the
     description when the key is given, adds missing members; never removes one (``PUT
-    /tags/{name}`` is the declarative way). Returns the names of the tags it changed."""
+    /tags/{name}`` is the declarative way). Returns the names of the tags it changed and
+    fills ``before`` with each changed tag as it was (``tag_doc``; None for a new one)."""
+    before = {} if before is None else before
     if not spec:
         return []
     if not isinstance(spec, dict):
@@ -298,6 +349,7 @@ def _import_tags(session: Session, spec: Any) -> list[str]:
         if missing:
             raise ImportError_(f"tag {name!r}: node {missing[0]} does not exist")
         tag = session.scalar(select(Tag).where(Tag.name == name))
+        was = tag_doc(session, tag)
         dirty = False
         if tag is None:
             tag = Tag(name=name, description=tag_spec.get("description"))
@@ -314,6 +366,7 @@ def _import_tags(session: Session, spec: Any) -> list[str]:
                 dirty = True
         if dirty:
             changed.append(name)
+            before[name] = was
     session.flush()
     return changed
 

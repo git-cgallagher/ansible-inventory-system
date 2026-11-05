@@ -164,7 +164,17 @@ def _import(args: argparse.Namespace) -> int:
                 print(f"nothing to change (revision {current_revision(s)})")
             return 0
         rev = result.revision
-        audit.record(s, actor="cli", action="import", target_type="tree", target_id="all", after={"revision": rev.id, **summary}, source="cli", revision=rev.id)
+        audit.record(
+            s,
+            actor="cli",
+            action="import",
+            target_type="tree",
+            target_id="all",
+            before=result.before(),
+            after={"revision": rev.id, **summary},
+            source="cli",
+            revision=rev.id,
+        )
         print(f"imported as revision {rev.id}: {counts}")
     return 0
 
