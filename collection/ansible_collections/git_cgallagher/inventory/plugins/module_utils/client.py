@@ -128,7 +128,7 @@ class Client(object):
                 current_revision=detail.get("current"),
             )
         if status == 409:
-            self.module.fail_json(msg="ais: %s" % to_native(detail) if extra else "ais: refused: %s" % to_native(detail), status=409, **extra)
+            self.module.fail_json(msg="ais: refused: %s" % to_native(detail), status=409, **extra)
         if status == 428:
             self.module.fail_json(msg="ais: the server wants If-Match on this write (client bug): %s" % detail, status=428)
         self.module.fail_json(msg="ais: %s %s: %s" % (url, status, to_native(detail)), status=status)

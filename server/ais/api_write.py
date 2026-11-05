@@ -344,7 +344,7 @@ def _delete_guard(node: Node, subtree: list[Node], recursive: bool, expect_count
             {
                 "error": "count mismatch",
                 "message": (
-                    f"refused: deleting {node.path} would delete {nodes} node(s) ({hosts} host(s)), "
+                    f"deleting {node.path} would delete {nodes} node(s) ({hosts} host(s)), "
                     f"not the {expect_count} expect_count says. Nothing was deleted; look again, then send expect_count={nodes}"
                 ),
                 **counts,
@@ -356,7 +356,7 @@ def _delete_guard(node: Node, subtree: list[Node], recursive: bool, expect_count
             {
                 "error": "subtree not empty",
                 "message": (
-                    f"refused: {node.path} has {nodes - 1} node(s) below it; deleting it deletes {nodes} node(s) in all, "
+                    f"{node.path} has {nodes - 1} node(s) below it; deleting it deletes {nodes} node(s) in all, "
                     f"{hosts} of them host(s). Nothing was deleted. To confirm, send recursive=true or expect_count={nodes}"
                 ),
                 **counts,

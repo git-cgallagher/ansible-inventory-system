@@ -209,6 +209,16 @@ test("deleting a group shows the node and host counts and confirms them", async 
   await expect(page.getByTestId("delete-count")).toHaveText("4 nodes, 2 hosts");
   // the preview wrote nothing
   await expect(page.locator(".rev")).toHaveText(`revision ${rev}`);
+  // a refusal shows the server's message, not its JSON. The UI can only meet one through a
+  // race (If-Match would 409 first), so the server's answer is stubbed for this one click.
+  const refusal = "deleting all.federal.prod.dc2.web would delete 5 node(s) (3 host(s)), not the 4 expect_count says.";
+  const confirmUrl = (u: URL) => u.pathname.startsWith("/api/v1/nodes/") && u.searchParams.has("expect_count");
+  await page.route(confirmUrl, (route) =>
+    route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ detail: { error: "count mismatch", message: refusal, nodes: 5, hosts: 3 } }) }),
+  );
+  await page.getByRole("button", { name: "Delete 4 nodes" }).click();
+  await expect(page.getByRole("alert")).toContainText(`Refused: ${refusal} (HTTP 409)`);
+  await page.unroute(confirmUrl);
   const sent = page.waitForRequest((r) => r.method() === "DELETE" && !r.url().includes("dry_run"));
   await page.getByRole("button", { name: "Delete 4 nodes" }).click();
   const url = new URL((await sent).url());
