@@ -267,6 +267,12 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   on a plain `str` returns it unchanged, silently. `ais.render._trust` wraps every string with
   `trust_as_template` first; catch `AnsibleTemplateError` (covers undefined, syntax,
   recursion). Learned 2026-11-01 (first render returned raw templates with no error).
+- **An inventory plugin's strings are not templates in ansible-core 2.19+ unless the plugin sets
+  `trusted_by_default = True`.** `ansible-inventory --host` (what the parity test compares)
+  never templates, so it could not catch this: until 0.3.0 every playbook saw stored Jinja as
+  literal text while the render evaluated it. `test_parity.py`'s
+  `test_playbooks_evaluate_stored_templates_like_the_render` runs `ansible` against the server
+  and compares with the render. Found 2026-11-05.
 - **Trusted templates run lookups wherever they are rendered.** Trusting every stored string
   (above) made the server render a shell for any token: `lookup('pipe', …)` ran on the API host
   until 0.3.0 (found 2026-11-05, while writing the getting-started guide). `disable_lookups` is a

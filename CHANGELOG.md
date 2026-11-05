@@ -40,6 +40,14 @@
   (Dependabot PRs 15, 6 and 7, verified by the `image` boot check on main).
 
 ### Fixed
+- **Playbooks now evaluate Jinja stored in the inventory.** ansible-core 2.19+ templates an
+  inventory plugin's strings only when the plugin declares its source trusted; the `db` plugin
+  did not, so a playbook saw a stored `{{ ansible_host }}:{{ http_port }}` as that literal
+  text while the server's render showed it evaluated. The plugin now sets
+  `trusted_by_default`, so a playbook and the render agree (a new test runs `ansible` against
+  the server and compares). Stored values are therefore trusted templates on the controller,
+  exactly like a YAML inventory: the editor role can run code on every controller that uses
+  the inventory.
 - The importer no longer recurses, so very deep trees fail on the depth limit instead of
   Python's recursion limit (near depth 1,000).
 
