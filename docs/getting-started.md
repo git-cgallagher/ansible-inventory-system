@@ -131,27 +131,33 @@ ais user create admin@example.com --role admin
 ```
 
 Then create a separate token-only account for Ansible to read with. A **viewer** can export
-and render but not write:
+and render but not write. A token is printed once. Keep tokens outside the checkout, so they
+can never be committed:
 
 ```bash
 ais user create ansible@example.com --role viewer --no-password
-ais token create --user ansible@example.com --name laptop > viewer.token   # shown once
-ais token create --user admin@example.com --name cli --role editor > editor.token
-chmod 600 viewer.token editor.token
+mkdir -p ~/.config/ais && chmod 700 ~/.config/ais
+ais token create --user ansible@example.com --name laptop > ~/.config/ais/viewer.token
+ais token create --user admin@example.com --name cli --role editor > ~/.config/ais/editor.token
 ```
 
-Start the server (keep it running in its own terminal):
+Start the server in a second terminal and leave it running. That terminal needs the same two
+settings:
 
 ```bash
+cd ansible-inventory-system
+export PATH="$PWD/.venv/bin:$PATH" AIS_DATABASE_URL="sqlite:///$PWD/ais.db"
 ais serve            # http://127.0.0.1:8000, API docs at /docs
 ```
+
+Back in the first terminal:
 
 Point Ansible at it. `examples/` has a ready `inventory.yml` and `ansible.cfg` that uses the
 collection straight from this checkout:
 
 ```bash
 cd examples
-export AIS_TOKEN="$(cat ../viewer.token)"
+export AIS_TOKEN="$(cat ~/.config/ais/viewer.token)"
 ansible-inventory --graph
 ansible-inventory --host web02
 ```
@@ -271,10 +277,16 @@ front with a 422 that names the limit.
 variable or a tag, not a second parent. Use a **tag** (section 5) for cross-cutting
 *targeting* ("all canary hosts"), and a variable for cross-cutting *configuration*.
 
-**Precedence against the rest of Ansible.** Everything here is *inventory* variables. In
-Ansible's order they sit below `group_vars/` and `host_vars/` files next to a playbook, play
-`vars`, role vars, `set_fact` and `-e`. Keep those for things that really belong to a play,
-or the inventory stops being the one place to look.
+**Precedence against the rest of Ansible.** Everything here is *inventory* variables, and
+Ansible ranks them as such:
+
+- **Group variables** (every node above a host) lose to a playbook's `group_vars/` files.
+- **Host variables** (set on the host itself, like `ansible_host`) beat a playbook's
+  `group_vars/` files but lose to its `host_vars/` files.
+- Both lose to play `vars`, role vars, `set_fact` and `-e`.
+
+Keep those for things that really belong to a play, or the inventory stops being the one
+place to look.
 
 ## 5. Put data in
 
@@ -310,8 +322,9 @@ ais import my-tree.yml --message "initial load"
 ```
 
 An import is **additive**. It creates what's missing and sets the variables it names. It never
-deletes, moves or changes a node's kind, and importing the same file twice is not a change.
-To try one without writing anything, use the API's dry run:
+deletes, moves or changes a node's kind. Importing the same file twice is not a change: the
+second run says `nothing to change` and writes no revision. To see what an import would do
+without writing anything, use `ais import my-tree.yml --dry-run`,
 `POST /api/v1/import {"tree": …, "dry_run": true}`, or the `import` module in check mode.
 
 A node may say `kind: group` explicitly, for example a group straight under a business when
@@ -365,7 +378,7 @@ Everything the UI and modules do is in the API, documented live at `/docs`. Read
 viewer token; writes need an editor token and `If-Match`:
 
 ```bash
-H="Authorization: Bearer $(cat editor.token)"
+H="Authorization: Bearer $(cat ~/.config/ais/editor.token)"
 REV=$(curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/revisions?limit=1' | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
 NODE=$(curl -s -H "$H" http://127.0.0.1:8000/api/v1/nodes/all.commercial.prod | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 curl -s -H "$H" -H "If-Match: \"$REV\"" -H 'Content-Type: application/json' \
@@ -421,7 +434,7 @@ ais render --host web02
 # a host that doesn't exist yet, with facts the templates need
 ais render --path all.federal.prod.dc2.web --facts '{"default_ipv4": {"address": "10.2.1.99"}}'
 # the API form, with what-if overrides
-curl -s -H "Authorization: Bearer $(cat viewer.token)" -H 'Content-Type: application/json' \
+curl -s -H "Authorization: Bearer $(cat ~/.config/ais/viewer.token)" -H 'Content-Type: application/json' \
   -X POST http://127.0.0.1:8000/api/v1/render \
   -d '{"path": "all.federal.prod.dc2.web", "mock_hostname": "fed-web99", "overrides": {"http_port": 8443}}'
 ```

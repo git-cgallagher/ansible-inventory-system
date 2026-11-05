@@ -6,9 +6,21 @@
 - `docs/getting-started.md`: a getting-started guide, from the ideas through a PostgreSQL
   deployment (TLS, backups, upgrades), tree design, every write path, secrets, roles, history,
   settings, limits and troubleshooting. Each step was run against 0.3.0.
+- `ais import --dry-run`: reports what an import would change and writes nothing.
 - `deploy/compose.prod.yml`: production overrides for compose (database password from
   `AIS_DB_PASSWORD`, API on loopback for a TLS proxy, `FORWARDED_ALLOW_IPS: "*"`, restart
   policies).
+
+### Changed
+- The server requires ansible-core >= 2.19 (it already needed 2.19's trusted-template API to
+  run; now pip refuses an older one). The collection still supports ansible-core 2.18.
+- `.gitignore` ignores `*.token`.
+
+### Fixed
+- `ais import` now behaves like `POST /api/v1/import`. It takes the write lock and refuses a
+  tree that would no longer export. When nothing changed it writes no revision: it used to
+  record an empty one on every run. A real import now leaves its `import` audit row; the CLI
+  wrote none before.
 
 ## 0.3.0 — 2026-11-05
 

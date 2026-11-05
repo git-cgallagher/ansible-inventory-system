@@ -73,6 +73,9 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   `tests/test_render.py`'s `SERVER_REACHING` cases must stay refused, via an override and via a
   stored value. A new builtin filter or test that touches files, the environment, the network
   or other server state goes into those sets.
+- **The CLI writes like the API.** `ais import` (`cli._import`) takes `lock_for_write`, checks the
+  export, drops a no-op (no revision) and records one `import` audit row (`tests/test_cli.py`). A
+  new CLI write command does the same.
 - **Every effective write and every auth event leaves exactly one `audit_log` row, in the same
   transaction** (`ais.audit.record`, after `check_export`). A refused write (409/422/428) therefore
   leaves none, and a no-op (`PUT` of an unchanged var or definition) leaves none either. The one
