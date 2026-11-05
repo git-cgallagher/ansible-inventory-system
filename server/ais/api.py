@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, oidc, varsearch
+from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, keycheck, oidc, varsearch
 from ais.auth import Principal, require
 from ais.db import get_session, init_db
 from ais.importer import ImportError_, import_tree_report, live_node_by_path
@@ -283,6 +283,15 @@ def vars_hosts(args: dict[str, Any] = Depends(_search_args), principal: Principa
         raise HTTPException(404, exc.args[0]) from exc
 
 
+@app.get("/api/v1/vars/lint")
+def vars_lint(principal: Principal = viewer, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Undeclared keys in the tree that look like typos of a declared key or of a widely used
+    one (the rule behind the write warnings, ``ais.keycheck``): each with its suggestion, how
+    many nodes set it and the first paths. At the current revision; ``ais lint`` is the twin."""
+    keys = keycheck.lint(session)
+    return {"revision": current_revision(session), "total": len(keys), "keys": keys, "strict": keycheck.strict_keys()}
+
+
 def revision_out(r: Revision) -> dict[str, Any]:
     return {"id": r.id, "actor": r.actor, "source": r.source, "ts": r.ts, "message": r.message, "change": r.change}
 
@@ -443,12 +452,13 @@ def import_(
     except ImportError_ as exc:
         raise HTTPException(422, str(exc)) from exc
     api_write.check_export(session)
+    keys = api_write.review_keys(session, result.revision)
     summary = result.summary()
     if req.dry_run or not result.changed:
         session.rollback()
         rev_now = current_revision(session)
         response.headers["ETag"] = etag(rev_now)
-        return {"revision": rev_now, "changed": result.changed, "dry_run": req.dry_run, **summary}
+        return {"revision": rev_now, "changed": result.changed, "dry_run": req.dry_run, **summary, **keys}
     rev = result.revision
     audit.record(
         session,
@@ -463,7 +473,7 @@ def import_(
     )
     response.status_code = 201
     response.headers["ETag"] = etag(rev.id)
-    return {"revision": rev.id, "changed": True, "dry_run": False, **summary}
+    return {"revision": rev.id, "changed": True, "dry_run": False, **summary, **keys}
 
 
 # --------------------------------------------------------------------- web UI

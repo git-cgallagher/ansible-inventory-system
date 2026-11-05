@@ -152,8 +152,9 @@ KINDS: dict[str, Callable] = {
 }
 
 
+@pytest.mark.parametrize("strict", [False, True], ids=["default", "strict"])
 @pytest.mark.parametrize("kind", list(KINDS))
-def test_revert_round_trips_every_write_kind(kind, editor, session, built):  # noqa: F811
+def test_revert_round_trips_every_write_kind(kind, strict, editor, session, built, monkeypatch):  # noqa: F811
     rev = built
     before = _state(session)
     r = KINDS[kind](editor, rev)
@@ -161,6 +162,8 @@ def test_revert_round_trips_every_write_kind(kind, editor, session, built):  # n
     done = r.json()["revision"]
     after_write = _state(session)
     assert after_write != before, "the write must change something the oracle sees"
+    if strict:  # issue 24: strict mode (AIS_STRICT_KEYS) never refuses an undo, even of a new undeclared key
+        monkeypatch.setenv("AIS_STRICT_KEYS", "true")
 
     r = _revert(editor, done, done)
     assert r.status_code == 201, r.text

@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from ais import audit
-from ais.api_write import check_export
+from ais.api_write import check_export, review_keys
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.locking import IfMatch, check_precondition, etag
@@ -62,7 +62,7 @@ def _run(
     except RevertError as exc:
         raise HTTPException(exc.status, exc.detail) from exc
     check_export(session)
-    body = result.body()
+    body = {**result.body(), **review_keys(session, result.revision, strict=False)}  # an undo is never refused
     if req.dry_run:
         session.rollback()
         rev_now = current_revision(session)
