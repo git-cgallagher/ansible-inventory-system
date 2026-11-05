@@ -8,8 +8,9 @@
   otherwise the server's current revision read right before the first write; later writes in
   the same task follow the revision the previous write returned.
 * A 409 whose body is the server's ``stale revision`` document is reported as such (expected
-  vs current revision); any other 409 (name collision, duplicate host) carries the server's
-  message. 401/403 name the token; 422 and 404 carry the server's detail.
+  vs current revision); any other 409 (name collision, duplicate host, a delete of a non-empty
+  subtree without ``recursive``) carries the server's message (a structured detail's
+  ``message``). 401/403 name the token; 422 and 404 carry the server's detail.
 * Sends ``X-AIS-Source: module`` and one ``X-Request-ID`` per task so audit rows can be tied
   to the run.
 """
@@ -108,6 +109,10 @@ class Client(object):
 
     def _fail(self, status, parsed, info, url):
         detail = parsed.get("detail") if isinstance(parsed, dict) else parsed
+        extra = {}
+        if isinstance(detail, dict) and detail.get("error") != "stale revision" and "message" in detail:
+            extra = dict((k, v) for k, v in detail.items() if k != "message")
+            detail = detail["message"]
         if status == -1 or status == 0:
             self.module.fail_json(msg="ais: cannot reach %s: %s" % (url, info.get("msg", "connection failed")))
         if status in (401, 403):
@@ -123,7 +128,7 @@ class Client(object):
                 current_revision=detail.get("current"),
             )
         if status == 409:
-            self.module.fail_json(msg="ais: refused: %s" % to_native(detail), status=409)
+            self.module.fail_json(msg="ais: %s" % to_native(detail) if extra else "ais: refused: %s" % to_native(detail), status=409, **extra)
         if status == 428:
             self.module.fail_json(msg="ais: the server wants If-Match on this write (client bug): %s" % detail, status=428)
         self.module.fail_json(msg="ais: %s %s: %s" % (url, status, to_native(detail)), status=status)
@@ -242,14 +247,21 @@ def ensure_node(client, module, path, kind=None, inventory_name=None, meta=None,
     return True, client.node(path), diff
 
 
-def remove_node(client, module, path):
-    """Delete the node (and subtree) at ``path`` if it exists. ``(changed, deleted_paths)``."""
+def remove_node(client, module, path, recursive=False):
+    """Delete the node at ``path`` if it exists. ``(changed, deleted_paths)``.
+
+    A node with descendants needs ``recursive`` (the server refuses otherwise, with the
+    counts, and the module fails with that message, in check mode too: check mode asks the
+    server for a dry run, which applies the same rule and lists what would go)."""
     node = client.node(path)
     if node is None:
         return False, []
     if node["kind"] == "all":
         module.fail_json(msg="ais: the root cannot be deleted")
+    query = "?recursive=true" if recursive else ""
     if module.check_mode:
-        return True, [path]
-    data = client.write("DELETE", "/nodes/%d" % node["id"])
+        sep = "&" if query else "?"
+        _status, data = client.request("DELETE", "/nodes/%d%s%sdry_run=true" % (node["id"], query, sep), allow=())
+        return True, data.get("deleted", [path])
+    data = client.write("DELETE", "/nodes/%d%s" % (node["id"], query))
     return True, data.get("deleted", [path])

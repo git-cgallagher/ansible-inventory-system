@@ -149,10 +149,11 @@ test("structure, definitions, tags and tokens from the UI; history follows a mov
   await expect(page.locator("table.audit tbody tr")).toHaveCount(1);
   await expect(page.locator("table.audit tbody tr").first()).toContainText("variable.set");
 
-  // --- delete the subtree: back at the parent
+  // --- delete the (leaf) node: no count to confirm, back at the parent
   await page.goto("/#/tree?path=all.commercial.lab.dc1.e2e_cache2");
   await page.getByRole("button", { name: "Delete" }).click();
-  await page.getByRole("button", { name: "Delete subtree" }).click();
+  await expect(page.getByRole("form", { name: "Delete node" })).toContainText("Delete all.commercial.lab.dc1.e2e_cache2?");
+  await page.getByRole("button", { name: "Delete node" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "dc1" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("Deleted 1 node(s)");
   await expect(page.getByRole("treeitem", { name: "e2e_cache2", exact: true })).toHaveCount(0);
@@ -191,4 +192,30 @@ test("structure, definitions, tags and tokens from the UI; history follows a mov
   await row.getByRole("button", { name: "Revoke e2e-ci" }).click();
   await row.getByRole("button", { name: "Confirm revoking e2e-ci" }).click();
   await expect(row).toContainText("revoked");
+});
+
+// Issue 20: a group with descendants shows what would go, and the confirmation sends that count.
+test("deleting a group shows the node and host counts and confirms them", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill(EMAIL);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  // all.federal.prod.dc2.web: itself, edge, fed-edge01, fed-web01 (seed.yml)
+  await page.goto("/#/tree?path=all.federal.prod.dc2.web");
+  await expect(page.getByRole("heading", { level: 1, name: "web" })).toBeVisible();
+  const rev = Number((await page.locator(".rev").textContent())?.replace("revision ", ""));
+  await page.getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByTestId("delete-count")).toHaveText("4 nodes, 2 hosts");
+  // the preview wrote nothing
+  await expect(page.locator(".rev")).toHaveText(`revision ${rev}`);
+  const sent = page.waitForRequest((r) => r.method() === "DELETE" && !r.url().includes("dry_run"));
+  await page.getByRole("button", { name: "Delete 4 nodes" }).click();
+  const url = new URL((await sent).url());
+  expect(url.searchParams.get("recursive")).toBe("true");
+  expect(url.searchParams.get("expect_count")).toBe("4");
+  expect((await sent).headers()["if-match"]).toBe(`"${rev}"`);
+  await expect(page.getByRole("heading", { level: 1, name: "dc2" })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Deleted 4 node(s) (2 host(s)) under all.federal.prod.dc2.web");
+  await expect(page.getByRole("treeitem", { name: "web", exact: true })).toHaveCount(0);
 });

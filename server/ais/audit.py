@@ -120,13 +120,19 @@ def audit_out(row: AuditLog) -> dict[str, Any]:
     }
 
 
+# Audit actions whose ``after`` maps a whole subtree's old ids to new ones: a move or
+# rename (``after.moved``) and a restore of a deleted subtree (``after.restored``).
+_LINEAGE = {"node.move": "moved", "node.restore": "restored"}
+
+
 def node_lineage(session: Session, node_id: int) -> list[int]:
-    """Every id the node has had: ``node_id`` and, walking ``node.move`` rows backwards
-    (their ``after.moved`` maps ``old_id`` → ``id`` for the whole moved subtree), the ids
-    before each move of the node or of an ancestor. Moves are rare, so this reads them all."""
+    """Every id the node has had: ``node_id`` and, walking ``node.move`` and ``node.restore``
+    rows backwards (their ``after.moved`` / ``after.restored`` map ``old_id`` → ``id`` for the
+    whole subtree), the ids before each move of the node or of an ancestor and the ids of the
+    deleted rows a restore brought back. Both are rare, so this reads them all."""
     previous: dict[int, int] = {}
-    for after in session.scalars(select(AuditLog.after).where(AuditLog.action == "node.move")):
-        for m in (after or {}).get("moved", []):
+    for action, after in session.execute(select(AuditLog.action, AuditLog.after).where(AuditLog.action.in_(list(_LINEAGE)))):
+        for m in (after or {}).get(_LINEAGE[action], []):
             if isinstance(m, dict) and "id" in m and "old_id" in m:
                 previous[int(m["id"])] = int(m["old_id"])
     out = [node_id]

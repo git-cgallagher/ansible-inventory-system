@@ -57,8 +57,8 @@ def test_var_put_closes_and_reopens_rows(editor, session, seeded):
 def test_delete_node_closes_subtree_and_keeps_history(editor, session, seeded):
     dc1 = _node_id(editor, "all.commercial.prod.dc1")
     rev0 = current_rev(editor)
-    r = editor.delete(f"/api/v1/nodes/{dc1}", if_match=rev0)
-    assert r.status_code == 200
+    r = editor.delete(f"/api/v1/nodes/{dc1}", params={"recursive": "true"}, if_match=rev0)
+    assert r.status_code == 200 and r.json()["nodes"] == 6 and r.json()["hosts"] == 3
     assert sorted(r.json()["deleted"]) == sorted(
         ["all.commercial.prod.dc1", "all.commercial.prod.dc1.web", "all.commercial.prod.dc1.web.web01", "all.commercial.prod.dc1.web.web02", "all.commercial.prod.dc1.db", "all.commercial.prod.dc1.db.db01"]
     )

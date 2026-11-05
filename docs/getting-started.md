@@ -377,7 +377,8 @@ an empty test server.
 ### The web UI
 
 Sign in as an editor or admin. From a node's page you can add a child, move or rename it
-(with its subtree), delete a subtree, and edit its variables as JSON or YAML. The page shows
+(with its subtree), delete a subtree (the dialog says how many nodes and hosts go, and
+confirms exactly that many), and edit its variables as JSON or YAML. The page shows
 each inherited value greyed out, with the node it comes from. If someone saved first, the page
 says so, reloads, and keeps your text for you to re-apply.
 
@@ -643,22 +644,48 @@ Roles are global: there's no "editor of `all.federal` only" yet.
   link opens it.
 - **Undo** is a new change, not a rewind: look up the old value in the diff or audit log and
   write it back. History is never rewritten.
-- **Restore a deleted subtree:** export it at a revision from before the delete, then import
-  that. The delete's audit row names the revision that deleted it; the one before is the
-  newest revision below it (ids are increasing, not always contiguous):
+- **Deleting a group asks first.** `DELETE /api/v1/nodes/{id}` on a node with anything below
+  it answers 409 with the counts ("has 44 node(s) below it; deleting it deletes 45 node(s) in
+  all, 21 of them host(s)") unless the call confirms: `?recursive=true`, or `?expect_count=45`,
+  which must equal the number of nodes deleted, the node included (a wrong count refuses even
+  with `recursive`). A host or an empty group deletes without either. `?dry_run=true` lists
+  what would go and writes nothing (no `If-Match`). The module wants `recursive: true`; the
+  UI's Delete shows the node and host counts and sends them as the confirmation.
+- **Restore a deleted subtree** with one call. It comes back as it was at the last revision
+  before its latest delete (or at the `revision` you give): every node, its own values, node
+  `meta` and its tag memberships, under one new revision:
 
   ```bash
-  curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/audit?action=node.delete&limit=5'     # "revision": 57
-  curl -s -H "$H" 'http://127.0.0.1:8000/api/v1/revisions?before=57&limit=1'           # "id": 56
-  ais export-tree --revision 56 --subtree all.commercial.prod.dc1 > dc1-at-56.yml
-  ais import dc1-at-56.yml --message "restore dc1 (deleted in 57)"
+  curl -s -X POST -H "$H" -H 'Content-Type: application/json' -H 'If-Match: "57"' \
+    -d '{"path": "all.commercial.prod.dc1"}' http://127.0.0.1:8000/api/v1/nodes/restore
+  # {"revision": 58, "from_revision": 56, "nodes": 45, "hosts": 21, "tags": [...], "restored": [...]}
+  ais restore all.commercial.prod.dc1 --dry-run     # the same from the server's shell
+  ais restore all.commercial.prod.dc1 --revision 40 --message "dc1 as it was before the migration"
   ```
 
-  Every node, its own values and its tag memberships come back, so each host resolves as it
-  did at revision 56 (as long as nothing above the subtree changed since). The restored nodes
-  are new rows with new ids: host history continues by host name (`/hosts/{name}/snapshots`),
-  but the audit trail of the old nodes stays with the old ids. Over HTTP:
-  `GET /api/v1/tree?subtree=…&revision=56`, then `POST /api/v1/import {"tree": …}`.
+  `"dry_run": true` (or `--dry-run`) reports the counts and writes nothing. Each host then
+  resolves as it did at that revision, as long as nothing above the subtree changed since:
+  the restore never rolls the parents back. It refuses, writing nothing, when something lives
+  at the path now (it never overwrites: delete or move that first, or copy the old version
+  elsewhere with `GET /api/v1/tree?…&as=`), when the parent is gone too (restore the highest
+  deleted ancestor, which brings this subtree back with it), when one of its host names is in
+  use elsewhere (host names are unique), and when a definition tightened since rejects an old
+  value.
+
+  **History continues.** The restored nodes are new rows with new ids (a node row is live over
+  one span of revisions, so the deleted rows cannot be revived without making the revisions
+  in between show them). The `node.restore` audit row maps every old id to its new one, the
+  way a move's row does, so `GET /api/v1/audit?node=<path>` (and `&key=`) and the UI's history
+  links show the changes from before the delete too, and the root's history shows the delete
+  and the restore. Host snapshots are kept by host name: between the delete and the restore
+  the host does not exist (`/hosts/{name}/snapshots/{rev}` and `/diff` answer 404 for those
+  revisions), and `/diff` from before the delete to after the restore is `identical`; the
+  background pass stores no new row for a host that came back unchanged. Tag memberships come
+  back unless the tag itself was deleted since (`DELETE /tags/{name}` removes every
+  membership; a `PUT /tags/{name}` only replaces the live members, so the deleted nodes' stay).
+  The two-step path still works too, for a restore into another server or an edited copy:
+  `ais export-tree --revision 56 --subtree … > dc1.yml`, then `ais import dc1.yml`; but an
+  import does not link the old ids, so the audit trail of the old nodes stays with them.
 
 Per-host history is kept by a background task in the API process. It stores a host's state
 only in the revisions where it changed. A revision it skipped is computed on demand, so every

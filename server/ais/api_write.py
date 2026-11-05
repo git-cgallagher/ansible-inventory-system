@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,9 +23,10 @@ from ais import audit, schema
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.importer import ImportError_, check_kind, check_name, check_position, infer_kind, live_node_by_path
-from ais.locking import IfMatch, begin_write, etag
+from ais.locking import IfMatch, begin_write, check_precondition, etag
 from ais.models import PATH_SEP, MergeStrategy, Node, NodeKind, NodeVariable, Revision, Role, TagMember, VariableDefinition
 from ais.resolver import build_export, current_revision, load_snapshot
+from ais.restore import RestoreError, restore_subtree
 
 router = APIRouter(prefix="/api/v1", tags=["write"])
 editor = Depends(require(Role.editor))
@@ -329,28 +330,134 @@ def move_node(
     return _finish(response, rev, {"node": out, "moved": moved})
 
 
+def _delete_guard(node: Node, subtree: list[Node], recursive: bool, expect_count: int | None) -> None:
+    """Refuse to delete a node with live descendants unless the caller confirmed it:
+    ``recursive=true``, or ``expect_count`` equal to the subtree size (the node included).
+    A wrong ``expect_count`` refuses even with ``recursive``: the tree is not what the
+    caller looked at. A leaf (a host, an empty group) needs neither."""
+    nodes = len(subtree)
+    hosts = sum(1 for n in subtree if n.kind is NodeKind.host)
+    counts = {"path": node.path, "nodes": nodes, "hosts": hosts}
+    if expect_count is not None and expect_count != nodes:
+        raise HTTPException(
+            409,
+            {
+                "error": "count mismatch",
+                "message": (
+                    f"refused: deleting {node.path} would delete {nodes} node(s) ({hosts} host(s)), "
+                    f"not the {expect_count} expect_count says. Nothing was deleted; look again, then send expect_count={nodes}"
+                ),
+                **counts,
+            },
+        )
+    if nodes > 1 and not recursive and expect_count is None:
+        raise HTTPException(
+            409,
+            {
+                "error": "subtree not empty",
+                "message": (
+                    f"refused: {node.path} has {nodes - 1} node(s) below it; deleting it deletes {nodes} node(s) in all, "
+                    f"{hosts} of them host(s). Nothing was deleted. To confirm, send recursive=true or expect_count={nodes}"
+                ),
+                **counts,
+            },
+        )
+
+
 @router.delete("/nodes/{node_id}")
 def delete_node(
     node_id: int,
     response: Response,
+    recursive: bool = Query(False, description="Confirm deleting a node that has descendants (the whole subtree goes)"),
+    expect_count: int | None = Query(None, ge=1, description="Confirm by size: must equal the number of nodes deleted, the node included"),
+    dry_run: bool = Query(False, description="Report what would be deleted (and whether it would be refused); writes nothing, no If-Match needed"),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    rev = begin_write(session, if_match, actor=principal.actor, message=f"delete node {node_id}")
-    node = get_live_node(session, node_id)
+    """Delete a node and its subtree (closed under one revision; earlier revisions keep them,
+    and ``POST /nodes/restore`` brings them back). A node with live descendants is refused
+    (409, with the counts) unless ``recursive`` or a matching ``expect_count`` confirms it."""
+    if dry_run:
+        node = get_live_node(session, node_id)
+    else:
+        rev = begin_write(session, if_match, actor=principal.actor, message=f"delete node {node_id}")
+        node = get_live_node(session, node_id)
     if node.kind is NodeKind.all:
         raise HTTPException(422, "the root cannot be deleted")
     subtree = live_subtree(session, node)
+    _delete_guard(node, subtree, recursive, expect_count)
+    counts = {"nodes": len(subtree), "hosts": sum(1 for n in subtree if n.kind is NodeKind.host)}
+    paths = [n.path for n in subtree]
+    if dry_run:
+        rev_now = current_revision(session)
+        response.headers["ETag"] = etag(rev_now)
+        return {"revision": rev_now, "changed": True, "dry_run": True, "deleted": paths, **counts}
     ids = [n.id for n in subtree]
-    before = {**node_out(node, live_vars(session, node.id)), "subtree": [n.path for n in subtree]}
+    before = {**node_out(node, live_vars(session, node.id)), "subtree": paths}
     for n in subtree:
         n.deleted_rev = rev.id
     for nv in session.scalars(select(NodeVariable).where(NodeVariable.node_id.in_(ids), NodeVariable.deleted_rev.is_(None))):
         nv.deleted_rev = rev.id
     session.flush()
     _audit(session, principal, rev, "node.delete", "node", node.id, before, None)
-    return _finish(response, rev, {"deleted": [n.path for n in subtree]})
+    return _finish(response, rev, {"dry_run": False, "deleted": paths, **counts})
+
+
+class NodeRestore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(description="Path of the deleted subtree, e.g. all.commercial.prod.dc1")
+    revision: int | None = Field(default=None, description="Restore it as it was at this revision (default: the last one before its latest delete)")
+    dry_run: bool = Field(default=False, description="Report what the restore would bring back, write nothing (no If-Match needed)")
+    message: str | None = None
+
+
+@router.post("/nodes/restore")
+def restore_node(
+    req: NodeRestore,
+    response: Response,
+    if_match: str | None = IfMatch(),
+    principal: Principal = editor,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Bring a deleted subtree back as it was at ``revision``: nodes, own variables, node
+    ``meta`` and tag memberships, under one new revision (201). The restored nodes get new
+    ids; the ``node.restore`` audit row maps every old id to its new one, so ``GET
+    /audit?node=<path>`` keeps the history from before the delete. Refused: the root (422), a
+    live node at ``path`` or a parent that is not live (409), a host name live elsewhere now
+    (409), a value its definition now rejects (422). ``dry_run`` reports the same and rolls back."""
+    if not req.dry_run:
+        check_precondition(session, if_match)  # the importer opens the revision
+    try:
+        result = restore_subtree(session, req.path, req.revision, actor=principal.actor, source=audit.current_source(), message=req.message)
+    except RestoreError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    except ImportError_ as exc:
+        raise HTTPException(422, str(exc)) from exc
+    check_export(session)
+    summary = result.summary()
+    if req.dry_run:
+        restored = [{"path": r["path"], "old_id": r["old_id"]} for r in result.restored]
+        session.rollback()
+        rev_now = current_revision(session)
+        response.headers["ETag"] = etag(rev_now)
+        return {"revision": rev_now, "changed": True, "dry_run": True, **summary, "restored": restored}
+    rev = result.revision
+    root = session.get(Node, result.restored[0]["id"])
+    out = node_out(root, live_vars(session, root.id))  # type: ignore[arg-type]
+    _audit(
+        session,
+        principal,
+        rev,
+        "node.restore",
+        "node",
+        root.id,  # type: ignore[union-attr]
+        {"path": result.path, "id": result.restored[0]["old_id"], "revision": result.from_revision},
+        {**out, **summary, "restored": result.restored},
+    )
+    response.status_code = 201
+    return _finish(response, rev, {"dry_run": False, "node": out, **summary, "restored": result.restored})
 
 
 # ------------------------------------------------------------------ variables

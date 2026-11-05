@@ -253,7 +253,7 @@ def test_restore_a_deleted_subtree_from_a_past_revision(editor, session, built):
     before_plugin, before_hosts = _plugin_view(session), _resolved(session)
     at_r = export_tree(session, R, EAST)
     east = session.scalar(select(Node).where(Node.path == EAST, Node.deleted_rev.is_(None)))
-    assert editor.delete(f"/api/v1/nodes/{east.id}", if_match=R).status_code == 200
+    assert editor.delete(f"/api/v1/nodes/{east.id}", params={"recursive": "true"}, if_match=R).status_code == 200
     session.expire_all()
     assert EAST not in load_snapshot(session).by_path
     with pytest.raises(KeyError):
@@ -340,7 +340,7 @@ def test_http_restore_and_errors(editor, viewer, anon, session, built):
     assert y.headers["ETag"] != r.headers["ETag"]
 
     east = viewer.get(f"/api/v1/nodes/{EAST}").json()["id"]
-    gone = editor.delete(f"/api/v1/nodes/{east}", if_match=R).json()["revision"]
+    gone = editor.delete(f"/api/v1/nodes/{east}", params={"recursive": "true"}, if_match=R).json()["revision"]
     assert viewer.get("/api/v1/tree", params={"subtree": EAST}).status_code == 404
     back = viewer.get("/api/v1/tree", params={"subtree": EAST, "revision": R})
     assert back.status_code == 200 and back.json() == r.json()

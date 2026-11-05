@@ -1,4 +1,4 @@
-"""``ais`` command line: init-db, import, export, export-tree, render, serve, user, token."""
+"""``ais`` command line: init-db, import, export, export-tree, restore, render, serve, user, token."""
 
 from __future__ import annotations
 
@@ -44,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     ext.add_argument("--ancestor-vars", action="store_true", help="also export the ancestors' own variables (self-contained)")
     ext.add_argument("--no-hosts", action="store_true", help="leave the hosts out (a clone inside one inventory)")
     ext.add_argument("--format", choices=["yaml", "json"], default="yaml")
+    rst = sub.add_parser("restore", help="bring a deleted subtree back as it was at a revision (POST /api/v1/nodes/restore)")
+    rst.add_argument("path", help="path of the deleted subtree, e.g. all.commercial.prod.dc1")
+    rst.add_argument("--revision", type=int, help="as it was at this revision (default: the last one before its latest delete)")
+    rst.add_argument("--message")
+    rst.add_argument("--dry-run", action="store_true", help="report what the restore would bring back, write nothing")
     ren = sub.add_parser("render", help="resolve a real or mock host")
     ren.add_argument("--host")
     ren.add_argument("--path")
@@ -90,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "export-tree":
         return _export_tree(args)
+    if args.cmd == "restore":
+        return _restore(args)
     if args.cmd == "render":
         with session_scope() as s:
             out = resolve(load_snapshot(s, args.revision), host=args.host, path=args.path)
@@ -159,6 +166,49 @@ def _import(args: argparse.Namespace) -> int:
         rev = result.revision
         audit.record(s, actor="cli", action="import", target_type="tree", target_id="all", after={"revision": rev.id, **summary}, source="cli", revision=rev.id)
         print(f"imported as revision {rev.id}: {counts}")
+    return 0
+
+
+def _restore(args: argparse.Namespace) -> int:
+    """The CLI twin of ``POST /api/v1/nodes/restore``: takes the write lock, refuses what the
+    API refuses (with its message), checks the export, and leaves one ``node.restore`` audit
+    row whose ``restored`` map keeps the subtree's history (``ais.restore``)."""
+    from ais import audit
+    from ais.api_write import live_vars, node_out
+    from ais.locking import lock_for_write
+    from ais.models import Node
+    from ais.restore import RestoreError, restore_subtree
+
+    init_db()
+    with session_scope() as s:
+        lock_for_write(s)
+        try:
+            result = restore_subtree(s, args.path, args.revision, actor="cli", source="cli", message=args.message)
+            build_export(load_snapshot(s))
+        except (RestoreError, ImportError_, ValueError) as exc:
+            s.rollback()
+            raise SystemExit(f"restore refused: {exc}")
+        summary = result.summary()
+        counts = f"{summary['nodes']} nodes ({summary['hosts']} hosts), {summary['variables_set']} variables, {len(summary['tags'])} tags"
+        if args.dry_run:
+            s.rollback()
+            print(f"dry run: would restore {result.path} as of revision {result.from_revision}: {counts}")
+            return 0
+        rev = result.revision
+        root = s.get(Node, result.restored[0]["id"])
+        out = node_out(root, live_vars(s, root.id))
+        audit.record(
+            s,
+            actor="cli",
+            action="node.restore",
+            target_type="node",
+            target_id=root.id,
+            before={"path": result.path, "id": result.restored[0]["old_id"], "revision": result.from_revision},
+            after={**out, **summary, "restored": result.restored},
+            source="cli",
+            revision=rev.id,
+        )
+        print(f"restored {result.path} as of revision {result.from_revision} as revision {rev.id}: {counts}")
     return 0
 
 

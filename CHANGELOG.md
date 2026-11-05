@@ -28,7 +28,39 @@
   old without a word, with the server down or a new `revision:` pinned (#19, fail-closed
   inventory).
 
+- **Restore a deleted subtree in one call**: `POST /api/v1/nodes/restore` (editor, `If-Match`;
+  `path`, optional `revision`, `dry_run`, `message`) and `ais restore PATH [--revision N]
+  [--dry-run] [--message]`. The subtree comes back as it was at that revision (default: the
+  last one before its latest delete) with its nodes, own values, node `meta` and tag
+  memberships, under one new revision and one `node.restore` audit row. Built on the tree
+  export + import in-process, so ancestors are never rolled back. Refused, writing nothing: the
+  root (422), a live node at the path (409: a restore never overwrites), a parent that is gone
+  too (409: restore the highest deleted ancestor), a host name now used elsewhere (409), a
+  value a tightened definition rejects (422) (#20, delete guard and restore).
+- **Audit history survives a delete and restore.** The restored nodes are new rows (a node row
+  is live over one span of revisions, so reviving the old ones would make the revisions in
+  between show them), and the `node.restore` row maps every old id to its new one, like a
+  move's. `GET /api/v1/audit?node=<path>[&key=]` and the UI's history links follow that map,
+  so they show the changes from before the delete; the restored root's history shows the delete
+  and the restore. Host snapshots continue by host name: `/diff` from before the delete to
+  after the restore is identical, and revisions in between answer 404 for those hosts.
+- `DELETE /api/v1/nodes/{id}?dry_run=true` lists what a delete would take (`deleted`, `nodes`,
+  `hosts`) and writes nothing (no `If-Match`); every delete answer now carries `nodes` and
+  `hosts`.
+- The `node` module's `recursive` option (with `state: absent`); check and diff mode list every
+  path that would be deleted.
+
 ### Changed
+- **Breaking: deleting a node that has descendants needs a confirmation.** `DELETE
+  /api/v1/nodes/{id}` used to delete the whole subtree silently (one editor call removed 45
+  nodes, 21 of them hosts). It now answers 409 (`error: "subtree not empty"`, with `message`,
+  `nodes` and `hosts`) unless the request says `recursive=true` or gives `expect_count` equal to
+  the number of nodes deleted, the node included; a wrong `expect_count` is a 409 `count
+  mismatch` even with `recursive`. A host or an empty group deletes as before. Callers that
+  delete non-empty groups must add `?recursive=true`; the `node` module with `state: absent`
+  must add `recursive: true` (the task fails with the counts otherwise, in check mode too). The
+  web UI's Delete dialog shows the node and host counts and sends them as `expect_count`.
+- The modules and the web UI show a structured error's `message` instead of its raw JSON.
 - The server requires ansible-core >= 2.19 (it already needed 2.19's trusted-template API to
   run; now pip refuses an older one). The collection still supports ansible-core 2.18.
 - `.gitignore` ignores `*.token`.

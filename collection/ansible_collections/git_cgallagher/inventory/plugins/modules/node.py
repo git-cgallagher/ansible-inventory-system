@@ -22,10 +22,21 @@ options:
     type: str
     required: true
   state:
-    description: Whether the node must exist. C(absent) deletes the whole subtree.
+    description:
+      - Whether the node must exist. C(absent) deletes the node with its whole subtree.
+      - A node with descendants is only deleted with O(recursive=true); otherwise the task fails
+        and names how many nodes and hosts the delete would take.
     type: str
     choices: [present, absent]
     default: present
+  recursive:
+    description:
+      - With O(state=absent), confirm deleting a node that has descendants (the whole subtree goes).
+      - Not needed for a host or an empty group. Check and diff mode list every path that would be deleted.
+      - A deleted subtree can be brought back with C(POST /api/v1/nodes/restore) or C(ais restore).
+    type: bool
+    default: false
+    version_added: "0.4.0"
   kind:
     description:
       - Kind of a node being created. Inferred from the depth when omitted (depth 1 business,
@@ -67,10 +78,11 @@ EXAMPLES = r"""
     vars:
       ansible_host: 10.1.3.11
 
-- name: Remove the group and everything under it
+- name: Remove the group and everything under it (refused without recursive when it has children)
   git_cgallagher.inventory.node:
     path: all.commercial.prod.dc1.cache
     state: absent
+    recursive: true
 """
 
 RETURN = r"""
@@ -79,7 +91,7 @@ node:
   returned: always
   type: dict
 deleted:
-  description: Paths closed by a delete (the node and its subtree).
+  description: Paths closed by a delete (the node and its subtree); in check mode, the paths that would be.
   returned: when state=absent and changed
   type: list
   elements: str
@@ -104,14 +116,15 @@ def main():
         meta=dict(type="dict"),
         vars=dict(type="dict", default={}),
         purge_vars=dict(type="bool", default=False),
+        recursive=dict(type="bool", default=False),
     )
     module = AnsibleModule(argument_spec=spec, supports_check_mode=True)
     client = Client(module)
     p = module.params
     if p["state"] == "absent":
-        changed, deleted = remove_node(client, module, p["path"])
+        changed, deleted = remove_node(client, module, p["path"], recursive=p["recursive"])
         module.exit_json(changed=changed, node={}, deleted=deleted, revision=client.revision if client.revision is not None else client.current_revision(),
-                         diff={"before": {"path": p["path"]} if changed else {}, "after": {}})
+                         diff={"before": {"path": p["path"], "deleted": deleted} if changed else {}, "after": {}})
     changed, node, diff = ensure_node(
         client, module, p["path"], kind=p["kind"], inventory_name=p["inventory_name"], meta=p["meta"], variables=p["vars"], purge_vars=p["purge_vars"]
     )
