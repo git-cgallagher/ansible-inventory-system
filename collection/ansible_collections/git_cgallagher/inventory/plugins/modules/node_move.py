@@ -56,6 +56,17 @@ moved:
   returned: always
   type: list
   elements: dict
+impact:
+  description:
+    - In check mode, what the change would do to the hosts, from the server's dry run (C(dry_run=true)), which also
+      runs every check the write would and refuses what the write would refuse.
+    - C(total) distinct hosts affected; C(vars_changed), C(added), C(removed), C(regrouped) and C(moved) count them by
+      kind; C(hosts) lists them sorted by path (at most C(limit), C(truncated) says when there were more) with
+      C(status) (C(changed), C(added) or C(removed)), the C(added), C(removed) and C(changed) keys (C(from)/C(to)),
+      the groups it C(joined) and C(left) and C(moved_from); C(groups) counts the hosts that join or leave each group.
+      With C(--diff) a short summary is shown.
+  returned: check mode, when changed
+  type: dict
 revision:
   description: Inventory revision after the task (the move's, or the current one when nothing changed).
   returned: always
@@ -64,7 +75,7 @@ revision:
 
 from ansible.module_utils.basic import AnsibleModule
 
-from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, split_path, write_argument_spec
+from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, split_path, with_impact, write_argument_spec
 
 
 def main():
@@ -89,11 +100,19 @@ def main():
         module.fail_json(msg="ais: both %s and %s exist; refusing to move onto a live node" % (path, new_path))
 
     diff = {"before": {"path": path}, "after": {"path": new_path}}
+    body = {"parent_path": new_parent, "name": new_name}
     if module.check_mode:
         if client.node(new_parent) is None:
             module.fail_json(msg="ais: new parent %s does not exist" % new_parent)
-        module.exit_json(changed=True, node=dict(source, path=new_path, name=new_name), moved=[], revision=client.current_revision(), diff=diff)
-    body = {"parent_path": new_parent, "name": new_name}
+        data = client.preview("POST", "/nodes/%d/move" % source["id"], body)  # the server refuses what the move would
+        module.exit_json(
+            changed=True,
+            node=dict(source, path=new_path, name=new_name),
+            moved=[],
+            revision=data["revision"],
+            diff=with_impact(diff, data.get("impact")),
+            impact=data.get("impact"),
+        )
     data = client.write("POST", "/nodes/%d/move" % source["id"], body)
     module.exit_json(changed=True, node=data["node"], moved=data.get("moved", []), revision=data["revision"], diff=diff)
 

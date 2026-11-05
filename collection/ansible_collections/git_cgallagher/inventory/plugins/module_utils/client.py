@@ -17,6 +17,11 @@
 * A write's ``warnings`` (undeclared keys that look like typos of known ones, server issue
   #24) become Ansible warnings (``module.warn``) and are kept in ``key_warnings`` for the
   module's result: Ansible reserves the result's ``warnings`` for plain strings.
+* Check mode asks the server for a dry run of each write (``preview``): the server runs every
+  check the write would (schema, strict keys, the delete guard, the export check) and answers
+  with its ``impact`` on the hosts, writing nothing. The module still decides ``changed`` from
+  what it read; ``impact_result``/``impact_diff`` put the previews into the result and into
+  ``--diff`` (a ``prepared`` summary).
 """
 from __future__ import annotations
 
@@ -71,6 +76,7 @@ class Client(object):
         self.message = params.get("revision_message")
         self.change = params.get("change") or os.environ.get("AIS_CHANGE") or None
         self.key_warnings = []
+        self.impacts = []  # the impact of each write check mode previewed
         if not self.base:
             module.fail_json(msg="url is required (option url or AIS_URL)")
         if not self.token:
@@ -188,6 +194,20 @@ class Client(object):
             self.module.warn("ais: ... and %d more undeclared key(s) that look like typos" % (total - shown))
         return data
 
+    def preview(self, method, path, body=None, in_body=False):
+        """Check mode: the server's dry run of a write (``dry_run=true`` in the query, or in
+        the body for import/restore/revert). Sends ``If-Match`` only when ``expect_revision``
+        was given (a dry run needs none; one that is sent must be current). Refusals fail the
+        task exactly as the write would. Keeps the answer's ``impact``."""
+        if in_body:
+            body = dict(body or {}, dry_run=True)
+        else:
+            path = path + ("&" if "?" in path else "?") + "dry_run=true"
+        _status, data = self.request(method, path, body=body, if_match=self.revision, allow=())
+        if isinstance(data, dict) and data.get("impact") is not None:
+            self.impacts.append(data["impact"])
+        return self.collect(data)
+
     def write(self, method, path, body=None):
         """Locked write. Reads the current revision once when ``expect_revision`` was
         not given, then follows the revision each write returns."""
@@ -222,7 +242,9 @@ def var_changes(current, wanted, purge):
 def ensure_node(client, module, path, kind=None, inventory_name=None, meta=None, variables=None, purge_vars=False):
     """Create or converge the node at ``path``. Returns ``(changed, node, diff)``.
 
-    Honors check mode: computes what would change without writing.
+    Honors check mode: computes what would change from what it read (the verdict), and asks
+    the server for a dry run of each write it would make (``Client.preview``), so the
+    server's checks apply and ``client.impacts`` holds what each would do to the hosts.
     """
     variables = variables or {}
     node = client.node(path)
@@ -234,13 +256,14 @@ def ensure_node(client, module, path, kind=None, inventory_name=None, meta=None,
             module.fail_json(msg="ais: parent %s does not exist" % parent_path)
         after = {"path": path, "kind": kind, "inventory_name": inventory_name, "meta": meta or {}, "vars": variables}
         diff = {"before": {}, "after": after}
-        if module.check_mode:
-            return True, after, diff
         body = {"parent_path": parent_path, "name": name, "meta": meta or {}, "vars": variables}
         if kind:
             body["kind"] = kind
         if inventory_name:
             body["inventory_name"] = inventory_name
+        if module.check_mode:
+            client.preview("POST", "/nodes", body)
+            return True, after, with_impact(diff, merge_impacts(client.impacts))
         created = client.write("POST", "/nodes", body)["node"]
         return True, created, diff
 
@@ -267,6 +290,14 @@ def ensure_node(client, module, path, kind=None, inventory_name=None, meta=None,
     }
     changed = bool(patch or to_set or to_unset)
     diff = {"before": before, "after": after}
+    if changed and module.check_mode:
+        if patch:
+            client.preview("PATCH", "/nodes/%d" % node["id"], patch)
+        for key, value in to_set.items():
+            client.preview("PUT", "/nodes/%d/vars/%s" % (node["id"], key), {"value": value})
+        for key in to_unset:
+            client.preview("DELETE", "/nodes/%d/vars/%s" % (node["id"], key))
+        diff = with_impact(diff, merge_impacts(client.impacts))
     if not changed or module.check_mode:
         return changed, dict(node, **after), diff
     if patch:
@@ -291,8 +322,114 @@ def remove_node(client, module, path, recursive=False):
         module.fail_json(msg="ais: the root cannot be deleted")
     query = "?recursive=true" if recursive else ""
     if module.check_mode:
-        sep = "&" if query else "?"
-        _status, data = client.request("DELETE", "/nodes/%d%s%sdry_run=true" % (node["id"], query, sep), allow=())
+        data = client.preview("DELETE", "/nodes/%d%s" % (node["id"], query))
         return True, data.get("deleted", [path])
     data = client.write("DELETE", "/nodes/%d%s" % (node["id"], query))
     return True, data.get("deleted", [path])
+
+
+# ------------------------------------------------------------- impact helpers
+
+IMPACT_SHOWN = 5  # hosts spelled out in the --diff summary
+
+
+def merge_impacts(impacts):
+    """One impact from the previews of several writes (a node task that patches the node and
+    sets two keys previews three writes, each against the current inventory). Hosts are
+    merged by name. The counts are exact while no preview was truncated; otherwise each count
+    is the largest any one preview had (a lower bound) and ``truncated`` is true."""
+    impacts = [i for i in impacts if i]
+    if not impacts:
+        return None
+    if len(impacts) == 1:
+        return impacts[0]
+    limit = max(i.get("limit", 200) for i in impacts)
+    hosts = {}
+    for imp in impacts:
+        for h in imp.get("hosts", []):
+            cur = hosts.get(h["host"])
+            if cur is None:
+                hosts[h["host"]] = dict(h)
+                continue
+            for k in ("added", "removed", "changed"):
+                if k in h:
+                    cur[k] = dict(cur.get(k) or {}, **h[k])
+            for k in ("joined", "left"):
+                if k in h:
+                    cur[k] = sorted(set(cur.get(k) or []) | set(h[k]))
+            for k in ("moved_from", "status"):
+                if k in h and k not in cur:
+                    cur[k] = h[k]
+    listed = sorted(hosts.values(), key=lambda h: (h.get("path") or "", h["host"]))
+    groups = {}
+    for imp in impacts:
+        for g in imp.get("groups", []):
+            row = groups.setdefault(g["group"], {"group": g["group"], "joined": 0, "left": 0})
+            row["joined"] = max(row["joined"], g["joined"])
+            row["left"] = max(row["left"], g["left"])
+    truncated = any(i.get("truncated") for i in impacts)
+    if truncated:
+        counts = dict((k, max(i.get(k, 0) for i in impacts)) for k in ("total", "vars_changed", "added", "removed", "regrouped", "moved"))
+    else:
+
+        def has(h, *keys):
+            return any(h.get(k) for k in keys)
+
+        counts = {
+            "total": len(listed),
+            "vars_changed": sum(1 for h in listed if has(h, "added", "removed", "changed") and h["status"] == "changed"),
+            "added": sum(1 for h in listed if h["status"] == "added"),
+            "removed": sum(1 for h in listed if h["status"] == "removed"),
+            "regrouped": sum(1 for h in listed if has(h, "joined", "left")),
+            "moved": sum(1 for h in listed if h.get("moved_from")),
+        }
+    out = dict(counts)
+    out.update(
+        hosts=listed[:limit],
+        groups=sorted(groups.values(), key=lambda g: g["group"])[:limit],
+        groups_total=len(groups),
+        limit=limit,
+        truncated=truncated or len(listed) > limit,
+    )
+    return out
+
+
+def _short(value, width=60):
+    text = json.dumps(value, sort_keys=True, default=str)
+    return text if len(text) <= width else text[: width - 3] + "..."
+
+
+def impact_text(impact, shown=IMPACT_SHOWN):
+    """The ``--diff`` summary of an impact: the counts, then the first few hosts."""
+    if not impact:
+        return ""
+    parts = ["%d host(s) affected" % impact["total"]]
+    for key, label in (("vars_changed", "vars changed"), ("added", "added"), ("removed", "removed"), ("regrouped", "change groups"), ("moved", "moved")):
+        if impact.get(key):
+            parts.append("%d %s" % (impact[key], label))
+    lines = ["impact: " + ", ".join(parts)]
+    for h in impact.get("hosts", [])[:shown]:
+        bits = []
+        for k, v in sorted((h.get("changed") or {}).items()):
+            bits.append("%s: %s -> %s" % (k, _short(v["from"], 30), _short(v["to"], 30)))
+        for k, v in sorted((h.get("added") or {}).items()):
+            bits.append("+%s: %s" % (k, _short(v, 30)))
+        for k in sorted(h.get("removed") or {}):
+            bits.append("-%s" % k)
+        groups = ["+" + g for g in h.get("joined") or []] + ["-" + g for g in h.get("left") or []]
+        if groups:
+            bits.append("groups " + " ".join(groups))
+        if h.get("moved_from"):
+            bits.append("from " + h["moved_from"])
+        lines.append("  %s: %s%s" % (h["host"], h["status"], (" (" + "; ".join(bits) + ")") if bits else ""))
+    if impact["total"] > shown:
+        lines.append("  ... and %d more host(s)" % (impact["total"] - shown))
+    return "\n".join(lines) + "\n"
+
+
+def with_impact(diff, impact):
+    """``diff`` (a before/after dict) plus the impact summary as ``prepared``."""
+    text = impact_text(impact)
+    if not text:
+        return diff
+    return dict(diff, prepared=text)

@@ -15,18 +15,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ais.api_write import _audit, _finish, check_export
+from ais.api_write import DRY_RUN, _audit, answer, begin, check_export, unchanged
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.importer import live_node_by_path, tag_doc, tag_name_error
-from ais.locking import IfMatch, begin_write, etag
+from ais.locking import IfMatch
 from ais.models import Node, Role, Tag, TagMember
-from ais.resolver import current_revision
 
 router = APIRouter(prefix="/api/v1", tags=["tags"])
 viewer = Depends(require(Role.viewer))
@@ -76,6 +75,7 @@ def put_tag(
     name: str,
     req: TagPut,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
@@ -88,14 +88,12 @@ def put_tag(
     wanted_members = sorted(set(req.members)) if req.members is not None else (before["members"] if before else [])
     wanted = {"name": name, "description": req.description, "members": wanted_members}
     if before == wanted:
-        rev_now = current_revision(session)
-        response.headers["ETag"] = etag(rev_now)
-        return {"revision": rev_now, "changed": False, "tag": before}
-    rev = begin_write(session, if_match, actor=principal.actor, message=req.message or f"tag {name}")
+        return unchanged(response, session, dry_run, {"tag": before})
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=req.message or f"tag {name}")
     out = converge_tag(session, name, req.description, wanted_members)
     check_export(session)  # a tag named like a hierarchy group is a 409 here
     _audit(session, principal, rev, "tag.set", "tag", name, before, out)
-    return _finish(response, rev, {"tag": out})
+    return answer(session, response, rev, preview, {"tag": out})
 
 
 def converge_tag(session: Session, name: str, description: str | None, members: list[str], restore_ids: list[int] | None = None) -> dict[str, Any]:
@@ -157,12 +155,13 @@ def remove_tag(session: Session, tag: Tag) -> dict[str, Any]:
 def delete_tag(
     name: str,
     response: Response,
+    dry_run: bool = Query(False, description=DRY_RUN),
     if_match: str | None = IfMatch(),
     principal: Principal = editor,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    rev = begin_write(session, if_match, actor=principal.actor, message=f"delete tag {name}")
+    rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=f"delete tag {name}")
     tag = _get_tag(session, name)
     before = remove_tag(session, tag)
     _audit(session, principal, rev, "tag.delete", "tag", name, before, None)
-    return _finish(response, rev, {"name": name})
+    return answer(session, response, rev, preview, {"name": name})

@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { api, errorText } from "../api";
+import { api } from "../api";
+import { ImpactSummary } from "../components";
 import type { DeleteResult, InvNode, MoveResult, WriteResult } from "../types";
 import { CHILD_KINDS } from "../types";
 
@@ -12,9 +13,12 @@ const NAME_RE = /^[A-Za-z0-9_-]{1,255}$/;
  * which turns a stale 409 into "reloaded, try again". `onDone(path)` gets the path to show
  * next (the new child, the moved node, or the deleted node's parent).
  *
- * Delete first asks the server for a dry run (a read: no revision, no `If-Match`) and shows
- * how many nodes and hosts would go; the confirmation sends `recursive=true` and
- * `expect_count` = that count, so the server refuses (409) if the subtree changed since. */
+ * Move and delete first ask the server for a dry run (nothing is written; `If-Match` = the
+ * page's revision, so a stale page refuses here already) and show what would change: the
+ * hosts (`impact`), and for a delete how many nodes and hosts would go. The confirmation sends
+ * `If-Match` = the preview's revision (and for a delete `recursive=true` and `expect_count` =
+ * the count shown), so the server refuses (409) if anything changed since. Editing the move's
+ * target drops its preview. */
 export function NodeActions(props: {
   node: InvNode;
   revision: number;
@@ -29,6 +33,7 @@ export function NodeActions(props: {
   const [problem, setProblem] = useState("");
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<DeleteResult | null>(null);
+  const [movePreview, setMovePreview] = useState<MoveResult | null>(null);
   const parentOf = (p: string) => p.slice(0, p.lastIndexOf("."));
   const isRoot = node.kind === "all";
   const isHost = node.kind === "host";
@@ -40,10 +45,14 @@ export function NodeActions(props: {
     setKind("");
     setParentPath(m === "move" ? parentOf(node.path) : "");
     setPreview(null);
+    setMovePreview(null);
     if (m === "delete") {
-      api<DeleteResult>(`/api/v1/nodes/${node.id}`, { method: "DELETE", query: { dry_run: true, recursive: true } })
+      api<DeleteResult>(`/api/v1/nodes/${node.id}`, { method: "DELETE", ifMatch: revision, query: { dry_run: true, recursive: true } })
         .then(setPreview)
-        .catch((err) => setProblem(`Could not count what the delete would take: ${errorText(err)}`));
+        .catch((err) => {
+          setMode(null);
+          props.onError(err);
+        });
     }
   };
 
@@ -61,23 +70,34 @@ export function NodeActions(props: {
         if (kind) body.kind = kind;
         const r = await api<WriteResult & { node: InvNode }>("/api/v1/nodes", { method: "POST", body, ifMatch: revision });
         props.onDone(r.node.path, `Created ${r.node.path} (${r.node.kind}): revision ${r.revision}.`);
-      } else if (mode === "move") {
+      } else if (mode === "move" && movePreview === null) {
+        setMovePreview(
+          await api<MoveResult>(`/api/v1/nodes/${node.id}/move`, {
+            method: "POST",
+            body: { parent_path: parentPath.trim(), name },
+            ifMatch: revision,
+            query: { dry_run: true },
+          }),
+        );
+        return; // stay open: the user confirms what the preview shows
+      } else if (mode === "move" && movePreview) {
         const r = await api<MoveResult>(`/api/v1/nodes/${node.id}/move`, {
           method: "POST",
           body: { parent_path: parentPath.trim(), name },
-          ifMatch: revision,
+          ifMatch: movePreview.revision,
         });
         props.onDone(r.node.path, `Moved ${node.path} to ${r.node.path} with ${r.moved.length} node(s): revision ${r.revision}.`);
       } else if (mode === "delete" && preview) {
         const r = await api<DeleteResult>(`/api/v1/nodes/${node.id}`, {
           method: "DELETE",
           query: { recursive: true, expect_count: preview.nodes },
-          ifMatch: revision,
+          ifMatch: preview.revision,
         });
         props.onDone(parentOf(node.path), `Deleted ${r.nodes} node(s) (${r.hosts} host(s)) under ${node.path}: revision ${r.revision}.`);
       }
       setMode(null);
     } catch (err) {
+      setMovePreview(null);
       props.onError(err);
     } finally {
       setBusy(false);
@@ -129,13 +149,33 @@ export function NodeActions(props: {
             <>
               <div className="editor-head">
                 <label>
-                  New parent <input value={parentPath} onChange={(e) => setParentPath(e.target.value)} required aria-label="New parent path" size={40} />
+                  New parent{" "}
+                  <input
+                    value={parentPath}
+                    onChange={(e) => {
+                      setParentPath(e.target.value);
+                      setMovePreview(null);
+                    }}
+                    required
+                    aria-label="New parent path"
+                    size={40}
+                  />
                 </label>
                 <label>
-                  New name <input value={name} onChange={(e) => setName(e.target.value.trim())} required aria-label="New name" />
+                  New name{" "}
+                  <input
+                    value={name}
+                    onChange={(e) => {
+                      setName(e.target.value.trim());
+                      setMovePreview(null);
+                    }}
+                    required
+                    aria-label="New name"
+                  />
                 </label>
               </div>
               <p className="muted hint">The whole subtree moves with its variables and tags. Node ids change; earlier revisions keep the old place.</p>
+              {movePreview?.impact && <ImpactSummary impact={movePreview.impact} />}
             </>
           )}
           {mode === "delete" && (
@@ -155,6 +195,7 @@ export function NodeActions(props: {
                   ? Earlier revisions keep them, and a restore (<code>POST /api/v1/nodes/restore</code>) brings them back.
                 </p>
               )}
+              {preview?.impact && <ImpactSummary impact={preview.impact} />}
             </>
           )}
           {problem && (
@@ -169,7 +210,9 @@ export function NodeActions(props: {
                 : mode === "child"
                   ? "Create"
                   : mode === "move"
-                    ? "Move"
+                    ? movePreview
+                      ? "Confirm move"
+                      : "Move"
                     : preview && preview.nodes > 1
                       ? `Delete ${preview.nodes} nodes`
                       : "Delete node"}
@@ -177,7 +220,7 @@ export function NodeActions(props: {
             <button type="button" className="secondary" onClick={() => setMode(null)}>
               Cancel
             </button>
-            <span className="muted">based on revision {revision}</span>
+            <span className="muted">based on revision {movePreview?.revision ?? preview?.revision ?? revision}</span>
           </div>
         </form>
       )}

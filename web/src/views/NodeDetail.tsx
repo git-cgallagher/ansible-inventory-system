@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { api, ApiError, errorText } from "../api";
-import { Notice, Provenance, Spinner, StrategyBadge, Value } from "../components";
+import { ImpactSummary, Notice, Provenance, Spinner, StrategyBadge, Value } from "../components";
 import { useApp } from "../context";
 import { href } from "../router";
 import type { InvNode, RenderResult, WriteResult } from "../types";
@@ -28,6 +28,7 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
   const [msg, setMsg] = useState<Msg>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [removal, setRemoval] = useState<WriteResult | null>(null); // the dry run of removing confirmDelete
 
   const load = useCallback(async () => {
     try {
@@ -72,11 +73,28 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
     load();
   };
 
-  const remove = async (key: string) => {
+  const varUrl = (key: string) => `/api/v1/nodes/${node.id}/vars/${encodeURIComponent(key)}`;
+
+  /** Remove, step 1: a dry run based on the page's revision says how many hosts it changes. */
+  const askRemove = async (key: string) => {
     if (!data) return;
-    setConfirmDelete(null);
+    setConfirmDelete(key);
+    setRemoval(null);
     try {
-      const r = await api<WriteResult>(`/api/v1/nodes/${node.id}/vars/${encodeURIComponent(key)}`, { method: "DELETE", ifMatch: data.revision });
+      setRemoval(await api<WriteResult>(varUrl(key), { method: "DELETE", ifMatch: data.revision, query: { dry_run: true } }));
+    } catch (e) {
+      setConfirmDelete(null);
+      onWriteError(e);
+    }
+  };
+
+  /** Remove, step 2: the write, based on the revision the preview showed. */
+  const remove = async (key: string) => {
+    if (!data || !removal) return;
+    setConfirmDelete(null);
+    setRemoval(null);
+    try {
+      const r = await api<WriteResult>(varUrl(key), { method: "DELETE", ifMatch: removal.revision });
       setMsg({ kind: "ok", text: `Removed ${key} from ${node.path}: revision ${r.revision}.` });
       load();
     } catch (e) {
@@ -174,7 +192,8 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
                     </td>
                   </tr>
                 ) : (
-                  <tr key={k} data-key={k}>
+                  <Fragment key={k}>
+                  <tr data-key={k}>
                     <th scope="row">
                       <code>{k}</code> <StrategyBadge name={k} />
                     </th>
@@ -192,11 +211,24 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
                             Edit
                           </button>
                           {confirmDelete === k ? (
-                            <button type="button" className="small danger" onClick={() => remove(k)} aria-label={`Confirm removing ${k}`}>
-                              Confirm remove
-                            </button>
+                            <>
+                              <button type="button" className="small danger" disabled={!removal} onClick={() => remove(k)} aria-label={`Confirm removing ${k}`}>
+                                Confirm remove
+                              </button>
+                              <button
+                                type="button"
+                                className="small secondary"
+                                onClick={() => {
+                                  setConfirmDelete(null);
+                                  setRemoval(null);
+                                }}
+                                aria-label={`Keep ${k}`}
+                              >
+                                Keep
+                              </button>
+                            </>
                           ) : (
-                            <button type="button" className="small secondary" onClick={() => setConfirmDelete(k)} aria-label={`Remove ${k}`}>
+                            <button type="button" className="small secondary" onClick={() => askRemove(k)} aria-label={`Remove ${k}`}>
                               Remove
                             </button>
                           )}
@@ -207,6 +239,21 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
                       )}
                     </td>
                   </tr>
+                  {confirmDelete === k && (
+                    <tr className="preview-row" aria-label={`Removing ${k}`}>
+                      <td colSpan={4}>
+                        {removal?.impact ? (
+                          <>
+                            <ImpactSummary impact={removal.impact} />
+                            <span className="muted">based on revision {removal.revision}</span>
+                          </>
+                        ) : (
+                          <span className="muted">Asking the server what removing {k} would change…</span>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
             </tbody>

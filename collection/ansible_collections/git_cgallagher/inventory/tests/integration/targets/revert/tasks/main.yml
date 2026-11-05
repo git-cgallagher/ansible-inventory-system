@@ -49,6 +49,7 @@
           - chk is changed
           - chk.reverted | length == 2
           - chk.operations | map(attribute='action') | list == ['variable.unset', 'node.delete']
+          - chk.impact is defined and chk.impact.total == chk.hosts | length
           - after_chk.exists
 
     - name: Revert the change

@@ -50,8 +50,8 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   /nodes/{id}` closes the whole subtree and its live variables, **but only when confirmed**:
   a node with live descendants needs `recursive=true` or `expect_count` = subtree size (node
   included; a wrong count refuses even with `recursive`), else 409 `subtree not empty` with
-  `message`/`nodes`/`hosts` (`api_write._delete_guard`). `dry_run=true` is a pure read (no
-  revision opened, no `If-Match`) and applies the same guard. Never add a delete path that skips it
+  `message`/`nodes`/`hosts` (`api_write._delete_guard`). `dry_run=true` deletes in its
+  transaction and rolls back, like every dry run (below), so it applies the same guard. Never add a delete path that skips it
   (the module sends `recursive` only when the task says so; the UI sends the previewed count). A pinned revision therefore
   sees exactly the tree of that moment. (`inventory_name`, `meta`, variable *definitions* and
   **tags** (`tag`, `tag_member`) are the documented exceptions: not temporal, changes apply to
@@ -65,6 +65,25 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   `POST /nodes` vars, the importer (CLI too) and `PUT /variables/{name}`, which validates the
   schema itself and re-checks every live value of the key. The schema checks each node's stored
   contribution, not the folded result. Invariant: every live value satisfies its definition.
+- **Every write route has `dry_run`, and every dry run answers `impact`** (`ais.impact`, issue
+  #25). A dry run is the real write with two differences only: how the revision is opened
+  (`api_write.begin(dry_run=True)` / `lock_preview`: the write lock, `If-Match` checked **only
+  when sent**, an `impact.Preview` taken *before* anything changes) and the tail
+  (`preview_answer`: measure, `session.rollback()`, answer the base revision). Everything in
+  between (schema, strict keys, `_delete_guard`, `check_export`, `review_keys`, even `_audit`)
+  runs unchanged: that is the validation parity, by construction; never give a dry run its own
+  code path through the checks. The body is the write's plus `dry_run: true` and `impact`; ids a
+  rolled-back create/move/restore allocated are null (`phantom`); a no-op `PUT` answers
+  `changed: false` with `impact.empty()`. Query parameter on the routes that had none
+  (`?dry_run=true`); body field on import, restore and revert (kept). A new write route gets
+  `dry_run` the same way and a case in `tests/test_impact.py`, whose oracle (export + `resolve`
+  of every host before and after the real write) must match the impact host by host. The
+  impact derives its scope from the database (rows with `created_rev`/`deleted_rev` = R, and
+  the non-temporal state noted before vs after: strategies, tag memberships, `inventory_name`),
+  never from route arguments, and resolves only the hosts and keys in scope from light rows
+  with `resolver._emitted` (the varsearch rule; never a second fold). Lists cap at
+  `impact.LIMIT` (200), counts never. A non-temporal table a write can change in place (like
+  those three) must be added to `impact._Fixed`, or its previews will miss hosts.
 - **Every write needs `If-Match: "<revision>"`** (`ais.locking.begin_write`: lock → compare
   with `current_revision` → new `Revision`). 428 without, 409 when stale. Never add a write
   route that skips it.
@@ -100,7 +119,7 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   leaves none, and a no-op (`PUT` of an unchanged var or definition) leaves none either. The one
   deliberate exception to "raise to refuse": a failed login *returns* its 401 so the row commits.
   `before`/`after` never contain a secret (token plaintext, password hash). New write routes call
-  `_audit` (or `audit.record`) or they are wrong. A request that **presents** a bearer token
+  `_audit` (or `audit.record`) or they are wrong. A dry run's rows are rolled back with it. A request that **presents** a bearer token
   that does not authenticate leaves one `token.rejected` row (reason, client, method, path),
   written in its own transaction by `auth.audit_bad_token` before the 401 is raised; its
   `target_id` is the token id, the `ais_xxxxxx` display prefix, or `(not an ais_ token)`, never
@@ -163,7 +182,10 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
 - **Modules are idempotent and locked.** Each module reads first and exits unchanged without
   touching the revision; a change sends `If-Match` from `expect_revision` or the current revision
   (`GET /revisions?limit=1`) and follows the revision each write returns. Check mode computes the
-  diff and writes nothing. Module writes carry `X-AIS-Source: module` and one `X-Request-ID` per
+  diff from what it read (that verdict is `changed`, exactly) and asks the server for a dry run of
+  each write it would make (`Client.preview`, `If-Match` only with `expect_revision`), so it
+  refuses what the write would; the result's `impact` (merged by host for a task with several
+  writes: `merge_impacts`) and `--diff`'s `prepared` summary (`with_impact`) come from there. Module writes carry `X-AIS-Source: module` and one `X-Request-ID` per
   task, which is what `revision.source` and `audit_log.source`/`request_id` record.
 - **The schema is owned by `ais/migrations`**, not `create_all`. A model change needs a new
   migration (`alembic -c server/alembic.ini revision --autogenerate -m …`, then review it);
@@ -176,7 +198,10 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   unknown paths stay 404 and no API route can be shadowed (`server/tests/test_web.py`).
   A missing build makes `/` a 404 and nothing else (the `test` job runs without one).
 - **UI writes carry `If-Match` = the revision the page shows** (from the render that loaded the
-  values), never a revision fetched just before the write, which would defeat the lock. A stale
+  values), never a revision fetched just before the write, which would defeat the lock. Value
+  saves and removals, moves, deletes and declaration saves/undeclares preview first: the dry
+  run carries the page's revision as `If-Match` (a stale page refuses there), the confirmation
+  carries the **preview's** `revision`, and any edit to the form drops the preview. A stale
   409 reloads the values and keeps the user's text; the UI sends `X-AIS-Source: ui`.
 - **Node detail reads through `POST /render {path, template: false}`**, also for hosts, so the
   page shows exactly what a mock host at that path would get. (Renders write nothing.) Own vars
@@ -292,7 +317,7 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - `server/ais/resolver.py` — `fold`, `load_snapshot(revision, subtree, paths=, keys=)` (revision-aware
   for nodes and vars; subtree and paths filter in SQL, the subtree through `path_ltree` on
   PostgreSQL), `load_chain(revision, host=|path=)` (just the ancestor chain, which is all
-  `resolve` needs), `build_export`, `resolve(host|path, overrides)`. `Snapshot` indexes children
+  `resolve` needs), `build_export`, `resolve(host|path, overrides)`. `Snapshot` (also built over light rows by `ais.impact`) indexes children
   and hosts on first use and caches each node's emitted vars (`_emitted`): shared, never mutate.
 - `docs/getting-started.md` — the user guide; `README.md` stays the short reference. A change to
   commands, settings, limits, roles or deployment updates both. `deploy/compose.prod.yml` —
@@ -327,8 +352,17 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - `server/ais/revert.py` — `revert(session, revisions, actor=, source=, force=, hosts=,
   change=)` → `RevertResult`, `RevertError(status, detail)`, `footprint`, `find_conflicts`,
   `revisions_of_change`. `api_revert.py` holds the two routes (dry run = apply + rollback, like
-  restore's); `cli._revert` the CLI twin. The dry run's `hosts` compares `resolved_vars` before
-  and after for the hosts under the reverted rows' paths (every host when a definition changes).
+  restore's); `cli._revert` the CLI twin. `hosts=True` (the dry run) takes an `impact.Preview`
+  before inverting; `RevertResult.impact`, and `hosts_changed`/`hosts` (= `impact.total` /
+  `impact.hosts`, kept for older clients).
+- `server/ais/impact.py` — the blast-radius preview: `Preview(session)` (after the lock, before
+  the write: base revision + `_Fixed`, the non-temporal state), `.impact(rev)` → the `impact`
+  dict; `empty()`, `summary()` (CLI line), `LIMIT`. Internals: `_scope` (what R touched),
+  `_rows` (light `_Row`s: every non-host node + the hosts in scope; shared by both sides unless
+  R opened or closed nodes), `_capture` (a `resolver.Snapshot` over light rows, per host the
+  deepest setter of each key and the groups), `_diff` (memoized per setter pair, exact counts,
+  `heapq.nsmallest` for the listed hosts). `api_write.begin`/`answer`/`preview_answer`/
+  `lock_preview`/`unchanged`/`phantom` are the route side. Tests: `tests/test_impact.py`.
 - `server/ais/importer.py` — YAML tree → nodes/vars under one revision; kind inferred
   from depth unless declared; rejects bad kind order and names, values their schema rejects.
   `import_tree_report` returns an `ImportResult` (counts, `tags_changed`, `changed`, `summary()`;
@@ -372,6 +406,17 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `AuthClient` (sends the bearer, `if_match=` kwarg), live `server` + real-plugin helpers.
 
 ## ⚠️ Gotchas
+- **A dry run must take its `impact.Preview` before the first change.** The non-temporal state
+  (strategies, tag memberships, `inventory_name`) is changed in place and cannot be read "as of
+  the base revision" afterwards; nodes and values can (temporal rows). A preview taken late
+  reports nothing for a strategy or tag change. Restore, import and revert open their own
+  revision inside the call, so their routes take the preview first and pass `result.revision.id`.
+- **A move re-creates every value row of its subtree**, so "keys whose rows R opened or closed"
+  includes every key the subtree sets. The impact needs that (a revert can move a subtree back
+  and change a value inside it in one revision; ignoring rows on moved nodes missed exactly that
+  in `test_change_set_revert_undoes_many_revisions_as_one`), and it is bounded by the subtree.
+- **`impact` compares values as canonical JSON** (`varsearch.canonical`): in Python `1 == True`,
+  so `==` would hide a change from `1` to `true`.
 - **Behind a host proxy, the container's peer is Docker's bridge gateway, not 127.0.0.1.** A
   failed login through `127.0.0.1:8000` was audited as `client: 172.19.0.1`, so
   `FORWARDED_ALLOW_IPS=127.0.0.1` would never trust the proxy's `X-Forwarded-For`, and the
@@ -494,9 +539,10 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `DROP`, rename); the `DROP` of `node` cascaded and emptied `node_variable` (found by
   `test_0004_fills_spike_nulls`). `PRAGMA foreign_keys` is a no-op inside a transaction, so
   `init_db` sets it on the connection before `begin()`. Any new batch migration relies on that.
-- **Revision ids are increasing, not contiguous on PostgreSQL.** A refused write, a no-op
-  `POST /import` and an import `dry_run` roll back a `Revision` insert, which still uses up a
-  sequence value. Never assume `next == current + 1` in a test (SQLite reuses the id, so a
+- **Revision ids are increasing, not contiguous on PostgreSQL.** A refused write and a no-op
+  `POST /import` roll back a `Revision` insert, which still uses up a sequence value. Dry runs
+  don't: `impact.Preview.revision` sets the id to `base + 1` explicitly (safe under the write
+  lock), so a preview never makes the next revision number jump. Never assume `next == current + 1` in a test (SQLite reuses the id, so a
   test that does passes locally and fails with `AIS_TEST_DATABASE_URL`).
 - **Definitions and tags are not temporal, so a tree export at an old revision carries today's
   declarations and today's tag names/descriptions**, with the memberships of the nodes live at
@@ -537,7 +583,11 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   ~375 kB bundle, no code splitting; tree children have no count, so every non-host node shows
   an expander until opened; no user management page (admins use `POST/PATCH /users` or the CLI);
   the node page does not list the tags a node belongs to (the Tags page does).
-- Scale (`docs/scale.md`): every write re-runs the exporter over the whole tree (3.3 s at 100k). Loading the
+- Scale (`docs/scale.md`): every write re-runs the exporter over the whole tree (3.3 s at 100k);
+  so does its dry run. `api_write.live_subtree` (move, delete) reads every live node as ORM
+  objects to pick the subtree (~2 s at 100k), where `resolver._under` would read only the
+  subtree. `PUT`/`DELETE /variables/{name}` and `DELETE …/vars/{key}` run no `check_export`
+  (nothing they change can collide). Loading the
   tree as ORM objects is 2.4 s. `GET /nodes` without `subtree` returns everything, and the UI's
   Render page host picker calls it.
 - Release: no container image is published (compose builds from the checkout).

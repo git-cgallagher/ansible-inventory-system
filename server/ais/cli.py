@@ -170,7 +170,7 @@ def _import(args: argparse.Namespace) -> int:
     leaves one ``import`` audit row otherwise."""
     import yaml
 
-    from ais import audit, keycheck
+    from ais import audit, impact, keycheck
     from ais.locking import lock_for_write
     from ais.resolver import current_revision
 
@@ -179,8 +179,10 @@ def _import(args: argparse.Namespace) -> int:
         tree = yaml.safe_load(fh)
     with session_scope() as s:
         lock_for_write(s)
+        preview = impact.Preview(s) if args.dry_run else None
         try:
-            result = import_tree_report(s, tree, actor="cli", message=args.message)
+            rev = preview.revision(actor="cli", source="import", message=args.message or "bulk import") if preview else None
+            result = import_tree_report(s, tree, actor="cli", message=args.message, rev=rev)
             build_export(load_snapshot(s))
             keys = keycheck.review(s, result.revision.id, strict=keycheck.strict_keys())
         except (ImportError_, ValueError) as exc:  # keycheck.UndeclaredKeys is a ValueError
@@ -193,9 +195,12 @@ def _import(args: argparse.Namespace) -> int:
             f"{len(result.definitions_changed)} definitions changed, {len(result.tags_changed)} tags changed"
         )
         if args.dry_run or not result.changed:
+            found = preview.impact(result.revision.id) if preview is not None and result.changed else None
             s.rollback()
             if args.dry_run:
                 print(f"dry run: would change {counts}" if result.changed else "dry run: nothing to change")
+                if found is not None:
+                    _print_impact(found)
             else:
                 print(f"nothing to change (revision {current_revision(s)})")
             return 0
@@ -219,7 +224,7 @@ def _restore(args: argparse.Namespace) -> int:
     """The CLI twin of ``POST /api/v1/nodes/restore``: takes the write lock, refuses what the
     API refuses (with its message), checks the export, and leaves one ``node.restore`` audit
     row whose ``restored`` map keeps the subtree's history (``ais.restore``)."""
-    from ais import audit, keycheck
+    from ais import audit, impact, keycheck
     from ais.api_write import live_vars, node_out
     from ais.locking import lock_for_write
     from ais.models import Node
@@ -228,8 +233,10 @@ def _restore(args: argparse.Namespace) -> int:
     init_db()
     with session_scope() as s:
         lock_for_write(s)
+        preview = impact.Preview(s) if args.dry_run else None
         try:
-            result = restore_subtree(s, args.path, args.revision, actor="cli", source="cli", message=args.message)
+            rev = preview.revision(actor="cli", source="cli", message=args.message or f"restore {args.path}") if preview else None
+            result = restore_subtree(s, args.path, args.revision, actor="cli", source="cli", message=args.message, rev=rev)
             build_export(load_snapshot(s))
         except (RestoreError, ImportError_, ValueError) as exc:
             s.rollback()
@@ -238,8 +245,10 @@ def _restore(args: argparse.Namespace) -> int:
         summary = result.summary()
         counts = f"{summary['nodes']} nodes ({summary['hosts']} hosts), {summary['variables_set']} variables, {len(summary['tags'])} tags"
         if args.dry_run:
+            found = preview.impact(result.revision.id)  # type: ignore[union-attr]
             s.rollback()
             print(f"dry run: would restore {result.path} as of revision {result.from_revision}: {counts}")
+            _print_impact(found)
             return 0
         rev = result.revision
         root = s.get(Node, result.restored[0]["id"])
@@ -294,13 +303,28 @@ def _revert(args: argparse.Namespace) -> int:
         label = f"change {args.of_change}" if args.of_change else f"revision {args.revision}"
         if args.dry_run:
             s.rollback()
-            print(f"dry run: reverting {label} would apply {len(result.operations)} operation(s); {len(result.hosts or [])} host(s) would change")
-            for h in (result.hosts or [])[:50]:
-                keys = sorted(set(h.get("added", {})) | set(h.get("removed", {})) | set(h.get("changed", {})))
-                print(f"  {h['host']}: {h['status']}" + (f" ({', '.join(keys)})" if keys else ""))
+            print(f"dry run: reverting {label} would apply {len(result.operations)} operation(s)")
+            _print_impact(result.impact)  # type: ignore[arg-type]
             return 0
         print(f"reverted {label} as revision {result.revision.id}: {len(result.operations)} operation(s)")
     return 0
+
+
+def _print_impact(found: dict, shown: int = 50) -> None:
+    """A dry run's ``impact`` (``ais.impact``): the counts, then the first hosts."""
+    from ais import impact
+
+    print(f"impact: {impact.summary(found)}")
+    for h in found["hosts"][:shown]:
+        keys = sorted(set(h.get("added", {})) | set(h.get("removed", {})) | set(h.get("changed", {})))
+        extra = [", ".join(keys)] if keys else []
+        if h.get("joined") or h.get("left"):
+            extra.append("groups " + " ".join([f"+{g}" for g in h.get("joined", [])] + [f"-{g}" for g in h.get("left", [])]))
+        if h.get("moved_from"):
+            extra.append(f"from {h['moved_from']}")
+        print(f"  {h['host']}: {h['status']} [{h['path']}]" + (f" ({'; '.join(extra)})" if extra else ""))
+    if found["total"] > shown:
+        print(f"  ... and {found['total'] - shown} more")
 
 
 def _print_warnings(review) -> None:

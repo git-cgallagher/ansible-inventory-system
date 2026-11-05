@@ -54,16 +54,13 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais import audit, schema
+from ais import audit, impact, schema
 from ais.audit import current_change
 from ais.importer import ImportError_, live_node_by_path
 from ais.models import PATH_SEP, AuditLog, Node, NodeKind, NodeVariable, Revision, Tag
-from ais.resolver import load_snapshot, resolved_vars
 from ais.restore import RestoreError, restore_subtree
-from ais.snapshots import diff_resolved
 
 SUMMARY_ACTION = "revert"
-HOSTS_LISTED = 200
 
 
 class RevertError(Exception):
@@ -568,51 +565,6 @@ def _invert(ctx: _Ctx, row: AuditLog) -> None:
         raise _blocked(ctx, row, f"cannot revert a {act} row", 422)
 
 
-# ------------------------------------------------------------------ hosts
-
-
-def _scope(rows: list[AuditLog], session: Session) -> tuple[list[str], bool]:
-    """Paths whose hosts a revert of ``rows`` can change, and whether every host can (a
-    definition changes the fold everywhere)."""
-    paths: list[str] = []
-    everything = False
-    for r in rows:
-        for t in footprint(session, r):
-            if t[0] in ("var", "node", "tree"):
-                paths.append(t[1])
-            elif t[0] == "definition":
-                everything = True
-    return paths, everything
-
-
-def _host_vars(session: Session, paths: list[str], everything: bool) -> dict[str, dict[str, Any]]:
-    snap = load_snapshot(session)
-    out: dict[str, dict[str, Any]] = {}
-    for n in snap.nodes.values():
-        if n.kind is not NodeKind.host:
-            continue
-        if not everything and not any(_within(n.path, p) for p in paths):
-            continue
-        r = dict(resolved_vars(snap, n))
-        r.pop("inventory_revision", None)
-        out[n.name] = json.loads(json.dumps(r, default=str))
-    return out
-
-
-def host_changes(before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for name in sorted(set(before) | set(after)):
-        if name not in after:
-            out.append({"host": name, "status": "removed"})
-        elif name not in before:
-            out.append({"host": name, "status": "added"})
-        else:
-            d = diff_resolved(before[name], after[name])
-            if not d["identical"]:
-                out.append({"host": name, "status": "changed", "added": d["added"], "removed": d["removed"], "changed": d["changed"]})
-    return out
-
-
 # -------------------------------------------------------------------- entry
 
 
@@ -623,7 +575,11 @@ class RevertResult:
     operations: list[dict[str, Any]]
     conflicts: list[dict[str, Any]]
     notes: list[str]
-    hosts: list[dict[str, Any]] | None = None
+    impact: dict[str, Any] | None = None  # the dry run's preview (``ais.impact``)
+
+    @property
+    def hosts(self) -> list[dict[str, Any]] | None:
+        return None if self.impact is None else self.impact["hosts"]
 
     def body(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -632,9 +588,12 @@ class RevertResult:
             "forced_over": self.conflicts,
             "notes": self.notes,
         }
-        if self.hosts is not None:
-            out["hosts_changed"] = len(self.hosts)
-            out["hosts"] = self.hosts[:HOSTS_LISTED]
+        if self.impact is not None:
+            # ``hosts_changed``/``hosts`` predate ``impact`` (kept for older clients): its
+            # ``total`` and its capped host list.
+            out["hosts_changed"] = self.impact["total"]
+            out["hosts"] = self.impact["hosts"]
+            out["impact"] = self.impact
         return out
 
 
@@ -655,8 +614,8 @@ def revert(
 ) -> RevertResult:
     """Revert ``revisions`` as one new revision (``change``: they are that change id's). The
     caller holds the write lock (or runs a dry run it rolls back), runs ``check_export`` and
-    commits. Raises ``RevertError``. ``hosts`` also lists the hosts whose resolved vars change
-    (the dry run's preview)."""
+    commits. Raises ``RevertError``. ``hosts`` also measures what the revert does to the hosts
+    (``ais.impact``, the dry run's preview); the caller then rolls back."""
     revisions = sorted(set(revisions))
     for rid in revisions:
         if session.get(Revision, rid) is None:
@@ -667,16 +626,17 @@ def revert(
     if conflicts and not force:
         raise _conflict_error(revisions, conflicts)
 
-    if hosts:
-        paths, everything = _scope(rows, session)
-        before_vars = _host_vars(session, paths, everything)
+    preview = impact.Preview(session) if hosts else None
     label = f"change {change} ({_label(revisions)})" if change is not None else _label(revisions)
     if message is None:
         first = session.get(Revision, revisions[0])
         message = f"revert {label}" + (f": {first.message}" if change is None and first is not None and first.message else "")
-    rev = Revision(actor=actor, source=source, message=message, change=current_change())
-    session.add(rev)
-    session.flush()
+    if preview is not None:
+        rev = preview.revision(actor=actor, source=source, message=message)
+    else:
+        rev = Revision(actor=actor, source=source, message=message, change=current_change())
+        session.add(rev)
+        session.flush()
     ctx = _Ctx(session=session, rev=rev, actor=actor, source=source)
     for row in rows:
         _invert(ctx, row)
@@ -688,8 +648,8 @@ def revert(
     if not ctx.operations:
         raise RevertError(409, {"error": "nothing to revert", "message": f"{label}: everything it changed is already as it was before"})
     result = RevertResult(revision=rev, reverted=revisions, operations=ctx.operations, conflicts=conflicts if force else [], notes=ctx.notes)
-    if hosts:
-        result.hosts = host_changes(before_vars, _host_vars(session, paths, everything))
+    if preview is not None:
+        result.impact = preview.impact(rev.id)
     audit.record(
         session,
         actor=actor,

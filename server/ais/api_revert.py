@@ -4,7 +4,7 @@
 A revert is a write like any other: ``If-Match`` (428/409), the write lock, one new
 revision, ``check_export``, audit rows in the same transaction; a ``dry_run`` needs no
 ``If-Match``, applies the revert in the transaction to report what it would do (the
-operations and the hosts whose resolved vars change) and rolls it back. A conflict (a later
+operations and its ``impact`` on the hosts, ``ais.impact``) and rolls it back. A conflict (a later
 revision touched the same things) is a 409 in both, unless ``force``.
 """
 
@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from ais import audit
-from ais.api_write import check_export, review_keys
+from ais.api_write import check_export, lock_preview, review_keys
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.locking import IfMatch, check_precondition, etag
@@ -33,7 +33,7 @@ class RevertRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     force: bool = Field(default=False, description="Revert even though later revisions changed the same things (refused with 409 otherwise)")
-    dry_run: bool = Field(default=False, description="Report the inverse operations and the hosts whose vars would change; write nothing (no If-Match needed)")
+    dry_run: bool = Field(default=False, description="Report the inverse operations and their impact on the hosts; write nothing (no If-Match needed; one that is sent must be current)")
     message: str | None = None
 
 
@@ -46,7 +46,9 @@ def _run(
     revisions: list[int],
     change: str | None = None,
 ) -> dict[str, Any]:
-    if not req.dry_run:
+    if req.dry_run:
+        lock_preview(session, if_match)
+    else:
         check_precondition(session, if_match)
     try:
         result = revert(

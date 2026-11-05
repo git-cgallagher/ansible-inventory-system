@@ -47,9 +47,40 @@ export interface RenderResult {
   errors?: Record<string, { type: string; message: string }>;
 }
 
+/** One host a write would affect (`impact.hosts`, server issue 25). */
+export interface ImpactHost {
+  host: string;
+  path: string;
+  status: "changed" | "added" | "removed";
+  added?: Record<string, unknown>;
+  removed?: Record<string, unknown>;
+  changed?: Record<string, { from: unknown; to: unknown }>;
+  joined?: string[];
+  left?: string[];
+  moved_from?: string;
+}
+
+/** What a dry run says a write would do to the hosts. Counts are exact; the lists are capped. */
+export interface Impact {
+  total: number;
+  vars_changed: number;
+  added: number;
+  removed: number;
+  regrouped: number;
+  moved: number;
+  hosts: ImpactHost[];
+  groups: { group: string; joined: number; left: number }[];
+  groups_total: number;
+  limit: number;
+  truncated: boolean;
+}
+
 export interface WriteResult {
   revision: number;
   changed: boolean;
+  /** True for a preview (`?dry_run=true`): nothing was written, `revision` is the one it is based on. */
+  dry_run?: boolean;
+  impact?: Impact;
   /** Undeclared keys the write stored that look like typos of known ones (server issue 24). */
   warnings?: KeyWarning[];
   warnings_total?: number;

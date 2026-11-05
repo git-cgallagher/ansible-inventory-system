@@ -30,6 +30,9 @@
         that:
           - chk is changed
           - chk.diff.after.path == 'all.commercial.lab.dc1.it_move'
+          - chk.impact.moved == 1 and chk.impact.hosts[0].host == 'it-move01'
+          - chk.impact.hosts[0].moved_from == 'all.commercial.prod.dc1.it_move.it-move01'
+          - "'it-move01: changed' in chk.diff.prepared"
           - after_chk.exists
 
     - name: Move

@@ -81,8 +81,15 @@ operations:
   returned: changed
   type: list
   elements: dict
+impact:
+  description:
+    - In check mode, what the revert would do to the hosts (the server's dry run), in the same shape every
+      write module returns in check mode; see M(git_cgallagher.inventory.variable). With C(--diff) a short summary is
+      shown.
+  returned: check mode
+  type: dict
 hosts:
-  description: In check mode, the hosts whose resolved variables would change, with C(status) and the keys.
+  description: In check mode, the hosts the revert would affect (the first C(impact.limit) of them; RV(impact) has the counts).
   returned: check mode
   type: list
   elements: dict
@@ -108,7 +115,7 @@ reverted_by:
 
 from ansible.module_utils.basic import AnsibleModule
 
-from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, write_argument_spec
+from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, with_impact, write_argument_spec
 
 
 def main():
@@ -140,6 +147,8 @@ def main():
             reverted=data.get("reverted", []),
             operations=data.get("operations", []),
             hosts=data.get("hosts", []),
+            impact=data.get("impact"),
+            diff=with_impact({"before": {}, "after": {"reverted": data.get("reverted", [])}}, data.get("impact")),
             revision=data["revision"],
             key_warnings=client.key_warnings,
         )

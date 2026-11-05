@@ -104,6 +104,19 @@ key_warnings:
   returned: always
   type: list
   elements: dict
+impact:
+  description:
+    - In check mode, what the change would do to the hosts, from the server's dry run (C(dry_run=true)), which also
+      runs every check the write would and refuses what the write would refuse.
+    - C(total) distinct hosts affected; C(vars_changed), C(added), C(removed), C(regrouped) and C(moved) count them by
+      kind; C(hosts) lists them sorted by path (at most C(limit), C(truncated) says when there were more) with
+      C(status) (C(changed), C(added) or C(removed)), the C(added), C(removed) and C(changed) keys (C(from)/C(to)),
+      the groups it C(joined) and C(left) and C(moved_from); C(groups) counts the hosts that join or leave each group.
+      With C(--diff) a short summary is shown.
+    - A task that makes several writes (node patch plus variables) previews each against the current inventory and
+      merges the answers by host; the counts are exact unless a preview was truncated, then they are lower bounds.
+  returned: check mode, when changed
+  type: dict
 revision:
   description: Inventory revision after the task (the last write's, or the current one when nothing changed).
   returned: always
@@ -112,7 +125,14 @@ revision:
 
 from ansible.module_utils.basic import AnsibleModule
 
-from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import Client, ensure_node, remove_node, write_argument_spec
+from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import (
+    Client,
+    ensure_node,
+    merge_impacts,
+    remove_node,
+    with_impact,
+    write_argument_spec,
+)
 
 
 def main():
@@ -132,14 +152,16 @@ def main():
     p = module.params
     if p["state"] == "absent":
         changed, deleted = remove_node(client, module, p["path"], recursive=p["recursive"])
-        module.exit_json(changed=changed, node={}, deleted=deleted, key_warnings=[],
+        impact = merge_impacts(client.impacts)
+        module.exit_json(changed=changed, node={}, deleted=deleted, key_warnings=[], **({"impact": impact} if impact else {}),
                          revision=client.revision if client.revision is not None else client.current_revision(),
-                         diff={"before": {"path": p["path"], "deleted": deleted} if changed else {}, "after": {}})
+                         diff=with_impact({"before": {"path": p["path"], "deleted": deleted} if changed else {}, "after": {}}, impact))
     changed, node, diff = ensure_node(
         client, module, p["path"], kind=p["kind"], inventory_name=p["inventory_name"], meta=p["meta"], variables=p["vars"], purge_vars=p["purge_vars"]
     )
     revision = client.revision if client.revision is not None else client.current_revision()
-    module.exit_json(changed=changed, node=node, diff=diff, revision=revision, key_warnings=client.key_warnings)
+    impact = merge_impacts(client.impacts)  # check mode only
+    module.exit_json(changed=changed, node=node, diff=diff, revision=revision, key_warnings=client.key_warnings, **({"impact": impact} if impact else {}))
 
 
 if __name__ == "__main__":

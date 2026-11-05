@@ -76,6 +76,7 @@
     - ansible.builtin.assert:
         that:
           - chk is changed and not none_yet.exists
+          - chk.impact.added == 1 and chk.impact.hosts[0].host == 'it-web09'
           - created is changed and created.host.kind == 'host' and created.host.vars.ansible_port == 2222
           - again is not changed
           - conv is changed and conv.host.vars.ansible_user == 'deploy' and conv.host.vars.ansible_host == '10.1.1.19'

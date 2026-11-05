@@ -3,6 +3,30 @@
 ## Unreleased
 
 ### Added
+- **Blast-radius preview: `dry_run` with `impact` on every write** (#25, blast-radius preview).
+  `?dry_run=true` on `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `POST /nodes/{id}/move`,
+  `PUT`/`DELETE /nodes/{id}/vars/{key}`, `PUT`/`DELETE /variables/{name}` and
+  `PUT`/`DELETE /tags/{name}`, next to the existing ones (`DELETE /nodes/{id}`, `POST /import`,
+  `POST /nodes/restore`, the revert routes). A dry run runs the write in its transaction with
+  every check the write runs (schema, strict mode, the delete guard, the export check), answers
+  the same body plus `impact`, and rolls back: no revision, no audit row. It needs no
+  `If-Match`; one that is sent must be current (409), and the real write sent with `If-Match` =
+  the preview's `revision` refuses if anything changed in between. `impact` has one shape for
+  every write: `total` distinct hosts affected; `vars_changed`, `added`, `removed`,
+  `regrouped`, `moved`; `hosts` sorted by path with the keys `added`/`removed`/`changed`
+  (`from`/`to`), the groups `joined`/`left` and `moved_from`; `groups` with how many hosts
+  join or leave each; lists capped at `limit` (200, `truncated`), counts exact. One helper
+  (`ais.impact`) serves every route and the CLI, and is bounded: it resolves only the hosts and
+  keys the write can change, from light rows (0.06 s at a datacenter, about 1 s at `all` with
+  every one of 100k hosts changing; `docs/scale.md`). The **UI** shows "This changes N hosts"
+  (with the list on demand) before saving or removing a value, a move, a delete and a
+  declaration change or undeclare, and saves with `If-Match` = the preview's revision; the
+  typo hint shows in the preview too. **Module check mode** is the server's dry run in the
+  `variable`, `variable_definition`, `node`, `host`, `node_move`, `import` and `revert` modules
+  (so check mode now refuses what the write would, and warns about likely typos); they return
+  `impact`, and `--diff` prints a summary (counts plus the first five hosts). `ais import`,
+  `ais restore` and `ais revert` print it with `--dry-run`.
+
 - **Typo warnings and strict mode** (#24, warn on undeclared keys that look like typos). A write
   that stores an undeclared key close to a known one still succeeds and answers `warnings`
   (`key`, `path`, `did_you_mean`, `declared`, `message`) and `warnings_total`: `PUT
@@ -102,6 +126,14 @@
   path that would be deleted.
 
 ### Changed
+- **Dry runs take the write lock and write in their transaction** (#25). `DELETE /nodes/{id}`'s
+  `dry_run` was a pure read; it now deletes and rolls back like the others, so it can report
+  `impact`. Dry runs of import, restore and revert lock too, so the preview and its `revision`
+  are consistent. Every write's answer has `dry_run` (`false` for a real write).
+- **The revert dry run no longer resolves every host** (#25): its `hosts`/`hosts_changed`
+  (kept, now `impact.hosts`/`impact.total`) come from `ais.impact` instead of resolving every
+  host under the reverted paths (the whole tree when a definition was involved). They now also
+  list hosts whose groups change, and the host list is sorted by path.
 - **`GET /api/v1/audit?key=` works without `node`** (it answered 422 "key needs node"): the
   key's `variable.set` / `variable.unset` rows on every node and its definition's rows, newest
   first. Migration `0007` adds `audit_log.key` (set on every new variable or definition row,

@@ -74,6 +74,10 @@
     - ansible.builtin.assert:
         that:
           - chk is changed and chk.diff.after.it_feature_flag.pct == 10
+          # issue 25: check mode is the server's dry run, with its impact on the hosts
+          - chk.impact.total >= 1 and 'lab-web01' in (chk.impact.hosts | map(attribute='host'))
+          - chk.impact.hosts[0].added.it_feature_flag.pct == 10
+          - "'host(s) affected' in chk.diff.prepared and 'lab-web01: changed' in chk.diff.prepared"
           - "'it_feature_flag' not in lab.node.vars"
           - set1 is changed and set1.value.enabled
           - set2 is not changed and set2.revision == set1.revision
@@ -82,11 +86,12 @@
           - nope is failed and 'does not exist' in nope.msg
           - novalue is failed
           - rm_chk is changed and rm is changed and rm2 is not changed
+          - rm_chk.impact.vars_changed == chk.impact.vars_changed
           - set1.key_warnings == [] and set3.key_warnings == []
 
     # Issue 24: an undeclared key one swap away from the declared "packages" (seed.yml) is
     # written, with an Ansible warning and the details in key_warnings.
-    - name: Near miss in check mode (nothing written, nothing to warn about)
+    - name: Near miss in check mode (nothing written; the dry run warns like the write)
       git_cgallagher.inventory.variable:
         path: all.commercial.lab
         key: pakcages
@@ -107,7 +112,7 @@
       register: typo_again
     - ansible.builtin.assert:
         that:
-          - typo_chk is changed and typo_chk.key_warnings == []
+          - typo_chk is changed and typo_chk.key_warnings | length == 1
           - typo is changed
           - typo.key_warnings | length == 1
           - typo.key_warnings[0].key == 'pakcages'

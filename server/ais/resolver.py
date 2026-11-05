@@ -88,7 +88,12 @@ class Snapshot:
     ``_emitted`` caches each node's emitted variables, shared between every caller. Nothing
     may mutate what those return; ``build_export`` only serializes the cached dicts and
     ``resolve`` deep-copies the result it hands out. Add a mutation and you corrupt every
-    other host of the same export."""
+    other host of the same export.
+
+    ``ais.impact`` builds one over light rows (any object with ``id``, ``parent_id``,
+    ``kind``, ``name``, ``path``, ``inventory_name`` and ``ancestors_paths()``) and only the
+    keys it needs, to call ``_emitted``; such a snapshot, like a ``keys=`` one, must never be
+    exported."""
 
     revision: int
     nodes: dict[int, Node]
