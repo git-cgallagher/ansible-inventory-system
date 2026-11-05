@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-05
+
+### Security
+- **The render no longer reaches the API server.** `POST /api/v1/render` (any role, viewer
+  included), the UI's Render page and the `render_info` module evaluated Ansible lookups on
+  the server: an override such as `{"x": "{{ lookup('pipe', 'id') }}"}` ran a shell command as
+  the API's user, and `expandvars` read its environment (`AIS_DATABASE_URL` included). The
+  render now runs no lookups (`lookup`, `query`, `q`), refuses the builtin filters and tests
+  that read the server's environment or files (`expandvars`, `expanduser`, `fileglob`,
+  `realpath`, `relpath`, `vault`, `unvault`; `file`, `exists`, `directory`, `link`, `mount`,
+  `same_file`, `vaulted_file` and their `is_` spellings) and every collection filter or test,
+  has no template loader (`{% include %}`), and no longer templates the request's `facts`.
+  A refused call is that key's render error; playbooks still evaluate the same values. Every
+  0.2.0 server should be upgraded; rotate the database password and `AIS_SECRET_KEY` of any
+  0.2.0 server that untrusted token holders could reach.
 
 ### Added
 - Depth and path limits: node depth ≤ 32 (`AIS_MAX_DEPTH`) and path ≤ 1,500 bytes, refused with

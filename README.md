@@ -7,7 +7,7 @@ An authoritative, database-backed Ansible inventory with a **strict tree hierarc
 per-variable merge strategies, revision history, and a render endpoint that shows what
 any real or hypothetical host resolves to.
 
-**Status: 0.2.0, first release (2026-11-01).** Phase 4 closed the write gaps (tags, `node_move`
+**Status: 0.3.0 (2026-11-05): a security fix to the render (see `CHANGELOG.md`), per-host history stored only on change, depth and path limits. 0.2.0 was the first release (2026-11-01).** Phase 4 closed the write gaps (tags, `node_move`
 and `import` modules, enforced JSON Schemas, bad-token audit, login limiter), gave the UI node,
 variable, tag and token management, proved 100k hosts (`docs/scale.md`) and added release
 automation for the collection (GitHub releases; it is not published to Ansible Galaxy). Before that, phase 3 added the web UI on top of phase 1 (bearer-token auth with
@@ -33,6 +33,9 @@ to work on it.
 - **Qualified group names** (`commercial_prod_dc1_web`) avoid collisions between
   `commercial/prod` and `federal/prod`; var-less **tag groups** (`tier_prod`,
   `datacenter_dc1`) exist for targeting only.
+- **The server's render is safe to expose to viewers**: it evaluates Jinja expressions and pure
+  filters, but runs no lookups and refuses filters and tests that would read the API server's
+  environment or files (they render as that key's error; a playbook still runs them).
 - **Revisions** are immutable; nodes and variables are temporal rows, so any revision
   can be exported or rendered exactly as it was. The plugin can pin one, and sets
   `inventory_revision` on `all` so every run records what it ran against.
@@ -203,14 +206,14 @@ tarball attached; install it from there:
 
 ```bash
 ansible-galaxy collection install \
-  https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.2.0/git_cgallagher-inventory-0.2.0.tar.gz
+  https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.3.0/git_cgallagher-inventory-0.3.0.tar.gz
 ```
 
 or pin it in a `requirements.yml`:
 
 ```yaml
 collections:
-  - name: https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.2.0/git_cgallagher-inventory-0.2.0.tar.gz
+  - name: https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.3.0/git_cgallagher-inventory-0.3.0.tar.gz
     type: url
 ```
 
