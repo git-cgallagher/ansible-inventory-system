@@ -67,6 +67,12 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   writes = editor, users = admin, **audit = editor** (viewers must not see who changed what, or
   the failed-login e-mails). `/healthz` is the only open route. There is deliberately no
   "auth off" switch.
+- **The render never reaches the server** (`ais.render._guard`). It runs for any viewer, on
+  values a viewer sends, so its Templar runs no lookups, refuses `SERVER_FILTERS`/`SERVER_TESTS`
+  and every collection filter or test, has an empty loader, and never trusts request `facts`.
+  `tests/test_render.py`'s `SERVER_REACHING` cases must stay refused, via an override and via a
+  stored value. A new builtin filter or test that touches files, the environment, the network
+  or other server state goes into those sets.
 - **Every effective write and every auth event leaves exactly one `audit_log` row, in the same
   transaction** (`ais.audit.record`, after `check_export`). A refused write (409/422/428) therefore
   leaves none, and a no-op (`PUT` of an unchanged var or definition) leaves none either. The one
@@ -261,6 +267,20 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   on a plain `str` returns it unchanged, silently. `ais.render._trust` wraps every string with
   `trust_as_template` first; catch `AnsibleTemplateError` (covers undefined, syntax,
   recursion). Learned 2026-11-01 (first render returned raw templates with no error).
+- **An inventory plugin's strings are not templates in ansible-core 2.19+ unless the plugin sets
+  `trusted_by_default = True`.** `ansible-inventory --host` (what the parity test compares)
+  never templates, so it could not catch this: until 0.3.0 every playbook saw stored Jinja as
+  literal text while the render evaluated it. `test_parity.py`'s
+  `test_playbooks_evaluate_stored_templates_like_the_render` runs `ansible` against the server
+  and compares with the render. Found 2026-11-05.
+- **Trusted templates run lookups wherever they are rendered.** Trusting every stored string
+  (above) made the server render a shell for any token: `lookup('pipe', …)` ran on the API host
+  until 0.3.0 (found 2026-11-05, while writing the getting-started guide). `disable_lookups` is a
+  deprecated no-op in ansible-core 2.21 (warns, never forwarded), so `_guard` replaces the
+  `lookup`/`query`/`q` globals and wraps the environment's `filters`/`tests` mappings instead.
+  Each Templar gets its own environment, so this touches no other templating. A test value
+  must not be named `lookup`, `query` or `q`: the variable shadows the global and the test
+  passes for the wrong reason (a recursion error).
 - **Alembic batch mode (SQLite) needs named constraints**: `add_column` with an unnamed
   `ForeignKey` inside `batch_alter_table` fails "Constraint must have a name"; the reflected
   spike FKs are unnamed too, hence the `naming_convention` passed to each batch.
@@ -358,6 +378,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   tree as ORM objects is 2.4 s. `GET /nodes` without `subtree` returns everything, and the UI's
   Render page host picker calls it.
 - Release: no container image is published (compose builds from the checkout).
+- Render cost is not bounded: a template like `{{ 'a' * 10**9 }}` (Jinja's sandbox caps
+  `range`, not string repetition) allocates that much in the API process. Any viewer can send
+  one. Needs a per-render time/memory limit (a subprocess) or a size check on results.
 - The deploy image runs Python 3.14 and builds the UI on Node 26 (Dependabot PRs 15 and 6,
   2026-11-02; CI's `web` job and local builds still use Node 22). Never Python 3.15 while on
   ansible-core 2.21: it does not import there, and `.github/dependabot.yml` ignores python >= 3.15

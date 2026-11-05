@@ -14,6 +14,9 @@ description:
     them natively (ancestors first by depth). Variables declared merge/append are
     pre-folded by the server so plain replace yields the right value.
   - Sets C(inventory_revision) on C(all) so every run records what it ran against.
+  - Values are trusted templates, like a YAML inventory's. Jinja in a stored value, lookups
+    included, is evaluated by the playbook on the controller, so write access to the
+    inventory (the editor role) can run code on every controller that uses it.
   - "Honours the export's C(ETag): the last export is kept in O(etag_store) and re-sent
     as C(If-None-Match), so an unchanged inventory costs one cheap 304 instead of a
     full download (independent of, and complementary to, Ansible's inventory cache)."
@@ -137,6 +140,10 @@ def fetch_export(url, headers, timeout=30, validate_certs=True, store_path=None)
 
 class InventoryModule(BaseInventoryPlugin, Cacheable):
     NAME = "git_cgallagher.inventory.db"
+    # ansible-core 2.19+ templates an inventory plugin's strings only when it says its
+    # source is trusted. Ours is: only editors write it, as with a YAML inventory in git.
+    # (2.18 has no trust model and ignores this.)
+    trusted_by_default = True
 
     def verify_file(self, path):
         return super().verify_file(path) and path.endswith(("ais.yml", "ais.yaml", "inventory.yml", "inventory.yaml"))

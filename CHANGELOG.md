@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-05
+
+### Security
+- **The render no longer reaches the API server.** `POST /api/v1/render` (any role, viewer
+  included), the UI's Render page and the `render_info` module evaluated Ansible lookups on
+  the server: an override such as `{"x": "{{ lookup('pipe', 'id') }}"}` ran a shell command as
+  the API's user, and `expandvars` read its environment (`AIS_DATABASE_URL` included). The
+  render now runs no lookups (`lookup`, `query`, `q`), refuses the builtin filters and tests
+  that read the server's environment or files (`expandvars`, `expanduser`, `fileglob`,
+  `realpath`, `relpath`, `vault`, `unvault`; `file`, `exists`, `directory`, `link`, `mount`,
+  `same_file`, `vaulted_file` and their `is_` spellings) and every collection filter or test,
+  has no template loader (`{% include %}`), and no longer templates the request's `facts`.
+  A refused call is that key's render error; playbooks still evaluate the same values. Every
+  0.2.0 server should be upgraded; rotate the database password and `AIS_SECRET_KEY` of any
+  0.2.0 server that untrusted token holders could reach.
 
 ### Added
 - Depth and path limits: node depth ≤ 32 (`AIS_MAX_DEPTH`) and path ≤ 1,500 bytes, refused with
@@ -26,6 +40,14 @@
   (Dependabot PRs 15, 6 and 7, verified by the `image` boot check on main).
 
 ### Fixed
+- **Playbooks now evaluate Jinja stored in the inventory.** ansible-core 2.19+ templates an
+  inventory plugin's strings only when the plugin declares its source trusted; the `db` plugin
+  did not, so a playbook saw a stored `{{ ansible_host }}:{{ http_port }}` as that literal
+  text while the server's render showed it evaluated. The plugin now sets
+  `trusted_by_default`, so a playbook and the render agree (a new test runs `ansible` against
+  the server and compares). Stored values are therefore trusted templates on the controller,
+  exactly like a YAML inventory: the editor role can run code on every controller that uses
+  the inventory.
 - The importer no longer recurses, so very deep trees fail on the depth limit instead of
   Python's recursion limit (near depth 1,000).
 
