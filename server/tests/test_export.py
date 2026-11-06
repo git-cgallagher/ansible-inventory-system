@@ -61,3 +61,9 @@ def test_bad_kind_order_rejected(session):
 
     with pytest.raises(ImportError_):
         import_tree(session, {"all": {"children": {"x": {"kind": "tier", "children": {"y": {"kind": "business"}}}}}})
+
+
+def test_export_unknown_subtree_detail_is_plain_text(viewer, seeded):
+    # The same KeyError quoting as the render (issue #49).
+    r = viewer.get("/api/v1/export", params={"subtree": "all.nope"})
+    assert r.status_code == 404 and r.json()["detail"] == "subtree 'all.nope' does not exist"

@@ -54,6 +54,13 @@ GROUP_SEP = "_"
 _UNSAFE = re.compile(r"[^A-Za-z0-9_]")
 
 
+def key_error_message(exc: KeyError) -> str:
+    """The message of a "not found" ``KeyError`` (``unknown path 'all.x'``), for an HTTP
+    detail or a CLI error. Never ``str(exc)``: a ``KeyError`` quotes its argument, so the
+    detail came out as ``"\"unknown path 'all.x'\""`` (issue #49)."""
+    return str(exc.args[0]) if exc.args else str(exc)
+
+
 # --------------------------------------------------------------------------- fold
 
 

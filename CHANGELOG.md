@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+- A 404 for something that does not exist no longer quotes its message twice (issue #49,
+  doubly quoted error detail): `POST /api/v1/render` for an unknown path or host and
+  `GET /api/v1/export` for an unknown subtree answered `{"detail": "\"unknown path
+  'all.x'\""}`, because `str()` of a `KeyError` quotes its argument. They now answer
+  `{"detail": "unknown path 'all.x'"}`, like `/tree` and `/vars` already did; every such
+  handler, API and CLI, goes through one helper (`ais.resolver.key_error_message`).
+
 ## 0.4.0 — 2026-11-05
 
 Fixes for the ten findings of an SRE usability review of 0.3.0 (issues #19–#28).
