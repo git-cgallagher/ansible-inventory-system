@@ -24,6 +24,26 @@ export function Value({ value, block = false }: { value: unknown; block?: boolea
   return <pre className="value">{formatValue(value, "yaml")}</pre>;
 }
 
+/** One source of a value: a node path, or a profile's value applied at a path
+ * (`profile:gpu-a100 @ all.…`, which links to the profile and to the node). */
+export function SourceLink({ path, profile }: { path: string; profile?: string }) {
+  if (!profile) return <a href={href("tree", { path })}>{path}</a>;
+  return (
+    <span className="prov-profile">
+      <a href={href("profiles", { name: profile })} title="A profile's value, applied at this node">
+        profile:{profile}
+      </a>{" "}
+      @ <a href={href("tree", { path })}>{path}</a>
+    </span>
+  );
+}
+
+/** A `sources` label from `GET /vars/hosts`: a path, or `profile:<name> @ <path>`. */
+export function SourceLabel({ label }: { label: string }) {
+  const m = /^profile:([^ ]+) @ (.+)$/.exec(label);
+  return m ? <SourceLink profile={m[1]} path={m[2]} /> : <SourceLink path={label} />;
+}
+
 /** Where a key's value comes from: the winning node for replace, every contributor for a fold. */
 export function Provenance({ entries }: { entries: Contribution[] }) {
   if (!entries.length) return null;
@@ -35,7 +55,9 @@ export function Provenance({ entries }: { entries: Contribution[] }) {
       {shown.map((c, i) => (
         <span key={`${c.path}-${i}`}>
           {i > 0 && <span className="muted"> + </span>}
-          {c.path ? (
+          {c.path && c.profile ? (
+            <SourceLink path={c.path} profile={c.profile} />
+          ) : c.path ? (
             <a href={href("tree", { path: c.path })} title={`group ${c.group}`}>
               {c.path}
             </a>

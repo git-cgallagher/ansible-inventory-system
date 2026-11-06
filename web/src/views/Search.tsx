@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, errorText } from "../api";
-import { Notice, Spinner, StrategyBadge, Value } from "../components";
+import { Notice, SourceLabel, SourceLink, Spinner, StrategyBadge, Value } from "../components";
 import { useApp } from "../context";
 import { NodePicker, NON_HOST_KINDS } from "../NodePicker";
 import { href, navigate } from "../router";
@@ -180,9 +180,9 @@ export function SearchView({ params }: { params: URLSearchParams }) {
                 </thead>
                 <tbody>
                   {nodes.nodes.map((n) => (
-                    <tr key={n.path} data-path={n.path}>
+                    <tr key={`${n.path}#${n.profile ?? ""}`} data-path={n.path} data-profile={n.profile}>
                       <td>
-                        <a href={href("tree", { path: n.path })}>{n.path}</a>
+                        <SourceLink path={n.path} profile={n.profile} />
                         {n.above_subtree && <span className="muted"> (above the subtree)</span>}
                       </td>
                       <td>{n.kind}</td>
@@ -198,6 +198,18 @@ export function SearchView({ params }: { params: URLSearchParams }) {
                   ))}
                 </tbody>
               </table>
+            )}
+            {(nodes.profiles ?? []).length > 0 && (
+              <p className="muted" data-testid="key-profiles">
+                Held by profile{nodes.profiles!.length === 1 ? "" : "s"}{" "}
+                {nodes.profiles!.map((p, i) => (
+                  <span key={p.name}>
+                    {i > 0 && ", "}
+                    <a href={href("profiles", { name: p.name })}>{p.name}</a>
+                  </span>
+                ))}
+                : the value applies wherever the profile is attached (listed above with <code>profile:</code>).
+              </p>
             )}
             {nodes.nodes.length < nodes.total && (
               <button type="button" className="secondary" onClick={moreNodes}>
@@ -247,10 +259,10 @@ export function SearchView({ params }: { params: URLSearchParams }) {
                         <Json value={h.value} />
                       </td>
                       <td>
-                        {(h.sources ?? [h.from]).map((p, i) => (
+                        {(h.sources ?? [h.source ?? h.from]).map((p, i) => (
                           <span key={p}>
                             {i > 0 && <span className="muted"> + </span>}
-                            <a href={href("tree", { path: p })}>{p}</a>
+                            <SourceLabel label={p} />
                           </span>
                         ))}
                       </td>

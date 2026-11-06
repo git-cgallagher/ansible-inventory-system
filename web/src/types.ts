@@ -34,6 +34,9 @@ export interface Contribution {
   group: string;
   strategy: Strategy;
   value: unknown;
+  /** Set when the value is an attached profile's, applied at `path` (issue 22). */
+  profile?: string;
+  source?: string; // "profile:<name> @ <path>"
 }
 
 export interface RenderResult {
@@ -43,6 +46,8 @@ export interface RenderResult {
   chain: string[];
   resolved: Record<string, unknown>;
   provenance: Record<string, Contribution[]>;
+  /** The profiles attached along the chain, by node path, in application order. */
+  profiles?: Record<string, string[]>;
   rendered?: Record<string, unknown>;
   errors?: Record<string, { type: string; message: string }>;
 }
@@ -190,10 +195,13 @@ export interface SettingNode {
   value: unknown; // the node's own value
   effective?: unknown; // fold strategies: the cumulative value the node emits
   above_subtree?: boolean;
+  profile?: string; // the value is this attached profile's
+  source?: string;
 }
 
 export interface VarNodes extends VarSearchHead {
   nodes: SettingNode[];
+  profiles?: { name: string; value: unknown }[]; // every profile that holds the key
 }
 
 export interface HostValue {
@@ -201,7 +209,9 @@ export interface HostValue {
   path: string;
   value: unknown; // resolved
   from: string; // the deepest node that sets it
-  sources?: string[]; // fold strategies: every contributor, root first
+  profile?: string; // ... through this attached profile
+  source?: string;
+  sources?: string[]; // fold strategies: every contributor, root first ("profile:<name> @ <path>" for a profile's)
 }
 
 export interface VarHosts extends VarSearchHead {
@@ -217,6 +227,23 @@ export const SYNTHETIC_KEYS = new Set(["inventory_revision"]);
 
 export function canEdit(role: Role | undefined): boolean {
   return role === "editor" || role === "admin";
+}
+
+/** `GET /profiles` (issue 22). */
+export interface ProfileRow {
+  name: string;
+  description: string | null;
+  keys: string[];
+  attached: number;
+}
+
+/** `GET /profiles/{name}`. */
+export interface ProfileDoc {
+  name: string;
+  description: string | null;
+  vars: Record<string, unknown>;
+  revision: number;
+  attached: { path: string; kind: InvNode["kind"]; position: number }[];
 }
 
 export interface TagRow {
