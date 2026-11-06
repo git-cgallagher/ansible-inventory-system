@@ -367,6 +367,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   PostgreSQL), `load_chain(revision, host=|path=)` (just the ancestor chain, which is all
   `resolve` needs), `build_export`, `resolve(host|path, overrides)`. `Snapshot` (also built over light rows by `ais.impact`) indexes children
   and hosts on first use and caches each node's emitted vars (`_emitted`): shared, never mutate.
+  Not-found is a `KeyError("unknown path 'all.x'")`; turn one into an HTTP detail or CLI error
+  with `key_error_message(exc)`, never `str(exc)` (that quotes it twice, issue #49).
 - `docs/getting-started.md` — the user guide; `README.md` stays the short reference. A change to
   commands, settings, limits, roles or deployment updates both. `deploy/compose.prod.yml` —
   production overrides that guide's section 3 uses.
