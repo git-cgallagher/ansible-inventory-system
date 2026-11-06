@@ -326,3 +326,77 @@ def test_no_op_var_put_dry_run(editor, seeded):
     web = _id(editor, WEB)
     r = editor.put(f"/api/v1/nodes/{web}/vars/http_port", json={"value": 8080}, params={"dry_run": "true"})
     assert r.status_code == 200 and r.json()["changed"] is False and r.json()["dry_run"] is True and r.json()["impact"]["total"] == 0
+
+
+# ----------------------------------------------------------------- profiles
+
+FED_WEB = "all.federal.prod.dc2.web"
+
+
+def test_profile_value_reaches_every_host_under_every_attachment(editor, engine, seeded):
+    """Issue 22: the seed attaches web-baseline at dc1.web and dc2.web; one value write
+    changes exactly their hosts, and a merge-strategy key folds as a level."""
+    found = _check(editor, engine, "PUT", "/api/v1/profiles/web-baseline/vars/nginx_worker_processes", {"value": 8})
+    assert {h["host"] for h in found["hosts"]} == {"web01", "web02", "fed-web01", "fed-edge01"}
+    assert found["hosts"][0]["changed"] == {"nginx_worker_processes": {"from": 4, "to": 8}}
+    _check(editor, engine, "PUT", "/api/v1/profiles/web-baseline/vars/sysctl", {"value": {"vm.swappiness": 5}})
+    _check(editor, engine, "DELETE", "/api/v1/profiles/web-baseline/vars/sysctl")
+    # a key the hosts' own groups set: shadowed below the node's own value, nobody changes
+    found = _check(editor, engine, "PUT", "/api/v1/profiles/web-baseline/vars/http_port", {"value": 1})
+    assert found["total"] == 0
+
+
+def test_profile_create_converge_and_delete(editor, engine, seeded):
+    found = _check(editor, engine, "PUT", "/api/v1/profiles/db-role", {"description": "db", "vars": {"db_engine": "postgresql"}})
+    assert found == impact.empty()  # attached nowhere yet
+    _check(editor, engine, "PUT", "/api/v1/profiles/web-baseline", {"vars": {"nginx_worker_processes": 2, "brotli": True}})
+    found = _check(editor, engine, "DELETE", "/api/v1/profiles/web-baseline", query={"detach": "true"})
+    assert found["total"] == 4
+
+
+def test_profile_attach_detach_reorder(editor, engine, seeded):
+    editor.put("/api/v1/profiles/db-role", json={"vars": {"db_engine": "postgresql", "nginx_worker_processes": 1}}, if_match=current_rev(editor))
+    found = _check(editor, engine, "PUT", f"/api/v1/nodes/{_id(editor, DC1 + '.db')}/profiles/db-role", {})
+    assert {h["host"] for h in found["hosts"]} == {"db01"}
+    found = _check(editor, engine, "PUT", f"/api/v1/nodes/{_id(editor, WEB)}/profiles/db-role", {"position": 0})
+    assert found["hosts"][0]["added"] == {"db_engine": "postgresql"}  # below web-baseline: its 4 still wins
+    found = _check(editor, engine, "PUT", f"/api/v1/nodes/{_id(editor, WEB)}/profiles", {"profiles": ["web-baseline", "db-role"]})
+    assert found["hosts"][0]["changed"] == {"nginx_worker_processes": {"from": 4, "to": 1}}
+    _check(editor, engine, "DELETE", f"/api/v1/nodes/{_id(editor, WEB)}/profiles/web-baseline")
+    _check(editor, engine, "PUT", f"/api/v1/nodes/{_id(editor, 'all.federal')}/profiles/db-role", {})
+
+
+def test_structure_writes_carry_profiles(editor, engine, seeded):
+    found = _check(editor, engine, "POST", f"/api/v1/nodes/{_id(editor, WEB)}/move", {"parent_path": "all.commercial.lab.dc1", "name": "web2"})
+    assert found["moved"] == 2 and "nginx_worker_processes" not in found["hosts"][0]["changed"]  # the profile moved with it
+    found = _check(editor, engine, "DELETE", f"/api/v1/nodes/{_id(editor, FED_WEB)}", query={"recursive": "true"})
+    assert found["removed"] == 2
+    _check(editor, engine, "POST", "/api/v1/nodes/restore", {"path": FED_WEB}, in_body=True)
+
+
+def test_import_with_profiles_and_its_revert(editor, engine, seeded):
+    tree = {
+        "profiles": {"web-baseline": {"vars": {"nginx_worker_processes": 6}}, "lab-role": {"vars": {"log_level": "trace"}}},
+        "all": {"children": {"commercial": {"children": {"lab": {"profiles": ["lab-role"]}}}}},
+    }
+    found = _check(editor, engine, "POST", "/api/v1/import", {"tree": tree}, in_body=True)
+    # web hosts get 6; lab's own log_level beats its profile, so lab-web01 is unchanged
+    assert {h["host"] for h in found["hosts"]} == {"web01", "web02", "fed-web01", "fed-edge01"}
+    done = current_rev(editor)
+    _check(editor, engine, "POST", f"/api/v1/revisions/{done}/revert", {}, in_body=True)
+
+
+def test_profile_dry_run_refuses_what_the_write_refuses(editor, engine, seeded):
+    rev = current_rev(editor)
+    editor.put("/api/v1/variables/nginx_worker_processes", json={"json_schema": {"type": "integer"}}, if_match=rev)
+    rev = current_rev(editor)
+    for method, url, body, params in (
+        ("PUT", "/api/v1/profiles/web-baseline/vars/nginx_worker_processes", {"value": "four"}, {}),  # schema
+        ("DELETE", "/api/v1/profiles/web-baseline", None, {}),  # attached
+        ("PUT", f"/api/v1/nodes/{_id(editor, WEB + '.web01')}/profiles/web-baseline", {}, {}),  # a host
+        ("PUT", f"/api/v1/nodes/{_id(editor, WEB)}/profiles", {"profiles": ["nope"]}, {}),  # unknown
+    ):
+        dry = _call(editor, method, url, body, params={**params, "dry_run": "true"})
+        real = _call(editor, method, url, body, params=params, if_match=rev)
+        assert dry.status_code == real.status_code and dry.status_code in (404, 409, 422) and dry.json()["detail"] == real.json()["detail"], (dry.text, real.text)
+    assert current_rev(editor) == rev

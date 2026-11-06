@@ -113,10 +113,12 @@ def changed_keys(before: dict[str, Any] | None, after: dict[str, Any] | None) ->
 # -------------------------------------------------------------------- writes
 
 
-def set_profile(session: Session, rev: Revision, name: str, wanted: dict[str, Any] | None) -> dict[str, Any] | None:
+def set_profile(session: Session, rev: Revision, name: str, wanted: dict[str, Any] | None, *, check: bool = True) -> dict[str, Any] | None:
     """Converge profile ``name`` to ``wanted`` (``{description, vars}``; ``vars`` is the
     complete set) under ``rev``, or delete it when ``wanted`` is None (it must not be
-    attached anywhere: 409). Every new value must satisfy its definition's schema (422).
+    attached anywhere: 409). Every new value must satisfy its definition's schema (422;
+    ``check=False`` leaves that to the caller's ``schema.check_live``: a revert puts values
+    back before it puts definitions back).
     Returns the profile as it now is (``doc``). Shared by the routes, the importer and revert."""
     error = name_error(name)
     if error:
@@ -140,7 +142,7 @@ def set_profile(session: Session, rev: Revision, name: str, wanted: dict[str, An
     for key, value in values.items():
         if not isinstance(key, str) or not key or len(key) > 255:
             raise ProfileError(422, f"profile {name!r}: invalid key {key!r}")
-        if key not in current or canonical(current[key].value) != canonical(value):
+        if check and (key not in current or canonical(current[key].value) != canonical(value)):
             try:
                 schema.check_value(session, key, value, label(name))
             except schema.SchemaViolation as exc:

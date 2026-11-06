@@ -9,6 +9,15 @@ variables:
   dns_servers:
     merge_strategy: replace
 
+# Profiles: named bundles of variables attached to any number of nodes. Each applies at its
+# node as a level between the parent and the node's own values.
+profiles:
+  web-baseline:
+    description: Settings every web tier shares
+    vars:
+      nginx_worker_processes: 4
+      sysctl: {net.core.somaxconn: 4096}
+
 all:
   vars:
     ntp_server: time.example.com
@@ -32,6 +41,7 @@ all:
                 site_code: DC1
               children:
                 web:
+                  profiles: [web-baseline]
                   vars:
                     http_port: 8080
                     packages: [nginx]
@@ -68,6 +78,7 @@ all:
               vars: {site_code: DC2}
               children:
                 web:
+                  profiles: [web-baseline]
                   vars: {http_port: 443}
                   children:
                     edge:
