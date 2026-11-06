@@ -102,5 +102,21 @@ def test_subtree_and_revision(viewer, editor, seeded):
     assert viewer.get("/api/v1/nodes", params={"q": "web", "revision": 999}).status_code == 404
 
 
+def test_exact_name_first_however_many_partial_matches(viewer, editor, seeded):
+    # The host module's find_host (issue #43) asks for q=<name>&kind=host and keeps the row
+    # whose name equals it: that row must come back even when more hosts than the limit start
+    # with or contain the name and sort before it in path order (lab sorts before prod).
+    for name in ["web01a", "web01b", "web01c", "xweb01", "WEB01"]:
+        rev = current_rev(editor)
+        r = editor.post("/api/v1/nodes", json={"parent_path": "all.commercial.lab.dc1.web", "name": name, "kind": "host"}, if_match=rev)
+        assert r.status_code == 201, r.text
+    # tier 1 is equality ignoring case: WEB01 (lab) and web01 (prod), in path order
+    r = viewer.get("/api/v1/nodes", params={"q": "web01", "kind": "host", "limit": 2})
+    assert _paths(r) == ["all.commercial.lab.dc1.web.WEB01", "all.commercial.prod.dc1.web.web01"]
+    r = viewer.get("/api/v1/nodes", params={"q": "web01", "kind": "host"})
+    assert _names(r)[:2] == ["WEB01", "web01"]
+    assert [n["name"] for n in r.json() if n["name"] == "web01"] == ["web01"]
+
+
 def test_lookup_needs_a_token(anon, seeded):
     assert anon.get("/api/v1/nodes", params={"q": "web"}).status_code == 401

@@ -15,6 +15,8 @@ description:
   - Host names are unique across the whole inventory. If the host already exists under a different
     parent the module fails (move it on the server first); if it exists under O(parent_path) its
     variables are converged.
+  - Without O(parent_path) (or when the host is not there) the host is found by name through the server's bounded
+    node lookup (C(GET /api/v1/nodes?q=<name>&kind=host)), never by listing the whole tree.
 options:
   name:
     description: Host name (inventory_hostname).
@@ -98,6 +100,8 @@ revision:
   type: int
 """
 
+from urllib.parse import urlencode
+
 from ansible.module_utils.basic import AnsibleModule
 
 from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client import (
@@ -111,8 +115,14 @@ from ansible_collections.git_cgallagher.inventory.plugins.module_utils.client im
 
 
 def find_host(client, name):
-    """The live host node called name anywhere in the tree, or None."""
-    _status, nodes = client.get("/nodes", allow=())
+    """The live host node called name anywhere in the tree, or None.
+
+    Uses the server's bounded lookup (``GET /nodes?q=&kind=host``, at most 20 rows) instead
+    of listing every node. Its first tier is the name equal to ``q`` ignoring case, so the
+    exact name comes before any host whose name merely starts with or contains it; the exact,
+    case-sensitive match is picked here, as before (host names are unique, case-sensitively).
+    Only more than 20 hosts whose names differ from ``name`` in case alone could crowd it out."""
+    _status, nodes = client.get("/nodes?%s" % urlencode({"q": name, "kind": "host"}), allow=())
     for n in nodes or []:
         if n["kind"] == "host" and n["name"] == name:
             return client.node(n["id"])

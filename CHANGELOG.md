@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Fixed
+- **The `host` module no longer downloads every node to find a host by name** (issue #43,
+  part 5: scale follow-ups). A task whose host is not at its `parent_path` (a new host, or
+  `state: absent` without `parent_path`) called the unbounded `GET /api/v1/nodes` (20.6 MB,
+  2.8 s at 100k hosts). It now uses the bounded lookup `GET /api/v1/nodes?q=<name>&kind=host`
+  (7 ms for a hit at 100k hosts) and keeps the host whose name is equal, case-sensitively, as
+  before. The lookup's first tier is the name equal to `q`, so hosts whose names start with
+  or contain the name never crowd it out.
 - A 404 for something that does not exist no longer quotes its message twice (issue #49,
   doubly quoted error detail): `POST /api/v1/render` for an unknown path or host and
   `GET /api/v1/export` for an unknown subtree answered `{"detail": "\"unknown path
