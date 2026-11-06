@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-11-05
+
+Fixes for the ten findings of an SRE usability review of 0.3.0 (issues #19–#28).
+
+**Before you upgrade:**
+- **Breaking:** `DELETE /api/v1/nodes/{id}` on a node with descendants answers 409 unless the
+  call sends `recursive=true` or a matching `expect_count`; the `node` module needs
+  `recursive: true` for the same (see Changed).
+- Four migrations (`0006`–`0009`: change ids, audit keys, node lookup indexes, profiles). On
+  PostgreSQL `0008` creates the `pg_trgm` extension: on a managed PostgreSQL that allow-lists
+  extensions, allow it first.
+- A tag whose group name is already taken (another tag, or a hierarchy group) is now refused
+  with 422 at write time, empty or not (see Changed).
+- Consumers: set `any_unparsed_is_failed = True` under `[inventory]` in `ansible.cfg`, and keep
+  Ansible's inventory cache off in deploy pipelines (see Added).
+
 ### Added
 - **Profiles (role templates)** (#22, 80% of group variables were copies of the same role
   settings). A profile is a named bundle of variables (`gpu-a100: {gpu_driver: "560.35",
