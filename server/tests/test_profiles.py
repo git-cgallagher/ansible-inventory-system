@@ -240,6 +240,7 @@ def test_refusals(editor, seeded):
     assert editor.put("/api/v1/profiles/x", json={}, if_match=rev - 1).status_code == 409
     r = editor.put(f"/api/v1/nodes/{web01}/profiles/web-baseline", json={}, if_match=rev)
     assert r.status_code == 422 and "host" in r.json()["detail"]
+    assert editor.put(f"/api/v1/nodes/{web01}/profiles", json={"profiles": []}, if_match=rev).status_code == 422  # not a no-op
     assert editor.put(f"/api/v1/nodes/{web}/profiles", json={"profiles": ["web-baseline", "web-baseline"]}, if_match=rev).status_code == 422
     assert editor.put(f"/api/v1/nodes/{web}/profiles", json={"profiles": ["nope"]}, if_match=rev).status_code == 404
     assert editor.delete(f"/api/v1/nodes/{web}/profiles/nope", if_match=rev).status_code == 404

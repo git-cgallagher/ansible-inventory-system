@@ -36,7 +36,7 @@ from ais.api_write import DRY_RUN, _audit, answer, begin, get_live_node, review_
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.locking import IfMatch
-from ais.models import Node, Profile, ProfileAttachment, ProfileVariable, Revision, Role
+from ais.models import Node, NodeKind, Profile, ProfileAttachment, ProfileVariable, Revision, Role
 from ais.profiles import ProfileError
 from ais.resolver import current_revision
 
@@ -238,6 +238,8 @@ def _write_list(
     session: Session, response: Response, principal: Principal, if_match: str | None, dry_run: bool, node_id: int, wanted: list[str] | None, compute, message: str
 ) -> dict[str, Any]:
     node = get_live_node(session, node_id)
+    if node.kind is NodeKind.host:  # before the no-op check: a host's (empty) list is not a list to set
+        raise HTTPException(422, f"{node.path} is a host: profiles attach to groups (any non-host node); set host values on the host")
     current = profiles.node_list(session, node.id)
     target = wanted if wanted is not None else compute(current)
     if target == current:
