@@ -264,9 +264,11 @@ the level where it really varies:
 | group (`…dc2.web`, `…web.edge`) | the role's ports, packages, tuning |
 | host | its address (`ansible_host`), and anything truly one-off |
 
-**Names.** Node names are letters, digits, `_` and `-` (up to 255 characters). Keep them
-short: the group name joins the whole path. A host name must be unique across the tree,
-because Ansible addresses hosts by name.
+**Names.** Node and tag names follow one rule: letters, digits, `_` and `-` (up to 255
+characters). Ansible group names can't hold `-`, so it becomes `_` in the group: the node
+`all.commercial.cluster-a` is the group `commercial_cluster_a`, and the tag `cluster-a` is the
+group `cluster_a`. Keep names short: the group name joins the whole path. A host name must be
+unique across the tree, because Ansible addresses hosts by name.
 
 **Depth and length limits.** A node can be at most 32 levels deep (`all` is 0;
 `AIS_MAX_DEPTH` raises it) and its path at most 1,500 bytes. At 30-character names the path
@@ -423,8 +425,8 @@ would refuse and returns `impact` (the hosts the change reaches; `--diff` prints
         value: error
 ```
 
-The modules are `node`, `host`, `variable`, `variable_definition`, `node_move`, `import`,
-`revert`, `node_info` and `render_info`. Each takes a `change` id that every revision it writes
+The modules are `node`, `host`, `variable`, `variable_definition`, `tag`, `node_move`, `import`,
+`revert`, `node_info`, `render_info`, `variable_info` and `tag_info`. Each takes a `change` id that every revision it writes
 records ([Undo a change](#undo-a-change)). `ansible-doc git_cgallagher.inventory.<name>` documents each.
 Install the collection from the GitHub release (it is not on Ansible Galaxy):
 
@@ -458,13 +460,30 @@ list. Without `q`, `kind` or `limit`, `GET /api/v1/nodes` still returns every no
 ### Tags
 
 Tags are named sets of paths for `--limit` and `hosts:` patterns. A member that's a group
-brings in every host under it. They have an API and a UI page, but no module yet:
+brings in every host under it. Manage them with the `tag` module (or the UI's Tags page):
 
-```bash
-curl -s -H "$H" -H "If-Match: \"$REV\"" -H 'Content-Type: application/json' -X PUT \
-  http://127.0.0.1:8000/api/v1/tags/canary \
-  -d '{"description": "first to get changes", "members": ["all.commercial.lab", "all.commercial.prod.dc1.web.web01"]}'
+```yaml
+- git_cgallagher.inventory.tag:
+    name: canary
+    description: first to get changes
+    paths: [all.commercial.lab, all.commercial.prod.dc1.web.web01]
 ```
+
+By default `paths` are added and the other members stay; `exclusive: true` makes the members
+exactly `paths`, `remove_paths` takes members out, and `state: absent` deletes the tag. The
+module reads the current revision for `If-Match` itself and, if someone wrote in between,
+reads the tag again and retries once (only when the tag still differs, and never when you set
+`expect_revision`). `tag_info` reads one tag or lists them all.
+
+A tag name follows the node name rule (letters, digits, `_`, `-`), and its group turns `-`
+into `_`: the tag `gpu-canary` is the group `gpu_canary`. Two names that would make the same
+group are refused (422) when the tag is written or imported: `gpu-canary` next to
+`gpu_canary`, and a tag whose group is a hierarchy group's name (`commercial-prod` while
+`all.commercial.prod` exists). `all` and names whose group starts with `business_`, `tier_` or
+`datacenter_` are reserved for the automatic tag groups.
+
+The API underneath is `PUT /api/v1/tags/{name}` with the complete member set (declarative)
+and `DELETE /api/v1/tags/{name}`, both with `If-Match`.
 
 `ansible-playbook site.yml --limit canary` then runs on every lab host plus `web01`.
 

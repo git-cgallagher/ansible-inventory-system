@@ -7,7 +7,9 @@ import { href } from "../router";
 import type { Revisioned, TagRow, WriteResult } from "../types";
 import { canEdit } from "../types";
 
-const TAG_RE = /^[A-Za-z0-9_]{1,255}$/;
+// The node name rule; the group is the name with '-' turned into '_' (gpu-canary -> gpu_canary).
+const TAG_RE = /^[A-Za-z0-9_-]{1,255}$/;
+const groupOf = (name: string) => name.replace(/[^A-Za-z0-9_]/g, "_");
 type Msg = { kind: "ok" | "warn" | "error"; text: string } | null;
 
 /** Tags (`/tags`): extra var-less groups under `all` for targeting (`--limit canary`). A member
@@ -69,7 +71,7 @@ export function TagsView() {
         <span className="rev">revision {data.revision}</span>
       </div>
       <p className="muted">
-        Extra groups for targeting only: they never carry variables. The automatic <code>business_</code>, <code>tier_</code> and <code>datacenter_</code> groups are not listed here.
+        Extra groups for targeting only: they never carry variables. A <code>-</code> in a name becomes <code>_</code> in its group, as in node names. The automatic <code>business_</code>, <code>tier_</code> and <code>datacenter_</code> groups are not listed here.
       </p>
       {msg && (
         <Notice kind={msg.kind} onClose={() => setMsg(null)}>
@@ -103,6 +105,11 @@ export function TagsView() {
               <tr key={t.name} data-name={t.name}>
                 <th scope="row">
                   <code>{t.name}</code>
+                  {groupOf(t.name) !== t.name && (
+                    <div className="muted">
+                      group <code>{groupOf(t.name)}</code>
+                    </div>
+                  )}
                 </th>
                 <td>{t.description}</td>
                 <td>
@@ -150,7 +157,7 @@ function TagForm(props: { initial?: TagRow; revision: number; onDone: (text: str
   const save = async (e: FormEvent) => {
     e.preventDefault();
     if (!TAG_RE.test(name)) {
-      setProblem("Tag names are letters, digits and '_' only.");
+      setProblem("Tag names are letters, digits, '_' and '-' only.");
       return;
     }
     const paths = members

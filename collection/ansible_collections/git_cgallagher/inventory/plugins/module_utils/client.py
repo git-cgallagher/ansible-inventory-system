@@ -8,7 +8,8 @@
   otherwise the server's current revision read right before the first write; later writes in
   the same task follow the revision the previous write returned.
 * A 409 whose body is the server's ``stale revision`` document is reported as such (expected
-  vs current revision); any other 409 (name collision, duplicate host, a delete of a non-empty
+  vs current revision), unless the module uses ``write_or_stale`` (the ``tag`` module: re-read,
+  retry once if still needed, never with ``expect_revision``); any other 409 (name collision, duplicate host, a delete of a non-empty
   subtree without ``recursive``) carries the server's message (a structured detail's
   ``message``). 401/403 name the token; 422 and 404 carry the server's detail.
 * Sends ``X-AIS-Source: module`` and one ``X-Request-ID`` per task so audit rows can be tied
@@ -216,6 +217,33 @@ class Client(object):
         if body is not None and self.message and "message" not in body and method in ("POST", "PUT", "PATCH"):
             body = dict(body, message=self.message)
         _status, data = self.request(method, path, body=body, if_match=self.revision, allow=())
+        if isinstance(data, dict) and "revision" in data:
+            self.revision = data["revision"]
+        return self.collect(data)
+
+    def can_retry_stale(self):
+        """Whether a stale 409 may be retried: only when the module read the revision itself.
+        With ``expect_revision`` the task pinned it, and a stale write must refuse."""
+        return self.module.params.get("expect_revision") is None
+
+    def write_or_stale(self, method, path, body=None):
+        """``write``, except that a stale 409 (the inventory moved between the read and the
+        write) returns None instead of failing, when ``can_retry_stale``. The caller re-reads,
+        decides whether its change is still needed and calls ``write`` once more; any other
+        refusal fails the task as ``write`` does."""
+        if not self.can_retry_stale():
+            return self.write(method, path, body)
+        if self.revision is None:
+            self.revision = self.current_revision()
+        if body is not None and self.message and "message" not in body and method in ("POST", "PUT", "PATCH"):
+            body = dict(body, message=self.message)
+        url = self.base + API + path
+        status, data = self.request(method, path, body=body, if_match=self.revision, allow=(409,), keep_body=True)
+        if status == 409:
+            if isinstance(data, dict) and data.get("error") == "stale revision":
+                self.revision = None  # the retry reads the current revision again
+                return None
+            self.fail(409, data, url)
         if isinstance(data, dict) and "revision" in data:
             self.revision = data["revision"]
         return self.collect(data)

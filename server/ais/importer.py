@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from ais import schema
 from ais.audit import current_change
+from ais.resolver import qualified_name, sanitize
 
 from ais.models import (
     LEVEL_ORDER,
@@ -76,19 +77,47 @@ def check_kind(parent: Node, kind: NodeKind) -> None:
         raise ImportError_(f"{kind.value} {parent.path!r} child must be deeper than its parent kind {parent.kind.value}")
 
 
-# Tag names are valid Ansible group names as emitted (no sanitizing needed). The exporter's
-# automatic tag groups are ``<kind>_<name>`` (``tier_prod``); an explicit tag of that shape
-# would silently merge into one, so those prefixes (and ``all``) are reserved.
-TAG_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,255}$")
+# One name rule for nodes and tags: ``NAME_RE`` (letters, digits, ``_`` and ``-``). A tag is
+# emitted as a group named ``resolver.sanitize(name)``, exactly as a node's ``-`` becomes ``_``
+# in its group name (``gpu-canary`` -> ``gpu_canary``). The exporter's automatic tag groups are
+# ``<kind>_<name>`` (``tier_prod``); a tag whose group name has that shape would silently merge
+# into one, so those prefixes (and ``all``) are reserved, checked on the group name.
 RESERVED_TAG_PREFIXES = tuple(f"{k.value}_" for k in sorted(TAGGED_KINDS, key=lambda k: k.value))
 
 
 def tag_name_error(name: str) -> str | None:
     """Why ``name`` cannot be a tag, or None. Shared by ``PUT /tags`` and the importer."""
-    if not isinstance(name, str) or not TAG_NAME_RE.match(name):
-        return f"invalid tag name {name!r}: letters, digits and '_' only (max 255)"
-    if name.startswith(RESERVED_TAG_PREFIXES) or name == "all":
-        return f"tag name {name!r} is reserved (prefixes {', '.join(RESERVED_TAG_PREFIXES)} are automatic tag groups)"
+    if not isinstance(name, str) or not NAME_RE.match(name):
+        return f"invalid tag name {name!r}: letters, digits, '_' and '-' only (max 255)"
+    group = sanitize(name)
+    if group.startswith(RESERVED_TAG_PREFIXES) or group == "all":
+        shown = f"{name!r}" if group == name else f"{name!r} (group {group!r})"
+        return f"tag name {shown} is reserved (prefixes {', '.join(RESERVED_TAG_PREFIXES)} are automatic tag groups)"
+    return None
+
+
+def hierarchy_groups(session: Session) -> dict[str, str]:
+    """Group name -> path of every live non-host node (default separator)."""
+    rows = session.execute(select(Node.path, Node.kind, Node.inventory_name).where(Node.deleted_rev.is_(None), Node.kind != NodeKind.host))
+    return {qualified_name(path, kind, inventory_name): path for path, kind, inventory_name in rows}
+
+
+def tag_conflict_error(session: Session, name: str, groups: dict[str, str] | None = None) -> str | None:
+    """Why the group tag ``name`` would be emitted as is already taken, or None: by another
+    tag whose name maps to the same group (``gpu-canary`` and ``gpu_canary``), or by a live
+    hierarchy group (``group_name``, ``inventory_name`` included; ``groups`` from
+    ``hierarchy_groups`` when the caller checks several tags). Checked whether or not the tag
+    has members, so the tag table never holds two tags for one group. Uses the default group
+    separator, like ``check_export``; ``build_export`` refuses the same collisions as a
+    backstop (409) for writes that do not come through here (node writes). Shared by
+    ``converge_tag`` (``PUT /tags``, revert) and the importer."""
+    group = sanitize(name)
+    for other in session.scalars(select(Tag.name).where(Tag.name != name)):
+        if sanitize(other) == group:
+            return f"tag {name!r} would be emitted as group {group!r}, which tag {other!r} already is"
+    path = (hierarchy_groups(session) if groups is None else groups).get(group)
+    if path is not None:
+        return f"tag {name!r} would be emitted as group {group!r}, which is the hierarchy group of {path}"
     return None
 
 
@@ -329,8 +358,9 @@ def _import_tags(session: Session, spec: Any, before: dict[str, Any] | None = No
     if not isinstance(spec, dict):
         raise ImportError_("'tags' must be a mapping of tag name to {description, members}")
     changed: list[str] = []
+    groups = hierarchy_groups(session)  # after the tree: the groups this import created count
     for name, tag_spec in spec.items():
-        error = tag_name_error(name)
+        error = tag_name_error(name) or tag_conflict_error(session, name, groups)
         if error:
             raise ImportError_(error)
         tag_spec = tag_spec or {}

@@ -9,3 +9,5 @@ plugins/modules/import.py validate-modules:missing-gplv3-license # collection is
 plugins/modules/node_move.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
 plugins/modules/revert.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
 plugins/modules/variable_info.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/tag.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/tag_info.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)

@@ -1,0 +1,259 @@
+---
+# tag: create (check, real, repeat), add, exclusive replace, remove, a missing member path,
+# a hyphenated name and its collisions, a pinned stale revision, absent; members from seed.yml.
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  vars:
+    web: all.commercial.prod.dc1.web
+    web01: all.commercial.prod.dc1.web.web01
+    db01: all.commercial.prod.dc1.db.db01
+  block:
+    - name: Create in check mode
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        description: integration
+        paths: ["{{ web }}"]
+      check_mode: true
+      diff: true
+      register: chk
+    - name: Nothing was written
+      git_cgallagher.inventory.tag_info:
+        name: it_tag
+      register: after_chk
+    - ansible.builtin.assert:
+        that:
+          - chk is changed
+          - chk.added == [web]
+          - chk.group == 'it_tag'
+          - chk.diff.before == {}
+          - chk.diff.after.members == [web]
+          - chk.impact.total == 2  # web01 and web02 join the group
+          - chk.impact.regrouped == 2
+          - "'2 host(s) affected' in chk.diff.prepared"
+          - not after_chk.exists
+
+    - name: Create
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        description: integration
+        paths: ["{{ web }}"]
+        revision_message: integration tag
+      register: created
+    - name: Create again
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        description: integration
+        paths: ["{{ web }}"]
+      register: created2
+    - name: Check mode on a matching tag
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: ["{{ web }}"]
+      check_mode: true
+      register: chk2
+    - ansible.builtin.assert:
+        that:
+          - created is changed
+          - "created.tag == {'name': 'it_tag', 'description': 'integration', 'members': [web]}"
+          - created2 is not changed
+          - created2.revision == created.revision
+          - chk2 is not changed
+
+    - name: Add a member (the others stay, and so does the description)
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: ["{{ db01 }}"]
+      register: added
+    - name: Add it again
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: ["{{ db01 }}"]
+      register: added2
+    - ansible.builtin.assert:
+        that:
+          - added is changed
+          - added.added == [db01]
+          - added.removed == []
+          - added.tag.members == [db01, web]
+          - added.tag.description == 'integration'
+          - added2 is not changed
+
+    - name: Exclusive replace
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: ["{{ web01 }}"]
+        exclusive: true
+      diff: true
+      register: excl
+    - name: Exclusive replace again
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: ["{{ web01 }}"]
+        exclusive: true
+      register: excl2
+    - ansible.builtin.assert:
+        that:
+          - excl is changed
+          - excl.added == [web01]
+          - excl.removed == [db01, web]
+          - excl.diff.before.members == [db01, web]
+          - excl.diff.after.members == [web01]
+          - excl.tag.members == [web01]
+          - excl2 is not changed
+
+    - name: Remove in check mode
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        remove_paths: ["{{ web01 }}"]
+      check_mode: true
+      diff: true
+      register: rm_chk
+    - name: Still a member
+      git_cgallagher.inventory.tag_info:
+        name: it_tag
+      register: still
+    - name: Remove
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        remove_paths: ["{{ web01 }}"]
+      register: rm
+    - name: Remove again (not a member any more)
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        remove_paths: ["{{ web01 }}"]
+      register: rm2
+    - ansible.builtin.assert:
+        that:
+          - rm_chk is changed
+          - rm_chk.removed == [web01]
+          - rm_chk.impact.total == 1
+          - "'web01: changed (groups -it_tag)' in rm_chk.diff.prepared"
+          - still.tag.members == [web01]
+          - rm is changed
+          - rm.tag.members == []
+          - rm2 is not changed
+
+    - name: Failure - a member path that does not exist
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: [all.commercial.prod.dc1.nowhere]
+      register: missing
+      ignore_errors: true
+    - name: Failure - the same in check mode (the server's dry run refuses it too)
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: [all.commercial.prod.dc1.nowhere]
+      check_mode: true
+      register: missing_chk
+      ignore_errors: true
+    - name: Failure - an invalid name
+      git_cgallagher.inventory.tag:
+        name: it.tag
+      register: bad_name
+      ignore_errors: true
+    - name: Failure - remove_paths with exclusive
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: ["{{ web }}"]
+        exclusive: true
+        remove_paths: ["{{ web01 }}"]
+      register: bad_combo
+      ignore_errors: true
+    - name: Failure - a pinned revision that is out of date (no retry)
+      git_cgallagher.inventory.tag:
+        name: it_tag
+        paths: ["{{ web }}"]
+        expect_revision: 1
+      register: stale
+      ignore_errors: true
+    - name: Nothing changed
+      git_cgallagher.inventory.tag_info:
+        name: it_tag
+      register: unchanged
+    - ansible.builtin.assert:
+        that:
+          - missing is failed
+          - missing.status == 404
+          - "'does not exist' in missing.msg"
+          - missing_chk is failed
+          - missing_chk.status == 404
+          - bad_name is failed
+          - "'invalid tag name' in bad_name.msg"
+          - bad_combo is failed
+          - stale is failed
+          - stale.status == 409
+          - "'moved while this task ran' in stale.msg"
+          - unchanged.tag.members == []
+
+    - name: A hyphenated name, emitted as group it_tag_gpu
+      git_cgallagher.inventory.tag:
+        name: it-tag-gpu
+        paths: ["{{ web01 }}"]
+      register: hyphen
+    - name: Failure - another tag for the same group
+      git_cgallagher.inventory.tag:
+        name: it_tag_gpu
+        paths: ["{{ web01 }}"]
+      register: same_group
+      ignore_errors: true
+    - name: Failure - a tag whose group is a hierarchy group (commercial_prod)
+      git_cgallagher.inventory.tag:
+        name: commercial-prod
+      register: hier
+      ignore_errors: true
+    - name: Failure - the same in check mode
+      git_cgallagher.inventory.tag:
+        name: commercial-prod
+      check_mode: true
+      register: hier_chk
+      ignore_errors: true
+    - ansible.builtin.assert:
+        that:
+          - hyphen is changed
+          - hyphen.group == 'it_tag_gpu'
+          - hyphen.tag.name == 'it-tag-gpu'
+          - same_group is failed
+          - same_group.status == 422
+          - "'already is' in same_group.msg"
+          - hier is failed
+          - hier.status == 422
+          - "'hierarchy group of all.commercial.prod' in hier.msg"
+          - hier_chk is failed
+          - hier_chk.status == 422
+
+    - name: Delete in check mode
+      git_cgallagher.inventory.tag:
+        name: it-tag-gpu
+        state: absent
+      check_mode: true
+      register: del_chk
+    - name: Delete
+      git_cgallagher.inventory.tag:
+        name: it-tag-gpu
+        state: absent
+      register: deleted
+    - name: Delete again
+      git_cgallagher.inventory.tag:
+        name: it-tag-gpu
+        state: absent
+      register: deleted2
+    - name: Gone
+      git_cgallagher.inventory.tag_info:
+        name: it-tag-gpu
+      register: gone
+    - ansible.builtin.assert:
+        that:
+          - del_chk is changed
+          - del_chk.removed == [web01]
+          - deleted is changed
+          - deleted.tag == {}
+          - deleted2 is not changed
+          - not gone.exists
+  always:
+    - name: Cleanup
+      git_cgallagher.inventory.tag:
+        name: "{{ item }}"
+        state: absent
+      loop: [it_tag, it-tag-gpu, it_tag_gpu, commercial-prod]

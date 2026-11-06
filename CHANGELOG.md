@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Added
+- **`tag` and `tag_info` modules** (#28, no tag module). `git_cgallagher.inventory.tag`
+  manages a tag from a playbook: `name`, `description` (kept when omitted), `paths` (added to
+  the members by default; with `exclusive: true` the members become exactly `paths`),
+  `remove_paths`, `state: absent`, plus the shared `api`/`write` options (`change`,
+  `expect_revision`, `revision_message`). It reads first and changes nothing when the tag
+  matches; it handles `If-Match` itself and, on a stale 409, reads the tag again and retries
+  once, only when the tag still differs and `expect_revision` was not given. Check mode is the
+  server's dry run of `PUT`/`DELETE /tags/{name}`; `--diff` shows the members before and after
+  plus the impact summary. `tag_info` reads one tag or lists them. Both are in the
+  `inventory` action group. The `import` integration target uses them instead of `uri`.
+
 - **Node lookup for pickers** (#27, Render and Diff downloaded every node). `GET
   /api/v1/nodes?q=<text>&kind=host&limit=20` returns at most `limit` (1–100, default 20) live
   nodes whose name or path contains `q`, ignoring case, ranked exact name, name prefix, path
@@ -136,6 +147,21 @@
   path that would be deleted.
 
 ### Changed
+- **One name rule for tags and nodes** (#28, tag and node names differed). Tag names now
+  allow `-` like node names (`[A-Za-z0-9_-]`, up to 255), and the tag's group turns it into `_`
+  the way a node's group does (`gpu-canary` is the group `gpu_canary`), so a tag can be named
+  after the node it tracks. A tag whose group would already exist is refused with **422** when
+  it is written (`PUT /tags/{name}`, its dry run, a revert that recreates it) or imported:
+  another tag with the same group (`gpu-canary` next to `gpu_canary`) or a live hierarchy
+  group (`commercial-prod` or `commercial_prod` while `all.commercial.prod` exists,
+  `inventory_name` included), with or without members. Before, a tag named like a hierarchy
+  group was the export check's **409**, and only once it had members. The reserved names
+  (`all`, the `business_`/`tier_`/`datacenter_` prefixes) are checked on the group name, so
+  `tier-prod` is reserved too. The export refuses two tags with one group (409) as a backstop
+  for writes that skip the tag check, instead of merging them silently. Existing tags are
+  unaffected (no migration): none could hold a `-`. The UI's Tags page accepts the new names
+  and shows the group when it differs.
+
 - **Dry runs take the write lock and write in their transaction** (#25). `DELETE /nodes/{id}`'s
   `dry_run` was a pure read; it now deletes and rolls back like the others, so it can report
   `impact`. Dry runs of import, restore and revert lock too, so the preview and its `revision`

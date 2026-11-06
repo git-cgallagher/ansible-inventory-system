@@ -66,8 +66,11 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
   in the tree.
 - **Move/rename** (`POST /api/v1/nodes/{id}/move`) rewrites the subtree's paths as new
   temporal rows, so the previous revision still shows the old tree; node ids change.
-- **Tags** (`PUT /api/v1/tags/{name}` with member paths) are extra var-less groups under `all`
-  for targeting (`--limit canary`); a non-host member contributes every host under it.
+- **Tags** (`PUT /api/v1/tags/{name}` with member paths, or the `tag` module) are extra var-less
+  groups under `all` for targeting (`--limit canary`); a non-host member contributes every host
+  under it. Tag names follow the node name rule (letters, digits, `_`, `-`) and a `-` becomes `_`
+  in the group, as for nodes (`gpu-canary` is the group `gpu_canary`); a name whose group is
+  another tag's or a hierarchy group's is refused (422).
 - **Tree export** (`GET /api/v1/tree`, `ais export-tree`) writes the tree or one subtree, at
   any revision, in the format `ais import` and `POST /api/v1/import` read: nodes with their
   kinds and own values, the declarations they use, and tags. Importing it reproduces the
@@ -244,6 +247,11 @@ audited with `source=module`. All support check mode and `--diff`.
         path: all.commercial.prod.dc1
       register: dc1
 
+    - name: Patch the cache group first (paths are added; exclusive=true replaces them)
+      git_cgallagher.inventory.tag:
+        name: patch-wave-1        # the group is patch_wave_1
+        paths: [all.commercial.prod.dc1.cache]
+
     - name: Move it to another datacenter (ids change; history keeps the old place)
       git_cgallagher.inventory.node_move:
         path: all.commercial.prod.dc1.cache
@@ -286,7 +294,9 @@ Give the tasks of one change the same `change` id (once, in `module_defaults`) a
             change: SRE-1234-rollback
 ```
 
-Tags have an API (`PUT /api/v1/tags/{name}`) but no module yet.
+Tags have the `tag` module (`paths`, `exclusive`, `remove_paths`, `state`; it reads the revision
+for `If-Match` itself and retries once on a stale 409 when the tag still differs) and
+`tag_info`.
 
 ### Install the collection
 
