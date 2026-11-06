@@ -277,8 +277,8 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
 Public repo `git-cgallagher/ansible-inventory-system` (created 2026-11-01; full new-public-repo
 baseline from `~/Code/AGENTS.md`). CI `ci.yml`: job `test` (pytest incl. parity, Python 3.12 +
 3.14, plus an `ansible-inventory --graph` smoke), job `image` (docker build) and job `collection`
-(`ansible-test sanity` + the module integration targets against a live `ais serve` on SQLite,
-Python 3.12; the step mints an editor token into the gitignored `integration_config.yml`) and job
+(`ansible-test sanity`, `ansible-test units` (no server) and the module integration targets
+against a live `ais serve` on SQLite, Python 3.12; the step mints an editor token into the gitignored `integration_config.yml`) and job
 `web` (`npm ci`, `npm run build` = `tsc` + Vite, then the Playwright smoke against `e2e/serve.sh`;
 the report is uploaded on failure). The `image` job builds the UI too (Node stage in the
 Dockerfile). All are required by the "main protection" ruleset (id `26318946`; `collection` and
@@ -320,6 +320,7 @@ AIS_TEST_DATABASE_URL=postgresql+psycopg://ais:ais@127.0.0.1:55432/ais_test ../.
 # collection (run from the collection dir; the venv's ansible-test accepts --python 3.14):
 cd collection/ansible_collections/git_cgallagher/inventory
 ../../../../.venv/bin/ansible-test sanity --requirements --python 3.14
+../../../../.venv/bin/ansible-test units --requirements --python 3.14   # tests/unit: module logic against a fake server, no API
 cp tests/integration/integration_config.yml.template tests/integration/integration_config.yml  # url + an EDITOR token of a server holding seed.yml
 ../../../../.venv/bin/ansible-test integration --python 3.14            # all targets; or name one: ... integration node
 # web UI (Node 22; from web/): build into server/ais/static, which `ais serve` then serves at /
@@ -453,7 +454,13 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   server dry run), `revert` (`revision` or `revert_change`, `force`; dry run first: check mode
   stops there, 409 `already reverted` = not changed) (write, check + diff mode), `node_info`, `render_info`, `tag_info` (one tag or the list), `variable_info` (`/vars` + `/vars/hosts`, pages up to `limit`; its `value_counts` is the API's `values`, a name Jinja would resolve to the dict method). `tests/integration/targets/<module>` = check,
   real, repeat, failure cases with an `always:` cleanup, all against one shared server (unique
-  `it_*`/`it-*` names per target). `tests/sanity/ignore-2.*.txt` only waive the GPLv3-header
+  `it_*`/`it-*` names per target). `tests/unit/plugins/modules/test_<module>.py` = what a live
+  server can't provoke on demand: `test_tag.py` runs `tag.main()` against a fake server patched in
+  at `client.fetch_url` (the real `Client.request` still parses every answer) whose "concurrent
+  writer" moves the revision between the module's read and its write, for the stale-409 retry
+  (once, then fail; never on a non-stale 409 or with `expect_revision`). Args go in through
+  `ansible.module_utils.testing.patch_module_args` (ansible-core 2.19+), and `exit_json`/
+  `fail_json` are patched to raise. `tests/sanity/ignore-2.*.txt` only waive the GPLv3-header
   check (the collection is MIT).
 - `server/ais/api.py` (end) — `web_dir()` (`AIS_WEB_DIR` or `ais/static`), `GET /`, `GET /assets/…`;
   `/healthz` reports `oidc`. `ais/oidc.py` `ui_handoff()`: with `/login?ui=1` the callback answers
@@ -672,8 +679,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - **Running a module's `main()` outside Ansible (a one-off harness) needs a serialization
   profile** in ansible-core 2.19+: set `basic._ANSIBLE_ARGS` (the `ANSIBLE_MODULE_ARGS` JSON)
   *and* `basic._ANSIBLE_PROFILE = "legacy"`, or `AnsibleModule` raises "No serialization profile
-  was specified". That is how the `tag` module's stale retry was exercised (a patched
-  `Client.current_revision` returning the revision before; integration can't race it).
+  was specified". `ansible.module_utils.testing.patch_module_args` sets both; the unit tests
+  (`tests/unit/plugins/modules/test_tag.py`, the `tag` module's stale retry, which integration
+  can't race) use it.
 - **A module named `import` works** (ansible-test sanity and AnsiballZ both load it by path)
   even though it is a Python keyword; it cannot be imported with a plain `import` statement,
   which nothing needs.

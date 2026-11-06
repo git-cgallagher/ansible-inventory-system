@@ -412,12 +412,15 @@ server on the seed tree; CI runs it in the `web` job:
 cd web && npm ci && npm run build && npx playwright install chromium && npx playwright test
 ```
 
-The collection has `ansible-test sanity` and one integration target per module (check
-mode, real change, idempotent repeat, failure cases) that CI runs against a live server:
+The collection has `ansible-test sanity`, unit tests for what a live server can't provoke on
+demand (the `tag` module's retry after a stale 409, against a fake server; no API needed), and
+one integration target per module (check mode, real change, idempotent repeat, failure cases)
+that CI runs against a live server:
 
 ```bash
 cd collection/ansible_collections/git_cgallagher/inventory
 ../../../../.venv/bin/ansible-test sanity --requirements --python 3.14
+../../../../.venv/bin/ansible-test units --requirements --python 3.14
 cp tests/integration/integration_config.yml.template tests/integration/integration_config.yml   # url + editor token
 ../../../../.venv/bin/ansible-test integration --python 3.14
 ```
@@ -436,7 +439,7 @@ and how to rerun them (`bench/generate.py`, `bench/benchmark.py`).
 |---|---|
 | `server/ais/` | FastAPI app (`api*.py`), models, Alembic `migrations/`, resolver (fold/export/resolve), `tree.py` (tree export in the import format), `restore.py`, `revert.py` (revert engine), `render.py`, `snapshots.py`, `auth.py`/`oidc.py`/`locking.py`, importer, CLI |
 | `server/tests/` | fold property tests, export, tree export round trips, auth, writes/locking, render, snapshots, plugin ETag, Ansible parity |
-| `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`revert`/`node_info`/`render_info`, `module_utils/client.py`, integration targets |
+| `collection/ansible_collections/git_cgallagher/inventory/` | inventory plugin `db`, modules `node`/`host`/`variable`/`variable_definition`/`node_move`/`import`/`revert`/`node_info`/`render_info`, `module_utils/client.py`, unit tests (`tests/unit`), integration targets |
 | `web/` | React + TypeScript UI (Vite; builds into `server/ais/static`), Playwright smoke in `e2e/` |
 | `examples/` | `seed.yml` tree, `inventory.yml`, `ansible.cfg` |
 | `docs/getting-started.md` | the long walk: concepts, deployment, design, operations |
