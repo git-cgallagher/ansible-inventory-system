@@ -5,7 +5,7 @@ covers the ideas behind the tree, a first local run, a PostgreSQL deployment, ho
 estate, every way of writing to it, and how to run it day to day. The [README](../README.md)
 is the short reference; this is the long walk.
 
-Everything here was run against 0.3.0, and the parts 0.4.0 added against its code before release. Commands assume a checkout of this repository as the
+Everything here was run against 0.3.0, and the parts 0.4.0 and 0.4.1 added against their code before release. Commands assume a checkout of this repository as the
 current directory unless a step says otherwise.
 
 - [1. The ideas in five minutes](#1-the-ideas-in-five-minutes)
@@ -440,7 +440,7 @@ Install the collection from the GitHub release (it is not on Ansible Galaxy):
 
 ```bash
 ansible-galaxy collection install \
-  https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.4.0/git_cgallagher-inventory-0.4.0.tar.gz
+  https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.4.1/git_cgallagher-inventory-0.4.1.tar.gz
 ```
 
 ### The REST API
@@ -1188,14 +1188,14 @@ Read `CHANGELOG.md`, back up, check out the new tag, and rebuild. Schema migrati
 automatically when the API starts:
 
 ```bash
-git fetch --tags && git checkout v0.4.0
+git fetch --tags && git checkout v0.4.1
 docker compose -f deploy/compose.yml -f deploy/compose.prod.yml up --build -d
-curl -s https://inventory.example.com/healthz     # {"status":"ok","version":"0.4.0",…}
+curl -s https://inventory.example.com/healthz     # {"status":"ok","version":"0.4.1",…}
 ```
 
 Upgrade the collection on your controllers to the same version (section 5).
 
-The migrations create two PostgreSQL extensions: `ltree` (subtree queries) and, from the
+The migrations create two PostgreSQL extensions: `ltree` (subtree queries) and, since
 0.4.0, `pg_trgm` (the indexes behind the UI's node pickers). Both are trusted
 extensions, so the database owner the API connects as may create them. On a managed
 PostgreSQL that allow-lists extensions, allow both before upgrading.
@@ -1212,7 +1212,7 @@ PostgreSQL that allow-lists extensions, allow both before upgrading.
 
 ## 13. Limits and known gaps
 
-As of 0.4.0:
+As of 0.4.1:
 
 - **OIDC is untested** against a real provider. Use local accounts and tokens.
 - **Roles are global.** No per-subtree permissions.

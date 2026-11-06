@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.4.1 — 2026-11-06
+
+Small follow-ups to 0.4.0 (issues #43 in part, #47, #49, #50). No migrations, no API or
+configuration changes; upgrade in place.
+
 ### Changed
 - **Tests: the `tag` module's stale-409 retry is tested in CI** (issue #47). The collection
   gets `ansible-test units` (`tests/unit/plugins/modules/test_tag.py`), run by CI's
