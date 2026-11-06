@@ -9,6 +9,11 @@ so exports exercise the fold path. One revision, written with bulk inserts and e
 (the ORM importer would spend minutes on 100k hosts; this is a load generator, not an import
 test). The database must hold no nodes yet; the schema is created or upgraded first.
 
+``--profiles`` (issue 22) also creates two profiles: ``role-common`` attached to every
+``roleN`` group (1,200 attachments over every host) and ``pool-tuning`` attached to every
+``pool3`` group (a narrow one), with values of every strategy, some shadowed by the groups'
+own values.
+
     AIS_DATABASE_URL=postgresql+psycopg://ais:ais@127.0.0.1:55434/ais python bench/generate.py --hosts 100000
 """
 
@@ -23,7 +28,7 @@ import time
 from sqlalchemy import func, insert, select, text
 
 from ais.db import init_db, make_engine
-from ais.models import MergeStrategy, Node, NodeKind, NodeVariable, Revision, VariableDefinition
+from ais.models import MergeStrategy, Node, NodeKind, NodeVariable, Profile, ProfileAttachment, ProfileVariable, Revision, VariableDefinition
 
 BUSINESSES, TIERS, DATACENTERS = 4, 3, 5
 GROUPS = (4, 5, 7)  # nested group fan-out below each datacenter
@@ -106,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--hosts", type=int, default=100_000)
     p.add_argument("--database-url", default=os.environ.get("AIS_DATABASE_URL"))
+    p.add_argument("--profiles", action="store_true", help="also attach profiles widely (issue 22)")
     args = p.parse_args(argv)
     if not args.database_url:
         p.error("set AIS_DATABASE_URL or --database-url")
@@ -130,13 +136,27 @@ def main(argv: list[str] | None = None) -> int:
             conn.execute(insert(Node), [dict(n, created_rev=rev) for n in nodes[i : i + BATCH]])
         for i in range(0, len(variables), BATCH):
             conn.execute(insert(NodeVariable), [dict(v, created_rev=rev) for v in variables[i : i + BATCH]])
+        attached = 0
+        if args.profiles:
+            profiles = {
+                "role-common": {"kernel": "6.8.0", "sysctl": {"kernel.pid_max": 4194304}, "packages": ["role-agent"], "app_port": 9100, "monitoring": {"scrape": True}},
+                "pool-tuning": {"max_conns": 5000, "sysctl": {"net.ipv4.tcp_tw_reuse": 1}, "tuned": True},
+            }
+            for name, values in profiles.items():
+                conn.execute(insert(Profile).values(name=name, description=f"bench profile {name}", created_rev=rev))
+                conn.execute(insert(ProfileVariable), [{"profile": name, "key": k, "value": v, "created_rev": rev} for k, v in values.items()])
+            rows = [{"node_id": n["id"], "profile": "role-common", "position": 0, "created_rev": rev} for n in nodes if n["name"].startswith("role")]
+            rows += [{"node_id": n["id"], "profile": "pool-tuning", "position": 0, "created_rev": rev} for n in nodes if n["name"] == "pool3"]
+            for i in range(0, len(rows), BATCH):
+                conn.execute(insert(ProfileAttachment), rows[i : i + BATCH])
+            attached = len(rows)
         if conn.dialect.name == "postgresql":  # explicit ids: move the sequence past them
             conn.execute(text("SELECT setval(pg_get_serial_sequence('node', 'id'), (SELECT max(id) FROM node))"))
             conn.execute(text("ANALYZE"))
     hosts = sum(1 for n in nodes if n["kind"] == "host")
     print(
         f"revision {rev}: {len(nodes)} nodes ({hosts} hosts, {len(nodes) - hosts} non-host, depth {max(n['depth'] for n in nodes) + 1}), "
-        f"{len(variables)} variables in {time.perf_counter() - t0:.1f} s"
+        f"{len(variables)} variables, {attached} profile attachments in {time.perf_counter() - t0:.1f} s"
     )
     return 0
 

@@ -84,6 +84,39 @@ insert: 7.2 s, 208 MB peak.
 7.7 GiB). The API is the compose image (Python 3.12, one uvicorn worker), on PostgreSQL 16.15.
 The client and `ansible-inventory` run on the host (Python 3.14, ansible-core 2.21.5).
 
+### Profiles (2026-11-05, issue 22)
+
+The same tree generated with `--profiles`: `role-common` (5 values of every strategy, one
+shadowed by the groups' own `app_port`) attached to all 1,200 `roleN` groups, so it reaches
+every one of the 100,000 hosts, and `pool-tuning` attached to the 1,200 `pool3` groups (14,286
+hosts). 2,400 attachments. The compose image (Python 3.12, one worker) on PostgreSQL 16;
+medians of 3 from `bench/benchmark.py --profile role-common --narrow-profile pool-tuning
+--skip-ansible`.
+
+| Operation | Seconds | Notes |
+|---|---:|---|
+| full export, repeat | 3.47 | 19.4 MB (3.34 s without profiles, above) |
+| full export, first at this revision | 6.69 | ran while the first snapshot pass (15.3 s) was busy |
+| render host `h012345` (Jinja on) | 0.007 | two profiles on its chain |
+| render mock path (the node page's read) | 0.005 | |
+| tree export, whole tree (JSON / YAML) | 2.72 / 4.44 | with the `profiles:` block and 2,400 node lists |
+| `GET /api/v1/profiles/role-common` | 0.008 | with its 1,200 attachments |
+| dry run: value change in `role-common` (replace key) | 0.78 | 100,000 hosts affected, 200 listed |
+| dry run: value change in `role-common` (`sysctl`, merge) | 0.78 | 100,000 hosts affected |
+| dry run: value change in `pool-tuning` | 0.48 | 14,286 hosts affected |
+| dry run: detach `role-common` from one `roleN` group | 0.17 | 84 hosts affected |
+| profile value write (`PUT /profiles/role-common/vars/…`) | 0.04 | no exporter check: nothing a profile write changes names a group |
+| (for comparison) dry run: `packages` at `all` | 4.61 | the node-value path, unchanged |
+| (for comparison) variable write at a node | 3.74 | includes the exporter check |
+
+A profile value change resolves only that key, for the hosts under the nodes the profile is
+attached to (on both sides of the write), through the same light-row `Snapshot` as any dry
+run: the 100,000-host preview costs about a fifth of a node value change at `all` (whose
+scope also only has one key, but which reads every value of a fold key twice). The real
+profile write is the cheapest write there is. The export pays one more query (live
+attachments and the attached profiles' values) and a merge of layers only at the 2,400 nodes
+that have profiles. Memory after the run: API container 489 MiB, PostgreSQL 240 MiB.
+
 ### Variable search (2026-11-05, issue 23)
 
 Measured like the tree-export lines: `ais serve` on the host (Python 3.14, one worker) against
@@ -276,6 +309,8 @@ What changed (`server/ais/resolver.py`, `snapshots.py`, `api.py`):
 C="docker compose -p ais-scale -f deploy/compose.yml -f bench/compose.override.yml"
 $C up -d --build
 .venv/bin/python bench/generate.py --hosts 100000 --database-url postgresql+psycopg://ais:ais@127.0.0.1:55434/ais
+# add --profiles to attach role-common / pool-tuning (then pass --profile role-common
+# --narrow-profile pool-tuning to benchmark.py)
 $C exec -T api ais user create bench@example.com --role editor --no-password
 export AIS_TOKEN="$($C exec -T api ais token create --user bench@example.com --name bench | tail -1)"
 AIS_EDITOR_TOKEN="$AIS_TOKEN" .venv/bin/python bench/benchmark.py --url http://127.0.0.1:8813 \

@@ -22,6 +22,9 @@ Measures, against ``--url`` with a viewer token (``AIS_TOKEN``):
 * ``ansible-inventory --list``: the same plus ansible-core computing every host's variables
   (vars plugins, ``host_vars`` globs, a JSON dump of everything). A playbook never does this;
   it is listed because it is the obvious thing people time.
+* with ``--profile`` (a tree from ``generate.py --profiles``): the profile read, and with an
+  editor token dry runs of a value change in that profile (every host under every node it
+  is attached to) and in ``--narrow-profile``;
 * with ``--editor-token`` (``AIS_EDITOR_TOKEN``), dry runs (``?dry_run=true``: the write,
   the exporter check and the ``impact`` preview, rolled back) of a value change at ``all``
   and at ``--subtree``, a rename of ``--subtree`` and a strategy change; then one variable
@@ -107,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repeat", type=int, default=5)
     p.add_argument("--skip-ansible", action="store_true")
     p.add_argument("--lookup-only", action="store_true", help="only the node lookup lines (GET /api/v1/nodes?q=)")
+    p.add_argument("--profile", help="a widely attached profile (generate.py --profiles: role-common)")
+    p.add_argument("--narrow-profile", help="a narrowly attached profile (generate.py --profiles: pool-tuning)")
     args = p.parse_args(argv)
     token = os.environ["AIS_TOKEN"]
     api = Api(args.url, token)
@@ -167,6 +172,10 @@ def main(argv: list[str] | None = None) -> int:
     med, last = timed(lambda: (lambda r: (r[0], r))(api.call("POST", "/api/v1/render", {"path": args.path, "template": False})), args.repeat)
     assert last[1] == 200, last[2][:200]
     row("render mock path (node page read)", med)
+    if args.profile:
+        med, last = timed(lambda: (lambda r: (r[0], r))(api.call("GET", f"/api/v1/profiles/{args.profile}")), args.repeat)
+        assert last[1] == 200, last[2][:200]
+        row(f"profile read ({args.profile}, with its attachments)", med, f"{len(json.loads(last[2])['attached'])} attachments")
 
     from urllib.parse import urlencode
 
@@ -198,7 +207,16 @@ def main(argv: list[str] | None = None) -> int:
 
         root_id, sub_id = node_id_of("all"), node_id_of(args.subtree)
         sub_parent, _sep, sub_name = args.subtree.rpartition(".")
+        profile_writes = []
+        if args.profile:
+            profile_writes.append((f"dry run: PUT kernel in profile {args.profile}", "PUT", f"/api/v1/profiles/{args.profile}/vars/kernel", {"value": "6.9.0"}))
+            profile_writes.append((f"dry run: PUT sysctl (merge) in profile {args.profile}", "PUT", f"/api/v1/profiles/{args.profile}/vars/sysctl", {"value": {"kernel.pid_max": 1}}))
+        if args.narrow_profile:
+            profile_writes.append((f"dry run: PUT tuned in profile {args.narrow_profile}", "PUT", f"/api/v1/profiles/{args.narrow_profile}/vars/tuned", {"value": False}))
+        if args.profile:
+            profile_writes.append((f"dry run: detach {args.profile} from {args.path.rsplit('.', 1)[0]}", "DELETE", f"/api/v1/nodes/{node_id_of(args.path.rsplit('.', 1)[0])}/profiles/{args.profile}", None))
         for label, method, route, body in (
+            *profile_writes,
             ("dry run: PUT packages (fold) at all", "PUT", f"/api/v1/nodes/{root_id}/vars/packages", {"value": ["vim"]}),
             ("dry run: PUT ntp_server at all", "PUT", f"/api/v1/nodes/{root_id}/vars/ntp_server", {"value": "ntp.example.com"}),
             (f"dry run: PUT ntp_server at {args.subtree}", "PUT", f"/api/v1/nodes/{sub_id}/vars/ntp_server", {"value": "ntp.example.com"}),
@@ -213,6 +231,11 @@ def main(argv: list[str] | None = None) -> int:
         dt, status, raw, _e = ed.call("PUT", f"/api/v1/nodes/{node_id}/vars/bench_marker", {"value": time.time()}, headers={"If-Match": f'"{rev}"'})
         assert status == 200, raw[:200]
         row("variable write (PUT, includes the exporter check)", dt)
+        if args.profile:
+            new = json.loads(raw)["revision"]
+            dt, status, raw, _e = ed.call("PUT", f"/api/v1/profiles/{args.profile}/vars/bench_marker", {"value": time.time()}, headers={"If-Match": f'"{new}"'})
+            assert status == 200, raw[:200]
+            row(f"profile value write (PUT in {args.profile}, no exporter check)", dt)
         new_rev = json.loads(raw)["revision"]
         dt, _s, raw, _e = api.call("GET", "/api/v1/export")
         row("full export, first after that write", dt)

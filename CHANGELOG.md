@@ -3,6 +3,49 @@
 ## Unreleased
 
 ### Added
+- **Profiles (role templates)** (#22, 80% of group variables were copies of the same role
+  settings). A profile is a named bundle of variables (`gpu-a100: {gpu_driver: "560.35",
+  node_labels: {gpu: a100}}`) attached to any number of non-host nodes. At each node it applies
+  as a level between the node's parent and the node: below the node's own values, above what
+  the node inherits, with the same merge strategies; several profiles on one node apply in the
+  node's list order (first = lowest precedence, the last wins). No nesting in this version.
+  The plugin export carries the values on the node as if they were set there, so playbooks
+  need nothing new (the parity test covers profiles: the seed attaches `web-baseline`).
+  - API: `GET /api/v1/profiles[/{name}?revision=]`, `PUT /profiles/{name}` (declarative
+    `description` and `vars`), `PUT`/`DELETE /profiles/{name}/vars/{key}`, `DELETE
+    /profiles/{name}` (409 while attached unless `detach=true`), `PUT /nodes/{id}/profiles`
+    (the node's ordered list), `PUT`/`DELETE /nodes/{id}/profiles/{name}` (attach at the end or
+    at `position`; detach). All with `If-Match`, `dry_run` + `impact` (a value change lists
+    every host under every node the profile is attached to; it resolves only the touched keys:
+    0.78 s for a profile attached over all 100k bench hosts) and change ids; one audit row
+    each (`profile.create`/`update`/`delete`, `profile.attach`/`detach`, `node.profiles`), every
+    one reverted exactly by `POST /revisions/{id}/revert`.
+  - History: profiles, their values and attachments are temporal rows (migration `0009`), so
+    a pinned revision renders and exports them as they were.
+  - Provenance: the render lists a profile's value as `{path, profile, source:
+    "profile:gpu-a100 @ <path>"}` and adds `profiles` (path → list along the chain); `GET
+    /nodes/{ref}` returns the node's `profiles`.
+  - Variable search: `GET /vars` lists each attachment that carries the key (`profile`,
+    `source`) and `profiles`, the profiles that hold it; `/vars/hosts` adds `profile`/`source`
+    when a host's value comes from one and names profile layers in a fold's `sources`.
+  - Audit: profile rows record the variables they changed in the new `audit_key` table, so
+    `GET /audit?key=` finds them.
+  - Schemas, typo warnings and strict mode check profile values like node values
+    (`profile:<name>` in messages); `PUT /variables/{name}` re-checks profile values too.
+  - Import/export: a `profiles:` block (created if missing, values set additively) and
+    `profiles: [names]` on non-host nodes (the list, set exactly). Tree exports carry them
+    (every profile for the whole tree; the attached ones for a subtree). Moves carry
+    attachments, deletes close them, and a restore re-attaches them without rolling the shared
+    profile back (409 when one was deleted since).
+  - Modules `profile` (values, `purge_vars`, `attach`/`detach` paths, `state`, `detach_all`;
+    check mode = the server's dry run with `impact`) and `profile_info`, with integration
+    targets; in the `inventory` action group.
+  - UI: a Profiles page (list, create, values with the same editor and preview as a node,
+    where it is attached, attach through the node picker, detach, delete; every write
+    previewed), a Profiles section on node pages (attach and detach with previews), and
+    profile sources in provenance and on the Search page. Playwright `e2e/z-profiles.spec.ts`.
+  - `ais vars` prints profile sources. `bench/generate.py --profiles` and `benchmark.py
+    --profile/--narrow-profile` measure them (`docs/scale.md`).
 - **`tag` and `tag_info` modules** (#28, no tag module). `git_cgallagher.inventory.tag`
   manages a tag from a playbook: `name`, `description` (kept when omitted), `paths` (added to
   the members by default; with `exclusive: true` the members become exactly `paths`),
@@ -147,6 +190,8 @@
   path that would be deleted.
 
 ### Changed
+- `POST /api/v1/import` (and `ais import`) answers two more counts, `profiles` and
+  `attachments` (#22). `examples/seed.yml` declares and attaches a profile (`web-baseline`).
 - **One name rule for tags and nodes** (#28, tag and node names differed). Tag names now
   allow `-` like node names (`[A-Za-z0-9_-]`, up to 255), and the tag's group turns it into `_`
   the way a node's group does (`gpu-canary` is the group `gpu_canary`), so a tag can be named
