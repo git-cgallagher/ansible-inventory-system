@@ -27,8 +27,11 @@ keep working (reads, renders, deletes, and new values), so strict mode can be tu
 an existing inventory and tightened with ``ais lint``. Restores and reverts are never refused:
 they put back what the tree held before (every write kind must stay revertible).
 
+Profile variables (issue #22) count like node variables: a profile is one more place a key
+is set (``profile:<name>`` in the warnings), and a profile write is reviewed like a node write.
+
 The check runs after a write's rows are in the session, over the rows that write created
-(``NodeVariable.created_rev``), like ``schema.check_live(created_rev=)``. Call sites: ``PUT
+(``NodeVariable.created_rev``, ``ProfileVariable.created_rev``), like ``schema.check_live(created_rev=)``. Call sites: ``PUT
 …/vars/{key}``, ``POST /nodes`` (its ``vars``), ``POST /import`` and ``ais import``,
 ``POST /nodes/restore`` and ``ais restore``, the revert routes and ``ais revert``.
 """
@@ -43,7 +46,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from ais.models import Node, NodeVariable, VariableDefinition
+from ais.models import Node, NodeVariable, ProfileVariable, VariableDefinition
 
 STRICT_ENV = "AIS_STRICT_KEYS"
 MIN_NODES_ENV = "AIS_TYPO_MIN_NODES"
@@ -136,12 +139,14 @@ class Candidates:
     @classmethod
     def load(cls, session: Session) -> "Candidates":
         declared = set(session.scalars(select(VariableDefinition.name)))
-        rows = session.execute(
-            select(NodeVariable.key, func.count())
-            .where(NodeVariable.deleted_rev.is_(None), NodeVariable.key.not_in(select(VariableDefinition.name)))
-            .group_by(NodeVariable.key)
-        )
-        return cls(declared, {k: n for k, n in rows}, min_nodes())
+        uses: dict[str, int] = {}
+        for model in (NodeVariable, ProfileVariable):  # a profile counts as one place, like a node
+            rows = session.execute(
+                select(model.key, func.count()).where(model.deleted_rev.is_(None), model.key.not_in(select(VariableDefinition.name))).group_by(model.key)
+            )
+            for k, n in rows:
+                uses[k] = uses.get(k, 0) + n
+        return cls(declared, uses, min_nodes())
 
     def suggest(self, key: str) -> Suggestion | None:
         """The closest known key ``key`` may be a typo of, or None. Ties: smaller distance,
@@ -215,41 +220,44 @@ def review(session: Session, rev_id: int, *, strict: bool, limit: int | None = N
     on no node before this revision. Reads only; the caller rolls back on a refusal."""
     limit = MAX_WARNINGS if limit is None else limit
     session.flush()
-    written = sorted(
-        session.scalars(
-            select(NodeVariable.key)
-            .distinct()
-            .where(
-                NodeVariable.created_rev == rev_id,
-                NodeVariable.deleted_rev.is_(None),
-                NodeVariable.key.not_in(select(VariableDefinition.name)),
+    written_set: set[str] = set()
+    for model in (NodeVariable, ProfileVariable):
+        written_set.update(
+            session.scalars(
+                select(model.key)
+                .distinct()
+                .where(model.created_rev == rev_id, model.deleted_rev.is_(None), model.key.not_in(select(VariableDefinition.name)))
             )
         )
-    )
+    written = sorted(written_set)
     if not written:
         return EMPTY
     cands = Candidates.load(session)
     suggestions = {k: cands.suggest(k) for k in written}
 
     def paths(key: str, n: int | None) -> tuple[list[str], int]:
+        """Where ``rev_id`` wrote ``key``: node paths, then ``profile:<name>``."""
         where = (NodeVariable.created_rev == rev_id, NodeVariable.deleted_rev.is_(None), NodeVariable.key == key)
         stmt = select(Node.path).select_from(NodeVariable).join(Node, Node.id == NodeVariable.node_id).where(*where).order_by(Node.path)
         found = list(session.scalars(stmt.limit(n) if n is not None else stmt))
         count = session.scalar(select(func.count()).select_from(NodeVariable).where(*where)) or 0
+        pwhere = (ProfileVariable.created_rev == rev_id, ProfileVariable.deleted_rev.is_(None), ProfileVariable.key == key)
+        pstmt = select(ProfileVariable.profile).where(*pwhere).order_by(ProfileVariable.profile)
+        if n is None or len(found) < n:
+            found += [f"profile:{p}" for p in session.scalars(pstmt.limit(n - len(found)) if n is not None else pstmt)]
+        count += session.scalar(select(func.count()).select_from(ProfileVariable).where(*pwhere)) or 0
         return found, count
 
     if strict:
-        before = set(
-            session.scalars(
-                select(NodeVariable.key)
-                .distinct()
-                .where(
-                    NodeVariable.key.in_(written),
-                    NodeVariable.created_rev < rev_id,
-                    or_(NodeVariable.deleted_rev.is_(None), NodeVariable.deleted_rev >= rev_id),
+        before: set[str] = set()
+        for model in (NodeVariable, ProfileVariable):
+            before.update(
+                session.scalars(
+                    select(model.key)
+                    .distinct()
+                    .where(model.key.in_(written), model.created_rev < rev_id, or_(model.deleted_rev.is_(None), model.deleted_rev >= rev_id))
                 )
             )
-        )
         new = [k for k in written if k not in before]
         if new:
             keys = []
@@ -310,5 +318,15 @@ def lint(session: Session, *, paths: int = LINT_PATHS) -> list[dict[str, Any]]:
                 .limit(paths)
             )
         )
+        if len(where) < paths:
+            where += [
+                f"profile:{p}"
+                for p in session.scalars(
+                    select(ProfileVariable.profile)
+                    .where(ProfileVariable.key == key, ProfileVariable.deleted_rev.is_(None))
+                    .order_by(ProfileVariable.profile)
+                    .limit(paths - len(where))
+                )
+            ]
         out.append({"key": key, "did_you_mean": s.name, "declared": s.declared, "nodes": cands.uses[key], "paths": where})
     return out

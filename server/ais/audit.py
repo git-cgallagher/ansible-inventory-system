@@ -31,7 +31,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais.models import AuditLog
+from ais.models import AuditKey, AuditLog
 
 request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("ais_request_id", default=None)
 source_var: contextvars.ContextVar[str] = contextvars.ContextVar("ais_source", default="api")
@@ -144,10 +144,13 @@ def record(
     after: Any = None,
     source: str = "api",
     revision: int | None = None,
+    keys: list[str] | None = None,
 ) -> AuditLog:
     """Add an audit row to ``session`` (flushed, not committed). An inventory write's row
     (``revision`` set) carries the request's change id; auth events carry none. A variable's
-    row (``node_variable``, ``variable_definition``) also gets ``key``, for ``GET /audit?key=``."""
+    row (``node_variable``, ``variable_definition``) also gets ``key``, for ``GET /audit?key=``;
+    a row that changed several variables (``profile.*``) lists them in ``keys`` instead, one
+    ``audit_key`` row each."""
     row = AuditLog(
         actor=actor,
         action=action,
@@ -163,6 +166,10 @@ def record(
     )
     session.add(row)
     session.flush()
+    for key in sorted(set(keys or ())):
+        session.add(AuditKey(audit_id=row.id, key=key))
+    if keys:
+        session.flush()
     return row
 
 

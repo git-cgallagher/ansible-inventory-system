@@ -19,13 +19,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais import audit, impact, keycheck, schema
+from ais import audit, impact, keycheck, profiles, schema
 from ais.auth import Principal, require
 from ais.db import get_session
 from ais.importer import ImportError_, check_kind, check_name, check_position, definition_doc, infer_kind, live_node_by_path
 from ais.audit import current_source
 from ais.locking import IfMatch, begin_write, check_precondition, etag, lock_for_write
-from ais.models import PATH_SEP, MergeStrategy, Node, NodeKind, NodeVariable, Revision, Role, TagMember, VariableDefinition
+from ais.models import PATH_SEP, MergeStrategy, Node, NodeKind, NodeVariable, ProfileAttachment, Revision, Role, TagMember, VariableDefinition
 from ais.resolver import build_export, current_revision, load_snapshot
 from ais.restore import RestoreError, restore_subtree
 
@@ -141,7 +141,9 @@ def phantom(out: dict[str, Any]) -> dict[str, Any]:
     return {**out, "id": None, "created_rev": None}
 
 
-def _audit(session: Session, principal: Principal, rev: Revision, action: str, target_type: str, target_id: Any, before: Any, after: Any) -> None:
+def _audit(
+    session: Session, principal: Principal, rev: Revision, action: str, target_type: str, target_id: Any, before: Any, after: Any, keys: list[str] | None = None
+) -> None:
     audit.record(
         session,
         actor=principal.actor,
@@ -152,6 +154,7 @@ def _audit(session: Session, principal: Principal, rev: Revision, action: str, t
         after=after,
         source=rev.source,
         revision=rev.id,
+        keys=keys,
     )
 
 
@@ -348,7 +351,7 @@ def move_node(
 
 def move_subtree(session: Session, rev: Revision, node: Node, new_parent: Node, new_name: str) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Close ``node``'s live subtree and reopen it as ``new_parent``/``new_name`` under ``rev``
-    (new ids; values, ``meta`` and tag memberships carried over). Returns the ``node.move``
+    (new ids; values, ``meta``, tag memberships and profile attachments carried over). Returns the ``node.move``
     audit row's ``before``, the new root (``node_out``) and the ``moved`` map. Refuses (422/409)
     the root, a no-op, a move under its own subtree, a bad name or kind, a taken path, a node
     that would be too deep. Shared by ``POST /nodes/{id}/move`` and ``ais.revert``."""
@@ -377,12 +380,15 @@ def move_subtree(session: Session, rev: Revision, node: Node, new_parent: Node, 
     old_ids = [n.id for n in old_rows]
     old_vars = session.scalars(select(NodeVariable).where(NodeVariable.node_id.in_(old_ids), NodeVariable.deleted_rev.is_(None))).all()
     old_members = session.scalars(select(TagMember).where(TagMember.node_id.in_(old_ids))).all()
+    old_attached = profiles.live_attachment_rows(session, old_ids)
     before = {**node_out(node, live_vars(session, node.id)), "subtree": [n.path for n in old_rows]}
 
     for n in old_rows:
         n.deleted_rev = rev.id
     for nv in old_vars:
         nv.deleted_rev = rev.id
+    for pa in old_attached:
+        pa.deleted_rev = rev.id
     session.flush()  # close before reopening, so the live unique indexes never see both
 
     id_map: dict[int, int] = {}
@@ -407,6 +413,8 @@ def move_subtree(session: Session, rev: Revision, node: Node, new_parent: Node, 
         session.add(NodeVariable(node_id=id_map[nv.node_id], key=nv.key, value=nv.value, created_rev=rev.id))
     for tm in old_members:
         session.add(TagMember(tag_id=tm.tag_id, node_id=id_map[tm.node_id]))
+    for pa in old_attached:
+        session.add(ProfileAttachment(node_id=id_map[pa.node_id], profile=pa.profile, position=pa.position, created_rev=rev.id))
     session.flush()
 
     moved = [{"old_id": o.id, "id": n.id, "from": o.path, "to": n.path} for o, n in zip(old_rows, new_rows)]
@@ -486,6 +494,7 @@ def delete_subtree(session: Session, rev: Revision, node: Node, subtree: list[No
         n.deleted_rev = rev.id
     for nv in session.scalars(select(NodeVariable).where(NodeVariable.node_id.in_(ids), NodeVariable.deleted_rev.is_(None))):
         nv.deleted_rev = rev.id
+    profiles.close_attachments(session, rev, ids)  # a restore re-attaches them (the tree export carries them)
     session.flush()
     return before
 

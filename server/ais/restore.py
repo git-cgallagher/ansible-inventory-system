@@ -10,6 +10,11 @@ subtree is rolled back (the export's ancestors are structure only). On top of th
   restore never overwrites; ``export-tree --as`` clones), a parent that is not live now
   (restore the nearest deleted ancestor instead, or the spine would come back var-less), a
   host name that is live elsewhere now (host names are unique);
+* puts back the subtree's profile attachments (issue #22) but never the profiles themselves:
+  a profile is shared, so its values are today's, not the revision's (like the ancestors,
+  which are structure only), and a profile that no longer exists refuses the restore (409:
+  recreate it first). Recreating it here would leave the ``node.restore`` row's inverse (delete
+  the subtree) unable to undo it;
 * copies node ``meta``, which the import format leaves out;
 * returns ``restored`` = ``[{old_id, id, path}]`` for every node, which the caller writes
   into the ``node.restore`` audit row. ``audit.node_lineage`` reads that map like a move's,
@@ -35,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from ais.importer import ImportError_, import_tree_report, live_node_by_path
 from ais.models import PATH_SEP, Node, NodeKind, Revision
+from ais.profiles import live_profile
 from ais.resolver import _live_at, _under, load_snapshot
 from ais.tree import ROOT, export_tree
 
@@ -153,8 +159,17 @@ def restore_subtree(
             )
 
     tree = export_tree(session, revision, path)
+    gone = sorted(name for name in tree.get("profiles") or {} if live_profile(session, name) is None)
+    if gone:
+        raise RestoreError(
+            409,
+            f"cannot restore {path}: it had profile(s) {', '.join(gone)} attached, which do not exist now. "
+            f"Recreate them first (PUT /api/v1/profiles/<name>; GET /api/v1/profiles/<name>?revision={revision} shows them as they were)",
+        )
     shared = rev is not None
-    result = import_tree_report(session, tree, actor=actor, message=message or f"restore {path} from revision {revision}", rev=rev)
+    result = import_tree_report(
+        session, tree, actor=actor, message=message or f"restore {path} from revision {revision}", rev=rev, profile_values=False
+    )
     rev = result.revision
     if not shared:
         rev.source = source  # the importer says "import"; this revision is a restore from this client

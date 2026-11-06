@@ -42,6 +42,8 @@ from ais.models import (
     Node,
     NodeKind,
     NodeVariable,
+    ProfileAttachment,
+    ProfileVariable,
     Revision,
     Tag,
     TagMember,
@@ -101,6 +103,11 @@ class Snapshot:
     vars_by_node: dict[int, dict[str, Any]]
     strategies: dict[str, MergeStrategy]
     tags: dict[str, list[int]] = field(default_factory=dict)  # tag name -> node ids
+    # node id -> the profiles attached to it, in application order (lowest precedence first):
+    # ``(profile name, its variables)``. One variables dict per profile, shared by every node
+    # it is attached to: read-only like the rest. ``vars_by_node`` stays the node's **own**
+    # values (what the tree export writes); ``layers`` is what the node contributes.
+    profiles: dict[int, list[tuple[str, dict[str, Any]]]] = field(default_factory=dict)
     # Indexes built on first use; a snapshot is read-only once loaded. Without them the
     # exporter scanned every node once per node (quadratic: 24 s for 12k nodes, docs/scale.md).
     _children: dict[int, list[Node]] | None = field(default=None, repr=False)
@@ -130,6 +137,25 @@ class Snapshot:
     def strategy(self, key: str) -> MergeStrategy:
         return self.strategies.get(key, MergeStrategy.replace)
 
+    def layers(self, node_id: int) -> list[tuple[str | None, dict[str, Any]]]:
+        """What a node contributes, lowest precedence first: each attached profile's
+        variables (``(name, values)``), then the node's own (``(None, values)``). A profile is
+        a level between the node's parent and the node."""
+        own = self.vars_by_node.get(node_id)
+        attached = self.profiles.get(node_id)
+        if not attached:
+            return [(None, own)] if own else []
+        out: list[tuple[str | None, dict[str, Any]]] = list(attached)
+        if own:
+            out.append((None, own))
+        return out
+
+    def sets(self, node_id: int, key: str) -> bool:
+        """Whether the node contributes ``key`` (its own value or an attached profile's)."""
+        if key in self.vars_by_node.get(node_id, ()):
+            return True
+        return any(key in values for _name, values in self.profiles.get(node_id, ()))
+
 
 def current_revision(session: Session) -> int:
     rev = session.scalar(select(Revision.id).order_by(Revision.id.desc()).limit(1))
@@ -137,7 +163,9 @@ def current_revision(session: Session) -> int:
 
 
 def _live_at(model, rev: int):
-    created = model.created_rev <= rev if model is NodeVariable else (Node.created_rev.is_(None)) | (Node.created_rev <= rev)
+    """SQL filter: the row of ``model`` (a temporal table) was live at revision ``rev``.
+    Only ``node`` has NULL ``created_rev`` rows (from before node temporality)."""
+    created = (Node.created_rev.is_(None)) | (Node.created_rev <= rev) if model is Node else model.created_rev <= rev
     return and_(created, (model.deleted_rev.is_(None)) | (model.deleted_rev > rev))
 
 
@@ -196,7 +224,36 @@ def load_snapshot(
         if member.node_id in nodes:
             tags.setdefault(tag.name, []).append(member.node_id)
 
-    return Snapshot(rev, nodes, by_path, vars_by_node, strategies, tags)
+    profiles = load_profile_layers(session, rev, nodes, node_filter=node_filter, keys=keys)
+    return Snapshot(rev, nodes, by_path, vars_by_node, strategies, tags, profiles)
+
+
+def load_profile_layers(
+    session: Session, rev: int, nodes: dict[int, Any], *, node_filter=None, keys: list[str] | set[str] | None = None
+) -> dict[int, list[tuple[str, dict[str, Any]]]]:
+    """The profiles attached (live at ``rev``) to the nodes in ``nodes``, in application
+    order, each with its variables at ``rev`` (only ``keys`` when given). ``node_filter`` is
+    the SQL filter on ``Node`` the caller loaded ``nodes`` with (a subtree, a chain)."""
+    stmt = select(ProfileAttachment.node_id, ProfileAttachment.profile, ProfileAttachment.position).where(_live_at(ProfileAttachment, rev))
+    if node_filter is not None:
+        stmt = stmt.join(Node, Node.id == ProfileAttachment.node_id).where(_live_at(Node, rev), node_filter)
+    attached = [(nid, name, pos) for nid, name, pos in session.execute(stmt) if nid in nodes]
+    if not attached:
+        return {}
+    names = sorted({name for _nid, name, _pos in attached})
+    values: dict[str, dict[str, Any]] = {name: {} for name in names}
+    for i in range(0, len(names), 5000):  # PostgreSQL caps a statement at 65,535 parameters
+        vstmt = select(ProfileVariable.profile, ProfileVariable.key, ProfileVariable.value).where(
+            _live_at(ProfileVariable, rev), ProfileVariable.profile.in_(names[i : i + 5000])
+        )
+        if keys is not None:
+            vstmt = vstmt.where(ProfileVariable.key.in_(list(keys)))
+        for name, key, value in session.execute(vstmt):
+            values[name][key] = value
+    out: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+    for nid, name, _pos in sorted(attached, key=lambda a: (a[0], a[2], a[1])):
+        out.setdefault(nid, []).append((name, values[name]))
+    return out
 
 
 def host_path(session: Session, host: str, revision: int) -> str | None:
@@ -260,22 +317,37 @@ def emitted_vars(snap: Snapshot, node: Node) -> dict[str, Any]:
 
 def _emitted(snap: Snapshot, node: Node) -> dict[str, Any]:
     """``emitted_vars``, computed once per node and snapshot. Shared: never mutate it
-    (``build_export`` only serializes it; ``resolve`` copies what it hands out)."""
+    (``build_export`` only serializes it; ``resolve`` copies what it hands out).
+
+    A node contributes its layers (``Snapshot.layers``): each attached profile's values, then
+    its own. A replace key emits the last layer's value; a fold key emits the cumulative fold
+    of every layer from the root down to this node, as if each profile were a level of its own
+    between the node's parent and the node."""
     cached = snap._emitted.get(node.id)
     if cached is not None:
         return cached
-    own = snap.vars_by_node.get(node.id, {})
+    layers = snap.layers(node.id)
     out: dict[str, Any] = {}
+    if not layers:
+        snap._emitted[node.id] = out
+        return out
     chain = snap.chain(node)
-    for key, value in own.items():
+    if len(layers) == 1:
+        merged = layers[0][1]
+    else:
+        merged = {}
+        for _name, values in layers:
+            merged.update(values)  # the last layer that sets a key wins (replace keys)
+    for key, value in merged.items():
         strategy = snap.strategy(key)
         if strategy is MergeStrategy.replace:
             out[key] = copy.deepcopy(value)
             continue
         acc = None
         for anc in chain:
-            if key in snap.vars_by_node.get(anc.id, {}):
-                acc = fold(strategy, acc, snap.vars_by_node[anc.id][key])
+            for _name, values in snap.layers(anc.id):
+                if key in values:
+                    acc = fold(strategy, acc, values[key])
         out[key] = acc
     snap._emitted[node.id] = out
     return out
@@ -357,6 +429,11 @@ def resolved_vars(snap: Snapshot, node: Node) -> dict[str, Any]:
     return result
 
 
+def profile_source(profile: str, path: str) -> str:
+    """How provenance names a profile's value: ``profile:gpu-a100 @ all.commercial.prod.…``."""
+    return f"profile:{profile} @ {path}"
+
+
 def resolve(
     snap: Snapshot,
     *,
@@ -391,15 +468,21 @@ def resolve(
     for node in chain:
         emitted = _emitted(snap, node)
         result = combine_vars(result, emitted)
-        for key in emitted:
-            provenance.setdefault(key, []).append(
-                {
+        if not emitted:
+            continue
+        group = node.name if node.kind is NodeKind.host else group_name(node, sep)
+        for name, values in snap.layers(node.id):
+            for key in values:
+                entry: dict[str, Any] = {
                     "path": node.path,
-                    "group": node.name if node.kind is NodeKind.host else group_name(node, sep),
+                    "group": group,
                     "strategy": snap.strategy(key).value,
-                    "value": copy.deepcopy(snap.vars_by_node[node.id][key]),
+                    "value": copy.deepcopy(values[key]),
                 }
-            )
+                if name is not None:  # a profile's value, applied at this node
+                    entry["profile"] = name
+                    entry["source"] = profile_source(name, node.path)
+                provenance.setdefault(key, []).append(entry)
     if overrides:
         result = combine_vars(result, overrides)
         for key, value in overrides.items():
