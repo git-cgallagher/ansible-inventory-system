@@ -1,5 +1,8 @@
 ---
-- module_defaults:
+- vars:
+    # find_host looks hosts up by name (GET /nodes?q=&kind=host): these must never be taken for it-web09
+    decoys: [it-web09x, xit-web09, it-web09-old, IT-WEB09]
+  module_defaults:
     group/git_cgallagher.inventory.inventory:
       url: "{{ ais_url }}"
       token: "{{ ais_token }}"
@@ -31,6 +34,11 @@
         ansible_port: 2222
         vars: {packages: [tcpdump]}
       register: again
+    - name: Decoys whose names start with, contain or case-fold to it-web09, in a group that sorts first
+      git_cgallagher.inventory.host:
+        name: "{{ item }}"
+        parent_path: all.commercial.lab.dc1.web
+      loop: "{{ decoys }}"
     - name: Converge without parent_path (found by name)
       git_cgallagher.inventory.host:
         name: it-web09
@@ -73,6 +81,11 @@
         name: it-web09
         state: absent
       register: rm2
+    - name: The decoys are untouched
+      git_cgallagher.inventory.node_info:
+        path: "all.commercial.lab.dc1.web.{{ item }}"
+      loop: "{{ decoys }}"
+      register: decoys_after
     - ansible.builtin.assert:
         that:
           - chk is changed and not none_yet.exists
@@ -80,6 +93,9 @@
           - created is changed and created.host.kind == 'host' and created.host.vars.ansible_port == 2222
           - again is not changed
           - conv is changed and conv.host.vars.ansible_user == 'deploy' and conv.host.vars.ansible_host == '10.1.1.19'
+          - conv.host.path == 'all.commercial.prod.dc1.web.it-web09'
+          - decoys_after.results | map(attribute='exists') | list == [true] * (decoys | length)
+          - decoys_after.results | map(attribute='node.vars') | map('length') | list == [0] * (decoys | length)
           - rendered.resolved.http_port == 8080 and 'tcpdump' in rendered.resolved.packages and 'nginx' in rendered.resolved.packages
           - elsewhere is failed and 'already exists at' in elsewhere.msg
           - nowhere is failed and 'parent_path is required' in nowhere.msg
@@ -90,3 +106,9 @@
       git_cgallagher.inventory.host:
         name: it-web09
         state: absent
+    - name: Cleanup decoys
+      git_cgallagher.inventory.host:
+        name: "{{ item }}"
+        parent_path: all.commercial.lab.dc1.web
+        state: absent
+      loop: "{{ decoys }}"

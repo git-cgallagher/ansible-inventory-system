@@ -23,9 +23,11 @@ changes to the resolver, the exporter, snapshots or the plugin.
    it matters.
 4. **`GET /api/v1/nodes` without `q`, `kind`, `limit` or `subtree` returns every node**
    (109,917 nodes, 20.6 MB, 2.8 s). The UI no longer calls it: its pickers use the bounded
-   lookup (4–10 ms, see [Node lookup](#node-lookup-2026-11-05-issue-27)). The `host` module
-   still does, once per task whose host is not at its `parent_path` (a new host, or `absent`
-   without a parent).
+   lookup (4–10 ms, see [Node lookup](#node-lookup-2026-11-05-issue-27)). Nor does the `host`
+   module any more (issue 43): a task whose host is not at its `parent_path` (a new host, or
+   `absent` without a parent) looks the name up with `?q=<name>&kind=host`, the row
+   "host `h012345`" below (0.007 s for a hit, at most 0.073 s for a miss), plus a
+   `GET /nodes/{id}` of the one host it found, instead of 20.6 MB and 2.8 s.
 5. `ansible-inventory --list` is ~23 s, but that is ansible-core computing every host's
    variables (vars plugins glob `host_vars/` 400k times, then a 17 s JSON dump). A playbook
    never does that. The plugin's own cost is the `--graph` line: 4.5 s with a warm ETag store.

@@ -239,7 +239,12 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   (`ais.nodesearch`); the tree loads children per node. Deep links (`#/render?host=`,
   `?path=`, `#/diff?host=&from=&to=`) carry the name or path and need no lookup.
   `e2e/pickers.spec.ts` fails if Render or Diff ever request the unbounded list. A new picker
-  uses `NodePicker`; never a `<select>`/`<datalist>` filled from a list of nodes.
+  uses `NodePicker`; never a `<select>`/`<datalist>` filled from a list of nodes. **The
+  collection's modules don't either**: the `host` module's `find_host` (a host by name) asks
+  `GET /nodes?q=<name>&kind=host` and keeps the row whose name is equal, case-sensitively
+  (issue #43). It relies on tier 1 (name equal to `q`, ignoring case) coming first with the
+  whole `limit`, so never reorder `nodesearch`'s tiers or cap a tier below `limit`;
+  `test_exact_name_first_however_many_partial_matches` guards it.
 - **Node detail reads through `POST /render {path, template: false}`**, also for hosts, so the
   page shows exactly what a mock host at that path would get. (Renders write nothing.) Own vars
   are the provenance entries whose `path` is the node's **and that have no `profile`** (a
@@ -682,8 +687,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   subtree. `PUT`/`DELETE /variables/{name}` and `DELETE …/vars/{key}` run no `check_export`
   (nothing they change can collide). Loading the
   tree as ORM objects is 2.4 s. `GET /nodes` without `q`/`limit`/`subtree` returns everything
-  (the UI no longer calls it); the `host` module's `find_host` still does, for a host that is
-  not at its `parent_path`. The unbounded list also loads every variable (`load_snapshot`)
+  (neither the UI nor any module calls it; the `host` module's `find_host` uses the bounded
+  lookup since issue #43). The unbounded list also loads every variable (`load_snapshot`)
   only to drop them.
 - Release: no container image is published (compose builds from the checkout).
 - Render cost is not bounded: a template like `{{ 'a' * 10**9 }}` (Jinja's sandbox caps
