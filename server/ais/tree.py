@@ -26,8 +26,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ais.importer import live_node_by_path
-from ais.models import NAME_RE, PATH_SEP, Node, NodeKind, Tag, VariableDefinition
-from ais.resolver import Snapshot, load_snapshot
+from ais.models import NAME_RE, PATH_SEP, Node, NodeKind, Profile, Tag, VariableDefinition
+from ais.resolver import Snapshot, _live_at, load_snapshot
 
 ROOT = "all"
 
@@ -53,13 +53,19 @@ def _own_vars(snap: Snapshot, node: Node) -> dict[str, Any]:
     return {k: copy.deepcopy(v) for k, v in sorted(snap.vars_by_node.get(node.id, {}).items())}
 
 
-def _node_doc(node: Node, own: dict[str, Any] | None) -> dict[str, Any]:
-    """A non-host node's entry, keys in a fixed order (kind, inventory_name, vars)."""
+def _attached(snap: Snapshot, node: Node) -> list[str]:
+    return [name for name, _values in snap.profiles.get(node.id, ())]
+
+
+def _node_doc(node: Node, own: dict[str, Any] | None, attached: list[str] | None = None) -> dict[str, Any]:
+    """A non-host node's entry, keys in a fixed order (kind, inventory_name, profiles, vars)."""
     doc: dict[str, Any] = {}
     if node.kind is not NodeKind.all:
         doc["kind"] = node.kind.value  # always: a group under `all` would re-import as a business
     if node.inventory_name:
         doc["inventory_name"] = node.inventory_name
+    if attached:
+        doc["profiles"] = attached
     if own:
         doc["vars"] = own
     return doc
@@ -90,7 +96,10 @@ def export_tree(
     a clone inside one inventory needs (host names are unique across the tree).
 
     Definitions: every one for a whole-tree export; for a subtree, those of the keys the
-    document sets. Tags: those with a member in the exported subtree, with only those members.
+    document sets (profile values included). Tags: those with a member in the exported
+    subtree, with only those members. Profiles: every one live at the revision for a
+    whole-tree export; for a subtree, those attached to an exported node (the spine's only
+    with ``ancestor_vars``), with their values at the revision.
 
     ``KeyError`` when ``subtree`` did not exist at ``revision``; ``TreeExportError`` for a
     bad ``as_path`` (or ``as_path`` with ``ancestor_vars``)."""
@@ -98,6 +107,8 @@ def export_tree(
     new_parts = _check_as_path(subtree, as_path) if as_path else None
     if new_parts and ancestor_vars:
         raise TreeExportError("'as' and ancestor_vars do not combine: a clone keeps its new parents' values")
+    from ais.profiles import doc as profile_doc
+
     snap = load_snapshot(session, revision, None if subtree == ROOT else subtree)
     top = snap.by_path.get(subtree)
     if top is None:  # only the root can be missing here: load_snapshot checked a subtree
@@ -108,25 +119,32 @@ def export_tree(
             return path
         return PATH_SEP.join(new_parts) + path[len(subtree) :]
 
-    # The ancestors, root first: (name, kind or None, inventory_name, own vars).
-    spine: list[tuple[str, NodeKind | None, str | None, dict[str, Any]]] = []
+    # The ancestors, root first: (name, kind or None, inventory_name, profiles, own vars).
+    spine: list[tuple[str, NodeKind | None, str | None, list[str], dict[str, Any]]] = []
     if new_parts is None:
         for anc in snap.chain(top)[:-1]:
-            spine.append((anc.name, anc.kind, anc.inventory_name, _own_vars(snap, anc) if ancestor_vars else {}))
+            if ancestor_vars:
+                spine.append((anc.name, anc.kind, anc.inventory_name, _attached(snap, anc), _own_vars(snap, anc)))
+            else:
+                spine.append((anc.name, anc.kind, anc.inventory_name, [], {}))
     else:
         for i in range(1, len(new_parts)):
             live = live_node_by_path(session, PATH_SEP.join(new_parts[:i]))
-            spine.append((new_parts[i - 1], live.kind if live else None, live.inventory_name if live else None, {}))
+            spine.append((new_parts[i - 1], live.kind if live else None, live.inventory_name if live else None, [], {}))
 
     used_keys: set[str] = set()
+    used_profiles: set[str] = set()
     doc_root: dict[str, Any] | None = None
     parent_doc: dict[str, Any] | None = None
-    for name, kind, inventory_name, own in spine:
+    for name, kind, inventory_name, attached, own in spine:
         doc: dict[str, Any] = {}
         if kind is not None and kind is not NodeKind.all:
             doc["kind"] = kind.value
         if inventory_name:
             doc["inventory_name"] = inventory_name
+        if attached:
+            doc["profiles"] = attached
+            used_profiles.update(attached)
         if own:
             doc["vars"] = own
             used_keys.update(own)
@@ -139,7 +157,8 @@ def export_tree(
     # The subtree itself, with an explicit stack (the tree may be deep; see importer).
     top_own = _own_vars(snap, top)
     used_keys.update(top_own)
-    top_doc = _node_doc(top, top_own)
+    used_profiles.update(_attached(snap, top))
+    top_doc = _node_doc(top, top_own, _attached(snap, top))
     if parent_doc is None:
         doc_root = top_doc
     else:
@@ -155,7 +174,8 @@ def export_tree(
             for kid in groups:
                 own = _own_vars(snap, kid)
                 used_keys.update(own)
-                children[kid.name] = _node_doc(kid, own)
+                used_profiles.update(_attached(snap, kid))
+                children[kid.name] = _node_doc(kid, own, _attached(snap, kid))
                 exported.add(kid.id)
                 stack.append((kid, children[kid.name]))
         if hosts:
@@ -167,6 +187,25 @@ def export_tree(
                     used_keys.update(own)
                     out[kid.name] = own
                     exported.add(kid.id)
+
+    # Profiles: every live one for the whole tree, the attached ones for a subtree; their
+    # description and values as of the snapshot's revision (temporal rows, like the nodes).
+    if subtree == ROOT:
+        names = sorted(set(session.scalars(select(Profile.name).where(_live_at(Profile, snap.revision)))))
+    else:
+        names = sorted(used_profiles)
+    profile_docs: dict[str, Any] = {}
+    for pname in names:
+        pdoc = profile_doc(session, pname, snap.revision)
+        if pdoc is None:  # pragma: no cover - an attachment always names a live profile
+            continue
+        spec: dict[str, Any] = {}
+        if pdoc["description"] is not None:
+            spec["description"] = pdoc["description"]
+        if pdoc["vars"]:
+            spec["vars"] = {k: copy.deepcopy(v) for k, v in sorted(pdoc["vars"].items())}
+            used_keys.update(pdoc["vars"])
+        profile_docs[pname] = spec
 
     tree: dict[str, Any] = {}
     stmt = select(VariableDefinition).order_by(VariableDefinition.name)
@@ -183,6 +222,8 @@ def export_tree(
             definitions[d.name] = spec
         if definitions:
             tree["variables"] = definitions
+    if profile_docs:
+        tree["profiles"] = profile_docs
 
     tree["all"] = doc_root
 

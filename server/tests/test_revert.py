@@ -134,6 +134,66 @@ def _import(c, rev):
     return c.post("/api/v1/import", json={"tree": tree}, if_match=rev)
 
 
+# Issue 22: profiles. TREE attaches hardening + web-role at EAST.web-tier and web-role at
+# dc-west.web; unused-role is attached nowhere.
+TIER = EAST + ".web-tier"
+
+
+def _profile_create(c, rev):
+    return c.put("/api/v1/profiles/db-role", json={"description": "databases", "vars": {"db_engine": "postgresql", "packages": ["pg"]}}, if_match=rev)
+
+
+def _profile_value(c, rev):
+    return c.put("/api/v1/profiles/web-role/vars/role_name", json={"value": "frontend"}, if_match=rev)
+
+
+def _profile_unset(c, rev):
+    return c.delete("/api/v1/profiles/web-role/vars/sysctl", if_match=rev)
+
+
+def _profile_converge(c, rev):
+    return c.put("/api/v1/profiles/hardening", json={"description": "now described", "vars": {"audit_rules": ["strict"], "selinux": "enforcing"}}, if_match=rev)
+
+
+def _profile_delete(c, rev):
+    return c.delete("/api/v1/profiles/web-role", params={"detach": "true"}, if_match=rev)
+
+
+def _profile_attach(c, rev):
+    return c.put(f"/api/v1/nodes/{_id(c, WEST)}/profiles/hardening", json={}, if_match=rev)
+
+
+def _profile_detach(c, rev):
+    return c.delete(f"/api/v1/nodes/{_id(c, TIER)}/profiles/web-role", if_match=rev)
+
+
+def _profile_reorder(c, rev):
+    return c.put(f"/api/v1/nodes/{_id(c, TIER)}/profiles", json={"profiles": ["web-role", "hardening"]}, if_match=rev)
+
+
+def _import_profiles(c, rev):
+    tree = {
+        "profiles": {"web-role": {"vars": {"role_name": "edge"}}, "cache-role": {"vars": {"http_port": 6379}}},
+        "all": {
+            "children": {
+                "commercial": {
+                    "children": {
+                        "prod": {
+                            "children": {
+                                "dc-west": {
+                                    "profiles": ["hardening"],
+                                    "children": {"cache": {"kind": "group", "profiles": ["cache-role"], "hosts": {"west-cache-01": {}}}},
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    }
+    return c.post("/api/v1/import", json={"tree": tree}, if_match=rev)
+
+
 KINDS: dict[str, Callable] = {
     "variable.set new key": _var_new,
     "variable.set changed value": _var_change,
@@ -149,6 +209,15 @@ KINDS: dict[str, Callable] = {
     "tag.set changed": _tag_change,
     "tag.delete": _tag_delete,
     "import": _import,
+    "profile.create": _profile_create,
+    "profile.update value": _profile_value,
+    "profile.update unset": _profile_unset,
+    "profile.update converge": _profile_converge,
+    "profile.delete detach": _profile_delete,
+    "profile.attach": _profile_attach,
+    "profile.detach": _profile_detach,
+    "node.profiles reorder": _profile_reorder,
+    "import profiles": _import_profiles,
 }
 
 
@@ -246,7 +315,8 @@ def test_change_set_revert_undoes_many_revisions_as_one(editor, session, built):
     assert [o["reverts"] for o in dry["operations"]] == sorted((o["reverts"] for o in dry["operations"]), reverse=True)
     hosts = {h["host"]: h for h in dry["hosts"]}
     assert set(hosts) == {"west-web-01", "west-web-02"} and hosts["west-web-02"]["status"] == "removed"
-    assert hosts["west-web-01"]["status"] == "changed" and "http_port" in hosts["west-web-01"]["removed"]
+    # back to the web-role profile's 8081 (attached at dc-west.web, carried by the move)
+    assert hosts["west-web-01"]["status"] == "changed" and hosts["west-web-01"]["changed"]["http_port"] == {"from": 8088, "to": 8081}
     assert current_rev(editor) == unrelated and _state(session) == after_unrelated
 
     r = editor.post("/api/v1/changes/SRE-1234/revert", json={}, headers={"X-AIS-Change": "SRE-1234-rollback"}, if_match=unrelated)

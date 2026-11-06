@@ -23,12 +23,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, impact, keycheck, nodesearch, oidc, varsearch
+from ais import __version__, api_auth, api_profiles, api_revert, api_tags, api_write, audit, impact, keycheck, nodesearch, oidc, profiles, varsearch
 from ais.auth import Principal, require
 from ais.db import get_session, init_db
 from ais.importer import ImportError_, import_tree_report, live_node_by_path
 from ais.locking import check_precondition, etag
-from ais.models import AuditLog, Node, NodeKind, Revision, Role, VariableDefinition
+from ais.models import AuditKey, AuditLog, Node, NodeKind, Revision, Role, VariableDefinition
 from ais.render import MOCK_HOSTNAME, render_templates
 from ais.resolver import GROUP_SEP, build_export, current_revision, host_path, load_chain, load_snapshot, resolve
 from ais import snapshots
@@ -56,6 +56,7 @@ app.add_middleware(audit.RequestIdMiddleware)
 app.include_router(api_auth.router)
 app.include_router(api_write.router)
 app.include_router(api_tags.router)
+app.include_router(api_profiles.router)
 app.include_router(api_revert.router)
 app.include_router(oidc.router)
 
@@ -174,6 +175,8 @@ def render(req: RenderRequest, principal: Principal = viewer, session: Session =
         out = resolve(snap, host=req.host, path=req.path, overrides=req.overrides, sep=req.group_separator)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    # The profiles attached along the chain (issue #22), in application order, by path.
+    out["profiles"] = {snap.nodes[nid].path: [name for name, _values in layers] for nid, layers in snap.profiles.items()}
     if req.template:
         hostname = req.host or req.mock_hostname
         out["rendered"], out["errors"] = render_templates(out["resolved"], facts=req.facts, hostname=hostname, chain=out["chain"])
@@ -217,7 +220,9 @@ def node(ref: str, principal: Principal = viewer, session: Session = Depends(get
     n = session.get(Node, int(ref)) if ref.isdigit() else live_node_by_path(session, ref)
     if n is None:
         raise HTTPException(404, f"node {ref!r} does not exist")
-    return api_write.node_out(n, api_write.live_vars(session, n.id))
+    out = api_write.node_out(n, api_write.live_vars(session, n.id))
+    out["profiles"] = profiles.node_list(session, n.id) if n.deleted_rev is None else []
+    return out
 
 
 @app.get("/api/v1/nodes/{node_id}/children")
@@ -338,7 +343,7 @@ def audit_log(
     limit: int = Query(50, ge=1, le=1000),
     before: int | None = Query(None, description="Only rows with an id below this (paging, newest first)"),
     node: str | None = Query(None, description="A node by id or live path: its rows and its variables' rows under every id it had (moves change ids)"),
-    key: str | None = Query(None, description="A variable's rows (set, unset, its definition) anywhere; with node, only on that node"),
+    key: str | None = Query(None, description="A variable's rows (set, unset, its definition, profile changes that touched it) anywhere; with node, only on that node"),
     subtree: str | None = Query(None, description="Only rows whose recorded path (after, else before) is this path or below it: the path when the row was written"),
     principal: Principal = editor,
     session: Session = Depends(get_session),
@@ -346,7 +351,9 @@ def audit_log(
     """Audit rows, newest first. Editor or admin; viewers get 403."""
     stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
     if key is not None and node is None:
-        stmt = stmt.where(AuditLog.key == key)  # ix_audit_key; set by audit.record (migration 0007)
+        # ix_audit_key (one-variable rows, migration 0007) or audit_key (rows that changed
+        # several variables: profile writes, migration 0009).
+        stmt = stmt.where(or_(AuditLog.key == key, AuditLog.id.in_(select(AuditKey.audit_id).where(AuditKey.key == key))))
     if subtree:
         # Variable and node rows carry the path they had then; definitions, tags and auth
         # events have none and drop out. Unindexed, so it narrows the other filters.

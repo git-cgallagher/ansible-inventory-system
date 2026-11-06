@@ -13,7 +13,9 @@ const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * between refuses (409). On a stale 409 the parent reloads and this form keeps the text so
  * the change can be re-applied. Any edit drops the preview. */
 export function VarEditor(props: {
-  node: InvNode;
+  /** The node the value is set on; or `url`, the value's write URL without the key (a profile's). */
+  node?: InvNode;
+  url?: string;
   keyName: string | null;
   presetKey?: string;
   initial: unknown;
@@ -58,7 +60,7 @@ export function VarEditor(props: {
     }
     setProblem("");
     setBusy(true);
-    const url = `/api/v1/nodes/${props.node.id}/vars/${encodeURIComponent(key)}`;
+    const url = `${props.url ?? `/api/v1/nodes/${props.node?.id}/vars`}/${encodeURIComponent(key)}`;
     try {
       if (preview === null) {
         const dry = await api<WriteResult>(url, { method: "PUT", body: { value }, ifMatch: props.revision, query: { dry_run: true } });
@@ -119,7 +121,7 @@ export function VarEditor(props: {
       {def?.description && <p className="muted hint">{def.description}</p>}
       {def && def.merge_strategy !== "replace" && (
         <p className="muted hint">
-          {def.merge_strategy === "merge" ? "Merged key by key" : def.merge_strategy === "append" ? "Appended" : "Appended without duplicates"} onto what this node inherits; write only this level's contribution.
+          {def.merge_strategy === "merge" ? "Merged key by key" : def.merge_strategy === "append" ? "Appended" : "Appended without duplicates"} onto what {props.url ? "each node it is attached to inherits" : "this node inherits"}; write only this level's contribution.
         </p>
       )}
       <textarea

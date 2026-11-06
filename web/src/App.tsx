@@ -13,6 +13,7 @@ import { AuditView } from "./views/Audit";
 import { VariablesView } from "./views/Variables";
 import { SearchView } from "./views/Search";
 import { TagsView } from "./views/Tags";
+import { ProfilesView } from "./views/Profiles";
 import { TokensView } from "./views/Tokens";
 import { Notice } from "./components";
 
@@ -20,6 +21,7 @@ const VIEWS: { id: string; label: string; editorOnly?: boolean }[] = [
   { id: "tree", label: "Tree" },
   { id: "render", label: "Render" },
   { id: "variables", label: "Variables" },
+  { id: "profiles", label: "Profiles" },
   { id: "search", label: "Search" },
   { id: "tags", label: "Tags" },
   { id: "diff", label: "Diff" },
@@ -98,6 +100,9 @@ export default function App() {
       break;
     case "tags":
       body = <TagsView />;
+      break;
+    case "profiles":
+      body = <ProfilesView params={route.params} />;
       break;
     case "tokens":
       body = <TokensView onSignedOut={forget} />;

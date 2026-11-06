@@ -199,6 +199,74 @@ class TagMember(Base):
     node_id: Mapped[int] = mapped_column(ForeignKey("node.id", ondelete="CASCADE"), primary_key=True)
 
 
+# --------------------------------------------------------------------- profiles
+#
+# A profile (issue #22) is a named bundle of variables attached to any number of non-host
+# nodes. Its values apply at each node it is attached to, as a level between the node's
+# parent and the node's own variables (``resolver._emitted``). All three tables are temporal
+# like ``node``/``node_variable``, so a pinned revision sees the profile exactly as it was.
+# The variable and attachment rows reference the profile by **name**, not by id: the
+# ``profile`` row itself is closed and reopened when its description changes, and a name key
+# keeps the other rows valid across that (no copy-forward like a move's).
+
+
+class Profile(Base):
+    """A profile's existence and description. Live when ``deleted_rev`` is NULL; at most one
+    live row per name."""
+
+    __tablename__ = "profile"
+    __table_args__ = (
+        Index("uq_profile_name_live", "name", unique=True, sqlite_where=_LIVE, postgresql_where=_LIVE),
+        Index("ix_profile_name", "name", "deleted_rev"),
+        CheckConstraint("deleted_rev IS NULL OR deleted_rev > created_rev", name="ck_profile_revs"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text)
+    created_rev: Mapped[int] = mapped_column(ForeignKey("revision.id", name="fk_profile_created_rev"))
+    deleted_rev: Mapped[int | None] = mapped_column(ForeignKey("revision.id", name="fk_profile_deleted_rev"))
+
+
+class ProfileVariable(Base):
+    """A profile's variable, temporal like ``NodeVariable``."""
+
+    __tablename__ = "profile_variable"
+    __table_args__ = (
+        Index("ix_profvar_profile_key_live", "profile", "key", "deleted_rev"),
+        Index("ix_profvar_key_live", "key", "deleted_rev"),
+        CheckConstraint("deleted_rev IS NULL OR deleted_rev > created_rev", name="ck_profvar_revs"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    profile: Mapped[str] = mapped_column(String(255))
+    key: Mapped[str] = mapped_column(String(255))
+    value: Mapped[object] = mapped_column(JSON)
+    created_rev: Mapped[int] = mapped_column(ForeignKey("revision.id", name="fk_profvar_created_rev"))
+    deleted_rev: Mapped[int | None] = mapped_column(ForeignKey("revision.id", name="fk_profvar_deleted_rev"))
+
+
+class ProfileAttachment(Base):
+    """Profile ``profile`` attached to node ``node_id`` at ``position`` (0 first: the lowest
+    precedence; a node's live positions are always 0..n-1). Temporal: a reorder closes and
+    reopens the rows whose position changed."""
+
+    __tablename__ = "profile_attachment"
+    __table_args__ = (
+        Index("uq_profatt_node_profile_live", "node_id", "profile", unique=True, sqlite_where=_LIVE, postgresql_where=_LIVE),
+        Index("ix_profatt_node_live", "node_id", "deleted_rev"),
+        Index("ix_profatt_profile_live", "profile", "deleted_rev"),
+        CheckConstraint("deleted_rev IS NULL OR deleted_rev > created_rev", name="ck_profatt_revs"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    node_id: Mapped[int] = mapped_column(ForeignKey("node.id", ondelete="CASCADE", name="fk_profatt_node"))
+    profile: Mapped[str] = mapped_column(String(255))
+    position: Mapped[int] = mapped_column(Integer)
+    created_rev: Mapped[int] = mapped_column(ForeignKey("revision.id", name="fk_profatt_created_rev"))
+    deleted_rev: Mapped[int | None] = mapped_column(ForeignKey("revision.id", name="fk_profatt_deleted_rev"))
+
+
 # ------------------------------------------------------------------------ auth
 
 
@@ -280,6 +348,20 @@ class AuditLog(Base):
     # The variable the row is about (node_variable and variable_definition rows), for
     # GET /audit?key= without a node; set by ``audit.record``.
     key: Mapped[str | None] = mapped_column(String(255))
+
+
+class AuditKey(Base):
+    """The variables an audit row changed when there are several (a ``profile.*`` row): ``GET
+    /audit?key=`` matches ``audit_log.key`` or a row here. One-variable rows keep using
+    ``audit_log.key`` alone."""
+
+    __tablename__ = "audit_key"
+    __table_args__ = (Index("ix_audit_key_key", "key", "audit_id"),)
+
+    audit_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), ForeignKey("audit_log.id", ondelete="CASCADE", name="fk_audit_key_audit"), primary_key=True
+    )
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
 
 
 # -------------------------------------------------------------------- snapshots

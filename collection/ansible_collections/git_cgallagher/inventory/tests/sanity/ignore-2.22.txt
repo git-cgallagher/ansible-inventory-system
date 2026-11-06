@@ -11,3 +11,5 @@ plugins/modules/revert.py validate-modules:missing-gplv3-license # collection is
 plugins/modules/variable_info.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
 plugins/modules/tag.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
 plugins/modules/tag_info.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/profile.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)
+plugins/modules/profile_info.py validate-modules:missing-gplv3-license # collection is MIT (GPLv3-compatible)

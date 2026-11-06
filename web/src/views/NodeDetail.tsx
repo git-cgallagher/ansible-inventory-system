@@ -3,7 +3,7 @@ import { api, ApiError, errorText } from "../api";
 import { ImpactSummary, Notice, Provenance, Spinner, StrategyBadge, Value } from "../components";
 import { useApp } from "../context";
 import { href } from "../router";
-import type { InvNode, RenderResult, WriteResult } from "../types";
+import type { InvNode, ProfileRow, RenderResult, WriteResult } from "../types";
 import { SYNTHETIC_KEYS, canEdit } from "../types";
 import { same } from "../value";
 import { NodeActions } from "./NodeActions";
@@ -108,7 +108,8 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
   const keys = Object.keys(data.resolved)
     .filter((k) => !SYNTHETIC_KEYS.has(k))
     .sort();
-  const ownEntry = (k: string) => (data.provenance[k] ?? []).find((c) => c.path === node.path);
+  // Own = set on this node itself; a profile's value applied here is inherited-like (its provenance says so).
+  const ownEntry = (k: string) => (data.provenance[k] ?? []).find((c) => c.path === node.path && !c.profile);
   const own = keys.filter((k) => ownEntry(k));
   const inherited = keys.filter((k) => !ownEntry(k));
 
@@ -261,6 +262,10 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
         )}
       </section>
 
+      {node.kind !== "host" && (
+        <NodeProfiles node={node} attached={data.profiles?.[node.path] ?? []} revision={data.revision} editable={editable} onDone={(text) => { setMsg({ kind: "ok", text }); load(); }} onError={onWriteError} />
+      )}
+
       <section aria-labelledby="inh-title">
         <h2 id="inh-title">Inherited</h2>
         {inherited.length === 0 ? (
@@ -311,5 +316,119 @@ export function NodeDetail({ node, onStructure }: { node: InvNode; onStructure: 
         )}
       </section>
     </div>
+  );
+}
+
+/** The profiles attached to a node (issue 22), in application order, with attach and detach.
+ * Both preview first (a dry run with `If-Match` = the page's revision) and the confirmation
+ * carries the preview's revision, like value edits. */
+function NodeProfiles(props: {
+  node: InvNode;
+  attached: string[];
+  revision: number;
+  editable: boolean;
+  onDone: (text: string) => void;
+  onError: (e: unknown) => boolean;
+}) {
+  const { node, attached, revision, editable } = props;
+  const [names, setNames] = useState<string[] | null>(null);
+  const [choice, setChoice] = useState("");
+  const [pending, setPending] = useState<{ kind: "attach" | "detach"; name: string; preview: WriteResult | null } | null>(null);
+
+  useEffect(() => {
+    if (!editable) return;
+    api<ProfileRow[]>("/api/v1/profiles")
+      .then((rows) => setNames(rows.map((r) => r.name)))
+      .catch(() => setNames([]));
+  }, [editable]);
+
+  const url = (name: string) => `/api/v1/nodes/${node.id}/profiles/${encodeURIComponent(name)}`;
+  const ask = async (kind: "attach" | "detach", name: string) => {
+    setPending({ kind, name, preview: null });
+    try {
+      const preview = await api<WriteResult>(url(name), { method: kind === "attach" ? "PUT" : "DELETE", body: kind === "attach" ? {} : undefined, ifMatch: revision, query: { dry_run: true } });
+      setPending({ kind, name, preview });
+    } catch (e) {
+      setPending(null);
+      props.onError(e);
+    }
+  };
+  const confirm = async () => {
+    if (!pending?.preview) return;
+    const { kind, name, preview } = pending;
+    setPending(null);
+    try {
+      const r = await api<WriteResult>(url(name), { method: kind === "attach" ? "PUT" : "DELETE", body: kind === "attach" ? {} : undefined, ifMatch: preview.revision });
+      setChoice("");
+      props.onDone(`${kind === "attach" ? "Attached" : "Detached"} profile ${name} ${kind === "attach" ? "to" : "from"} ${node.path}: revision ${r.revision}.`);
+    } catch (e) {
+      props.onError(e);
+    }
+  };
+  const available = (names ?? []).filter((n) => !attached.includes(n));
+
+  return (
+    <section aria-labelledby="prof-title">
+      <h2 id="prof-title">Profiles</h2>
+      <p className="muted hint">Applied at this node in this order (a later profile beats an earlier one); the node's own variables beat them all.</p>
+      {attached.length === 0 ? (
+        <p className="muted">No profile attached.</p>
+      ) : (
+        <ol className="profiles" aria-label="Attached profiles">
+          {attached.map((name) => (
+            <li key={name} data-profile={name}>
+              <a href={href("profiles", { name })}>{name}</a>
+              {editable && (
+                <button type="button" className="small secondary" disabled={pending !== null} onClick={() => ask("detach", name)} aria-label={`Detach ${name}`}>
+                  Detach
+                </button>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      {editable && available.length > 0 && (
+        <form
+          className="inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (choice) ask("attach", choice);
+          }}
+        >
+          <label>
+            Profile{" "}
+            <select value={choice} onChange={(e) => { setChoice(e.target.value); setPending(null); }} aria-label="Profile to attach">
+              <option value="">(choose)</option>
+              {available.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>{" "}
+          <button type="submit" className="small" disabled={!choice || pending !== null}>
+            Attach
+          </button>
+        </form>
+      )}
+      {pending && (
+        <div className="preview-row" aria-label={`${pending.kind === "attach" ? "Attaching" : "Detaching"} ${pending.name}`}>
+          {pending.preview?.impact ? (
+            <>
+              <ImpactSummary impact={pending.preview.impact} />
+              <button type="button" className="small" onClick={confirm}>
+                Confirm {pending.kind}
+              </button>{" "}
+              <button type="button" className="small secondary" onClick={() => setPending(null)}>
+                Cancel
+              </button>{" "}
+              <span className="muted">based on revision {pending.preview.revision}</span>
+            </>
+          ) : (
+            <span className="muted">Asking the server what this would change…</span>
+          )}
+        </div>
+      )}
+    </section>
   );
 }

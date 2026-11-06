@@ -279,6 +279,14 @@ front with a 422 that names the limit.
 variable or a tag, not a second parent. Use a **tag** (section 5) for cross-cutting
 *targeting* ("all canary hosts"), and a variable for cross-cutting *configuration*.
 
+**The same role in many branches: a profile, not copies.** Real estates repeat a role
+subtree in every tier × datacenter branch (`…prod.use1.platform.k8s.cluster-a.workers.gpu.a100`
+and its twins in every other branch). If its settings are true for everything below one node,
+set them on that node. If they repeat in several branches, put them in a **profile**
+(section 5) and attach it in each branch: one place to change, nothing to drift. Ask "is this
+value true for everything under X?": yes, put it on X; "is it true for every node of this
+role, wherever it sits?": a profile.
+
 **Precedence against the rest of Ansible.** Everything here is *inventory* variables, and
 Ansible ranks them as such:
 
@@ -486,6 +494,108 @@ The API underneath is `PUT /api/v1/tags/{name}` with the complete member set (de
 and `DELETE /api/v1/tags/{name}`, both with `If-Match`.
 
 `ansible-playbook site.yml --limit canary` then runs on every lab host plus `web01`.
+
+### Profiles
+
+A **profile** is a named bundle of variables that you attach to any number of groups. It is
+how a role's settings stop being copied into every branch of the tree (issue #22: in one
+review estate, 80% of group variable assignments were copies of the same role settings, and
+`gpu_driver` was set in 20 places).
+
+```yaml
+profiles:                       # in an import file (the tree export writes the same)
+  gpu-a100:
+    description: A100 GPU workers
+    vars:
+      gpu_driver: "560.35"
+      node_labels: {gpu: a100}
+all:
+  children:
+    commercial:
+      children:
+        prod:
+          children:
+            use1:
+              children:
+                platform:
+                  children:
+                    k8s:
+                      children:
+                        cluster-a:
+                          children:
+                            workers:
+                              children:
+                                gpu:
+                                  children:
+                                    a100:
+                                      profiles: [gpu-a100]   # attached here (in order)
+                                      vars: {rack: use1-r7}  # the node's own values
+```
+
+**Where the values apply.** At each node a profile is attached to, its values are a level of
+their own **between the node's parent and the node**: below the node's own variables, above
+everything the node inherits. The merge strategies work exactly as for nodes: a `merge`
+dictionary in the profile is merged over the parent's and under the node's own, an `append`
+list adds after the parent's and before the node's. Several profiles on one node apply in the
+node's list order, so the **last profile wins** among them (and the node's own values beat
+them all). Profiles attach to groups (any non-host node), not to hosts: a host's own values
+are already the last word, and the import format has no place for a host's list. Profiles do
+not include other profiles (nesting is not in this version; attach two instead).
+
+**What Ansible sees.** Nothing new. The plugin's export carries the values on the node, as if
+they had been set there, so `ansible-inventory --host` and every playbook see exactly what the
+server's render shows (the parity test proves it, profiles included).
+
+**Changing one is one write.** Bumping the driver everywhere the profile is attached:
+
+```yaml
+- git_cgallagher.inventory.profile:
+    name: gpu-a100
+    vars: {gpu_driver: "570.86"}
+    change: CHG0012345
+```
+
+In check mode (`--check --diff`) the module shows the server's preview: every host under
+every node the profile is attached to whose value would change (a node that sets
+`gpu_driver` itself is not one of them). The same module creates profiles, sets or purges
+values (`purge_vars`), attaches (`attach: [paths]`, appended last in each node's list) and
+detaches (`detach: [paths]`), and deletes (`state: absent`, with `detach_all: true` when it is
+still attached; without it the server refuses and lists the nodes). `profile_info` reads one
+profile (also `revision: N`, as it was then) or lists them.
+
+The API: `GET /api/v1/profiles[/{name}?revision=]`, `PUT /api/v1/profiles/{name}`
+(`description` and the complete `vars`; kept when omitted), `PUT`/`DELETE
+/api/v1/profiles/{name}/vars/{key}`, `DELETE /api/v1/profiles/{name}?detach=true`, and per
+node `PUT /api/v1/nodes/{id}/profiles` (the whole ordered list), `PUT`/`DELETE
+/api/v1/nodes/{id}/profiles/{name}` (attach, optionally at `position`; detach). Every one takes
+`If-Match`, `dry_run=true` (with `impact`) and `X-AIS-Change`, and leaves one audit row
+(`profile.create`, `profile.update`, `profile.delete`, `profile.attach`, `profile.detach`,
+`node.profiles`), which `POST /api/v1/revisions/{id}/revert` undoes exactly. In the UI, the
+**Profiles** page edits values with the same editor and preview as a node, and lists where a
+profile is attached; a node's page lists its profiles with attach and detach (both previewed).
+
+**Everything else knows about them.**
+
+- **History.** Profiles are temporal like nodes: a pinned revision (`revision:` in the plugin,
+  the render's `revision`, `GET /api/v1/profiles/{name}?revision=`) sees the profile and its
+  attachments as they were.
+- **Provenance.** The render (and the node page) shows a profile's value as
+  `profile:gpu-a100 @ all.commercial.prod.use1.…a100`; a node's "Variables set here" lists only
+  its own values.
+- **Search.** `GET /api/v1/vars?key=gpu_driver` (`ais vars`, the Search page) lists each
+  attachment that carries the key with `profile` and `source`, plus `profiles`, the profiles
+  that hold it; `/vars/hosts` says `profile` when a host's value comes from one.
+- **Audit.** `GET /api/v1/audit?key=gpu_driver` finds the profile writes that changed it.
+- **Schemas and typos.** A definition's `json_schema` checks profile values like node values,
+  and typo warnings and strict mode count a profile as one more place a key is set
+  (`profile:gpu-a100` in the warning). The schema checks each stored value on its own, so
+  attaching a profile can never make one of its values invalid.
+- **Moves, deletes, restores.** A move carries a node's profiles with it; a delete detaches
+  them with the subtree; a restore attaches them again but never rolls the profile itself
+  back (it is shared, so its values are today's), and refuses (409) when one of its profiles
+  no longer exists: recreate the profile first.
+- **Import and export.** An import creates missing profiles and sets the values it lists (it
+  is additive, like node values); a node's `profiles:` list, when given, is set exactly.
 
 ## 6. Declare variables
 
@@ -1108,7 +1218,8 @@ As of 0.3.0:
 - **Roles are global.** No per-subtree permissions.
 - **No secret storage.** Store lookups instead (section 9).
 - **No published container image.** Build from a tagged checkout.
-- **No `tag` module.** Use the API or UI.
+- **No profile nesting.** A profile can't include another one; attach both to the node.
+- **No profiles on hosts.** Attach to the host's group, or set the host's own values.
 - **Tree exports leave out node `meta`.** The import format has no place for it.
 - **No user-management page.** Use the CLI or `/api/v1/users`.
 - **Writes slow down with size.** About 3.3 s each at 100,000 hosts.

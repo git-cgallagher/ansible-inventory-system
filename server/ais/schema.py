@@ -9,7 +9,10 @@ level is the normal case, so a schema should not mark its keys ``required``). A
 Enforced on every path that writes a value or a schema: ``PUT …/vars/{key}``, the
 ``vars`` of ``POST /nodes``, the importer (CLI and ``POST /import``) and
 ``PUT /variables/{name}``, which also re-checks every live value of that key so a new
-schema can never leave the tree in a state it rejects. Draft 2020-12 unless the schema
+schema can never leave the tree in a state it rejects. A profile's values (issue #22) are
+contributions like a node's and are checked the same way, named ``profile:<name>``: the
+check does not depend on where a value applies, so attaching a profile can never make one
+of its values fail (there is nothing to re-check on attach). Draft 2020-12 unless the schema
 names another ``$schema``; ``format`` is not asserted.
 """
 
@@ -21,7 +24,7 @@ from jsonschema import Draft202012Validator, exceptions, validators
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ais.models import Node, NodeVariable, VariableDefinition
+from ais.models import Node, NodeVariable, ProfileVariable, VariableDefinition
 
 MAX_REPORTED = 5
 
@@ -87,5 +90,19 @@ def check_live(session: Session, *, keys: set[str] | None = None, created_rev: i
             bad.append(f"{key} at {path}: {msg}")
             if len(bad) >= MAX_REPORTED:
                 break
+    if len(bad) < MAX_REPORTED:
+        pstmt = (
+            select(ProfileVariable.key, ProfileVariable.value, ProfileVariable.created_rev, ProfileVariable.profile)
+            .where(ProfileVariable.deleted_rev.is_(None), ProfileVariable.key.in_(list(schemas)))
+            .order_by(ProfileVariable.profile, ProfileVariable.key)
+        )
+        for key, value, rev, name in session.execute(pstmt):
+            if key not in wanted and rev != created_rev:
+                continue
+            msg = problem(schemas[key], value)
+            if msg is not None:
+                bad.append(f"{key} at profile:{name}: {msg}")
+                if len(bad) >= MAX_REPORTED:
+                    break
     if bad:
         raise SchemaViolation("values do not match their json_schema: " + "; ".join(bad))

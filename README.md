@@ -71,9 +71,17 @@ way to write to it, secrets, roles and troubleshooting. This README is the short
   under it. Tag names follow the node name rule (letters, digits, `_`, `-`) and a `-` becomes `_`
   in the group, as for nodes (`gpu-canary` is the group `gpu_canary`); a name whose group is
   another tag's or a hierarchy group's is refused (422).
+- **Profiles** (role templates): a named bundle of variables (`gpu-a100: {gpu_driver: …}`)
+  attached to any number of groups. At each node it applies as a level between the node's
+  parent and the node (below the node's own values, same merge strategies; several on one node
+  apply in the node's list order, the last wins). Bumping a value is one write that reaches
+  every node it is attached to, previewed host by host. The plugin sees plain group vars, the
+  render's provenance says `profile:gpu-a100 @ <path>`, and history, search, audit, schemas,
+  revert, import/export and the UI all know them. `PUT /api/v1/profiles/{name}`, the `profile`
+  module, a `profiles:` block in the import format; see the guide's "Profiles".
 - **Tree export** (`GET /api/v1/tree`, `ais export-tree`) writes the tree or one subtree, at
   any revision, in the format `ais import` and `POST /api/v1/import` read: nodes with their
-  kinds and own values, the declarations they use, and tags. Importing it reproduces the
+  kinds, attached profiles and own values, the declarations and profiles they use, and tags. Importing it reproduces the
   inventory, so backup, cloning (`as=` re-roots the copy, `hosts=false` leaves hosts out) and keeping the tree in Git
   are one call each. The import format takes `tags:` (member paths, additive).
 - **Preview any write** (`dry_run`): every write route runs the write with all its checks,
@@ -237,6 +245,12 @@ audited with `source=module`. All support check mode and `--diff`.
         key: log_level
         value: error
 
+    - name: One role's settings, attached wherever the role appears (one write to change)
+      git_cgallagher.inventory.profile:
+        name: cache-role
+        vars: {redis_maxmemory: 2gb}
+        attach: [all.commercial.prod.dc1.cache]
+
     - name: What would a host there see?
       git_cgallagher.inventory.render_info:
         path: all.commercial.prod.dc1.cache
@@ -358,9 +372,10 @@ port for a TLS proxy); see section 3 of the getting-started guide.
 | Node lookup | `GET /api/v1/nodes?q=<text>[&kind=host&kind=…][&subtree=][&revision=][&limit=20]`: at most `limit` (1–100, default 20) live nodes whose name or path contains `q`, ignoring case, ranked exact name, name prefix, path prefix, name substring, path substring (path order within each). Any of `q`, `kind`, `limit` selects this bounded lookup; without them the route lists every node as before | viewer |
 | Reads | `GET /api/v1/nodes[?subtree=&revision=]` (every node, unbounded), `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions[?change=&before=&limit=]` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
+| Profiles | `GET /api/v1/profiles` (name, description, keys, attached count), `GET /profiles/{name}?revision=` (values and `attached` `[{path, kind, position}]`) (viewer); `PUT /profiles/{name}` (`description`, `vars` = the complete set; kept when omitted), `PUT/DELETE /profiles/{name}/vars/{key}`, `DELETE /profiles/{name}` (409 while attached unless `?detach=true`), `PUT /nodes/{id}/profiles` (`profiles` = the node's ordered list), `PUT/DELETE /nodes/{id}/profiles/{name}` (attach, optional `position`; detach) (editor, `If-Match`, `dry_run`) | viewer / editor |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
 | Revert (`If-Match`) | `POST /api/v1/revisions/{id}/revert`, `POST /api/v1/changes/{change}/revert` (`force`, `dry_run`, `message`; 201): one new revision; 409 `conflict` (with `conflicts`) when a later revision changed the same things, 409 `already reverted`, 422 when nothing recorded can be inverted; `dry_run` needs no `If-Match` and adds `impact` (and `hosts_changed`/`hosts`, its older names) | editor |
-| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `PUT/DELETE /tags/{name}`, `POST /import` (a no-op answers 200 `changed: false`). Writes that store values answer `warnings` + `warnings_total` (undeclared keys that look like typos); with `AIS_STRICT_KEYS=true` a new undeclared key is a 422 `undeclared key` (restore and revert excepted) | editor |
+| Writes (`If-Match`) | `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `DELETE /nodes/{id}` (a node with descendants needs `?recursive=true` or `?expect_count=<subtree size>`, else 409 with the counts), `POST /nodes/restore` (`path`, `revision`, `dry_run`; 201), `POST /nodes/{id}/move`, `PUT/DELETE /nodes/{id}/vars/{key}`, `PUT/DELETE /variables/{name}`, `PUT/DELETE /tags/{name}`, the profile routes, `POST /import` (a no-op answers 200 `changed: false`). Writes that store values answer `warnings` + `warnings_total` (undeclared keys that look like typos); with `AIS_STRICT_KEYS=true` a new undeclared key is a 422 `undeclared key` (restore and revert excepted) | editor |
 | Dry run (any write) | `?dry_run=true` on every write route above (and on tags); `"dry_run": true` in the body of `POST /import`, `/nodes/restore` and the revert routes. Runs the write and every check it runs, rolls back, answers 200 with the write's body (ids it would allocate `null`), `dry_run: true`, `revision` = the base revision, and `impact`: `total`, `vars_changed`, `added`, `removed`, `regrouped`, `moved`, `hosts` (by path, with `added`/`removed`/`changed` keys, `joined`/`left` groups, `moved_from`), `groups` (`joined`/`left` counts), `groups_total`, `limit` (200), `truncated`. Refuses exactly what the write refuses. No `If-Match` needed; one that is sent must be current (409) | editor |
 | Audit | `GET /api/v1/audit?actor=&action=&target_type=&target_id=&revision=&request_id=&change=&since=&until=&limit=&before=`; `node=<id or path>[&key=]` = that node's (and its variables') rows under every id it had (across moves, renames and restores); `key=` alone = that variable's set/unset rows on every node and its definition's rows; `subtree=` = rows whose recorded path (as written then) is at or below it | editor |
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST/GET/DELETE /tokens`; `GET/POST/PATCH /users` | any / admin |

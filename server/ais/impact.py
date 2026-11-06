@@ -29,6 +29,12 @@ Bounding rules (what keeps a write at ``all`` from resolving 100k hosts in full)
   ``removed`` and need no values. Their groups are compared too.
 * A merge strategy changed for k: the hosts under the nodes that set k, key k only. A
   schema- or description-only change touches no host.
+* Profiles (issue #22; temporal rows, so read like values): a profile value written or
+  removed (key k of profile P): the hosts under every node P is attached to, at the base
+  revision and at R, key k only. A node's profile list changed (attachment rows opened or
+  closed: attach, detach, reorder, and every move or delete): the hosts under that node,
+  every key of the profiles involved. "Keys set on a strict ancestor" (structure) and "the
+  nodes that set k" (strategies) count a profile attached there as setting its keys.
 * An ``inventory_name`` or a tag membership changed: the hosts under those nodes, groups
   only.
 
@@ -59,8 +65,21 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ais.audit import current_change
-from ais.models import PATH_SEP, TAGGED_KINDS, MergeStrategy, Node, NodeKind, NodeVariable, Revision, Tag, TagMember, VariableDefinition
-from ais.resolver import Snapshot, _emitted, _live_at, _under, current_revision, group_name, sanitize, tag_group_name
+from ais.models import (
+    PATH_SEP,
+    TAGGED_KINDS,
+    MergeStrategy,
+    Node,
+    NodeKind,
+    NodeVariable,
+    ProfileAttachment,
+    ProfileVariable,
+    Revision,
+    Tag,
+    TagMember,
+    VariableDefinition,
+)
+from ais.resolver import Snapshot, _emitted, _live_at, _under, current_revision, group_name, load_profile_layers, sanitize, tag_group_name
 from ais.varsearch import canonical
 
 LIMIT = 200  # hosts (and groups) listed; the counts are always exact
@@ -218,9 +237,31 @@ def _paths_of(session: Session, ids: set[int]) -> set[str]:
     return out
 
 
-def _keys_on(session: Session, paths: set[str], rev: int) -> set[str]:
-    """Keys set (live at ``rev``) on the nodes at ``paths``."""
+def _profile_keys(session: Session, names: set[str], rev: int) -> set[str]:
+    """Every key the profiles ``names`` set at ``rev``."""
     out: set[str] = set()
+    for chunk in _chunks(sorted(names)):
+        out.update(session.scalars(select(ProfileVariable.key).where(ProfileVariable.profile.in_(chunk), _live_at(ProfileVariable, rev)).distinct()))
+    return out
+
+
+def _attached_paths(session: Session, names: set[str], rev: int) -> set[str]:
+    """Paths of the nodes the profiles ``names`` are attached to at ``rev``."""
+    out: set[str] = set()
+    for chunk in _chunks(sorted(names)):
+        stmt = (
+            select(Node.path)
+            .join(ProfileAttachment, ProfileAttachment.node_id == Node.id)
+            .where(ProfileAttachment.profile.in_(chunk), _live_at(ProfileAttachment, rev), _live_at(Node, rev))
+        )
+        out.update(session.scalars(stmt))
+    return out
+
+
+def _keys_on(session: Session, paths: set[str], rev: int) -> set[str]:
+    """Keys set (live at ``rev``) on the nodes at ``paths``: their own and their profiles'."""
+    out: set[str] = set()
+    names: set[str] = set()
     for chunk in _chunks(sorted(paths)):
         stmt = (
             select(NodeVariable.key)
@@ -229,12 +270,22 @@ def _keys_on(session: Session, paths: set[str], rev: int) -> set[str]:
             .distinct()
         )
         out.update(session.scalars(stmt))
-    return out
+        names.update(
+            session.scalars(
+                select(ProfileAttachment.profile)
+                .join(Node, Node.id == ProfileAttachment.node_id)
+                .where(Node.path.in_(chunk), _live_at(Node, rev), _live_at(ProfileAttachment, rev))
+                .distinct()
+            )
+        )
+    return out | (_profile_keys(session, names, rev) if names else set())
 
 
 def _setters(session: Session, keys: set[str], rev: int) -> set[str]:
-    """Paths of the nodes that set any of ``keys`` at ``rev`` (``ix_nodevar_key_live``)."""
+    """Paths of the nodes that set any of ``keys`` at ``rev`` (``ix_nodevar_key_live``),
+    their own values or an attached profile's."""
     out: set[str] = set()
+    names: set[str] = set()
     for chunk in _chunks(sorted(keys)):
         stmt = (
             select(Node.path)
@@ -242,7 +293,8 @@ def _setters(session: Session, keys: set[str], rev: int) -> set[str]:
             .where(NodeVariable.key.in_(chunk), _live_at(NodeVariable, rev), _live_at(Node, rev))
         )
         out.update(session.scalars(stmt))
-    return out
+        names.update(session.scalars(select(ProfileVariable.profile).where(ProfileVariable.key.in_(chunk), _live_at(ProfileVariable, rev)).distinct()))
+    return out | (_attached_paths(session, names, rev) if names else set())
 
 
 def _scope(session: Session, base: int, rev: int, before: _Fixed, after: _Fixed) -> _Scope:
@@ -271,6 +323,30 @@ def _scope(session: Session, base: int, rev: int, before: _Fixed, after: _Fixed)
     for path, key in session.execute(stmt):
         paths.add(path)
         keys.add(key)
+
+    # Profile values: the hosts under every node the profile is attached to, on either side.
+    touched: set[str] = set()
+    for name, key in session.execute(
+        select(ProfileVariable.profile, ProfileVariable.key).where(or_(ProfileVariable.created_rev == rev, ProfileVariable.deleted_rev == rev)).distinct()
+    ):
+        touched.add(name)
+        keys.add(key)
+    if touched:
+        paths |= _attached_paths(session, touched, base) | _attached_paths(session, touched, rev)
+
+    # Profile lists: the hosts under the node, every key of the profiles that came or went
+    # (or moved in the order).
+    relisted: set[str] = set()
+    for path, name in session.execute(
+        select(Node.path, ProfileAttachment.profile)
+        .join(Node, Node.id == ProfileAttachment.node_id)
+        .where(or_(ProfileAttachment.created_rev == rev, ProfileAttachment.deleted_rev == rev))
+        .distinct()
+    ):
+        paths.add(path)
+        relisted.add(name)
+    if relisted:
+        keys |= _profile_keys(session, relisted, base) | _profile_keys(session, relisted, rev)
 
     # Strategies: the hosts under the nodes that set the key.
     restrategized = {k for k in set(before.strategies) | set(after.strategies) if before.strategy(k) is not after.strategy(k)}
@@ -341,7 +417,9 @@ def _capture(session: Session, rev: int, fixed: _Fixed, scope: _Scope, rows: tup
                 if node_id in nodes:
                     vars_by_node.setdefault(node_id, {})[key] = value
     tags: dict[str, list[int]] = {name: [i for i in ids if i in nodes] for name, ids in fixed.tags.items()}
-    snap = Snapshot(rev, nodes, {n.path: n for n in nodes.values()}, vars_by_node, dict(fixed.strategies), tags)  # type: ignore[arg-type]
+    # Profiles attach to non-host nodes only, so every attachment's node is in ``nodes``.
+    layers = load_profile_layers(session, rev, nodes, keys=scope.keys) if scope.keys else {}
+    snap = Snapshot(rev, nodes, {n.path: n for n in nodes.values()}, vars_by_node, dict(fixed.strategies), tags, layers)  # type: ignore[arg-type]
 
     keys = sorted(scope.keys)
     setter_memo: dict[int, dict[str, int]] = {}
@@ -357,8 +435,9 @@ def _capture(session: Session, rev: int, fixed: _Fixed, scope: _Scope, rows: tup
         parent = nodes.get(n.parent_id) if n.parent_id is not None else None
         out = setters(parent) if parent is not None else no_setters
         own = vars_by_node.get(n.id)
-        if own:
-            mine = [k for k in keys if k in own]
+        attached = layers.get(n.id)
+        if own or attached:
+            mine = [k for k in keys if snap.sets(n.id, k)]
             if mine:
                 out = dict(out)
                 out.update((k, n.id) for k in mine)

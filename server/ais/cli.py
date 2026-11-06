@@ -414,14 +414,16 @@ def _vars(args: argparse.Namespace) -> int:
         print(f"{what}: {out['total']} host(s) match, {out['with_key']} have it, {out['without_key']} do not")
         print("values: " + ", ".join(f"{show(v['value'])} x{v['hosts']}" for v in out["values"]) + (" ..." if out["values_truncated"] else ""))
         for r in rows:
-            origin = f"folded from {' + '.join(r['sources'])}" if "sources" in r else f"from {r['from']}"
+            origin = f"folded from {' + '.join(r['sources'])}" if "sources" in r else f"from {r.get('source', r['from'])}"
             print(f"{r['host']}\t{show(r['value'])}\t{origin}")
     else:
         print(f"{what}: set on {out['total']} node(s)")
         for r in rows:
             extra = f"\t(emits {show(r['effective'])})" if "effective" in r else ""
             above = "\t(above the subtree)" if r.get("above_subtree") else ""
-            print(f"{r['path']}\t{show(r['value'])}{extra}{above}")
+            print(f"{r.get('source', r['path'])}\t{show(r['value'])}{extra}{above}")
+        for p in out.get("profiles") or []:
+            print(f"profile:{p['name']}\t{show(p['value'])}\t(the profile itself)")
     if out["total"] > out["offset"] + len(rows):
         print(f"... {out['total'] - out['offset'] - len(rows)} more (--offset {out['offset'] + len(rows)})", file=sys.stderr)
     return 0

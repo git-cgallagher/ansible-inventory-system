@@ -4,6 +4,8 @@ Format::
 
     variables:                  # optional per-variable declarations
       packages: {merge_strategy: unique_append}
+    profiles:                   # optional: named bundles of variables (issue #22)
+      gpu-a100: {description: A100 nodes, vars: {gpu_driver: "560.35"}}
     all:
       vars: {ntp_server: time.example.com}
       children:
@@ -15,6 +17,7 @@ Format::
                 dc1:
                   children:
                     web:
+                      profiles: [gpu-a100]   # attached, in order (non-host nodes)
                       vars: {...}
                       hosts:
                         web01: {ansible_host: 10.0.0.1}
@@ -231,10 +234,16 @@ class ImportResult:
     # it is what a revert of the import puts back (``ais.revert``).
     definitions_before: dict[str, Any] = field(default_factory=dict)
     tags_before: dict[str, Any] = field(default_factory=dict)
+    # Profiles created or changed, and nodes whose profile list changed (temporal rows: a
+    # revert reads them back from the rows, the audit row needs no ``before`` for them).
+    profiles_changed: list[str] = field(default_factory=list)
+    attachments_changed: int = 0
 
     @property
     def changed(self) -> bool:
-        return bool(self.nodes_created or self.variables_set or self.definitions_changed or self.tags_changed)
+        return bool(
+            self.nodes_created or self.variables_set or self.definitions_changed or self.tags_changed or self.profiles_changed or self.attachments_changed
+        )
 
     def summary(self) -> dict[str, Any]:
         """The counts ``POST /import``, ``ais import`` and the audit row report."""
@@ -243,6 +252,8 @@ class ImportResult:
             "variables_set": self.variables_set,
             "definitions": self.definitions_changed,
             "tags": self.tags_changed,
+            "profiles": self.profiles_changed,
+            "attachments": self.attachments_changed,
         }
 
     def before(self) -> dict[str, Any]:
@@ -273,12 +284,25 @@ def import_tree(session: Session, data: dict[str, Any], *, actor: str = "import"
 
 
 def import_tree_report(
-    session: Session, data: dict[str, Any], *, actor: str = "import", message: str | None = None, rev: Revision | None = None
+    session: Session,
+    data: dict[str, Any],
+    *,
+    actor: str = "import",
+    message: str | None = None,
+    rev: Revision | None = None,
+    profile_values: bool = True,
 ) -> ImportResult:
     """Import ``data`` under one new revision (or under ``rev``, which a revert passes so
     that its restores share its one revision; the counts are then this import's own).
     Additive: creates missing nodes and sets the given variables, definitions and tag
-    memberships; never deletes, moves or re-kinds anything, and never removes a tag member."""
+    memberships; never deletes, moves or re-kinds anything, and never removes a tag member.
+
+    Profiles: a missing profile is created; an existing one gets the given ``description``
+    and the given variables set (additive: a key the file leaves out stays). A node's
+    ``profiles`` list, when given, is set exactly (attach, detach, reorder). With
+    ``profile_values=False`` (a restore) the ``profiles:`` block only has to name live
+    profiles and never changes them: a shared profile is not rolled back by restoring one
+    subtree, the way the export's ancestors are structure only."""
     if not isinstance(data, dict) or "all" not in data:
         raise ImportError_("top-level 'all' is required")
     nodes_before = variables_before = 0
@@ -313,8 +337,9 @@ def import_tree_report(
         session.add(definition)
         changed_defs.append(name)
 
+    changed_profiles = _import_profiles(session, data.get("profiles"), rev, converge=profile_values)
     root = get_or_create_node(session, None, "all", NodeKind.all, rev)
-    _import_node(session, root, data["all"], rev)
+    attachments = _import_node(session, root, data["all"], rev)
     session.flush()
     tags_before: dict[str, Any] = {}
     changed_tags = _import_tags(session, data.get("tags"), tags_before)
@@ -331,6 +356,8 @@ def import_tree_report(
         tags_changed=sorted(changed_tags),
         definitions_before={k: defs_before[k] for k in sorted(changed_defs)},
         tags_before={k: tags_before[k] for k in sorted(changed_tags)},
+        profiles_changed=sorted(changed_profiles),
+        attachments_changed=attachments,
     )
 
 
@@ -401,7 +428,62 @@ def _import_tags(session: Session, spec: Any, before: dict[str, Any] | None = No
     return changed
 
 
-def _import_node(session: Session, root: Node, spec: dict[str, Any], rev: Revision) -> None:
+def _import_profiles(session: Session, spec: Any, rev: Revision, *, converge: bool) -> list[str]:
+    """``profiles: {name: {description, vars}}``, before the tree (nodes attach them).
+    Returns the names it created or changed."""
+    from ais import profiles
+
+    if not spec:
+        return []
+    if not isinstance(spec, dict):
+        raise ImportError_("'profiles' must be a mapping of profile name to {description, vars}")
+    changed: list[str] = []
+    for name, pspec in spec.items():
+        error = profiles.name_error(name)
+        if error:
+            raise ImportError_(error)
+        pspec = pspec or {}
+        if not isinstance(pspec, dict) or not set(pspec) <= {"description", "vars"}:
+            raise ImportError_(f"profile {name!r}: expected a mapping with 'description' and 'vars'")
+        values = pspec.get("vars") or {}
+        if not isinstance(values, dict):
+            raise ImportError_(f"profile {name!r}: 'vars' must be a mapping")
+        current = profiles.doc(session, name)
+        if not converge:
+            if current is None:
+                raise ImportError_(f"profile {name!r} does not exist now: recreate it first")
+            continue
+        wanted = {
+            "description": pspec["description"] if "description" in pspec else (current or {}).get("description"),
+            "vars": {**((current or {}).get("vars") or {}), **values},
+        }
+        if current is not None and current["description"] == wanted["description"] and not profiles.changed_keys(current, wanted):
+            continue
+        try:
+            profiles.set_profile(session, rev, name, wanted)
+        except profiles.ProfileError as exc:
+            raise ImportError_(str(exc)) from exc
+        changed.append(name)
+    return changed
+
+
+def _set_profiles(session: Session, node: Node, spec: dict[str, Any], rev: Revision) -> int:
+    """A node's ``profiles: [name, ...]``, set exactly when given; 1 when it changed."""
+    from ais import profiles
+
+    if "profiles" not in spec:
+        return 0
+    names = spec.get("profiles") or []
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ImportError_(f"{node.path}: 'profiles' must be a list of profile names")
+    try:
+        before, after = profiles.set_node_profiles(session, rev, node, names)
+    except profiles.ProfileError as exc:
+        raise ImportError_(f"{node.path}: {exc}") from exc
+    return int(before != after)
+
+
+def _import_node(session: Session, root: Node, spec: dict[str, Any], rev: Revision) -> int:
     """Walk the tree depth first with an explicit stack, in the same order the recursive
     version used (a node's vars, then each child subtree in order, then its hosts), so
     depth is bounded by ``check_position`` and never by Python's recursion limit."""
@@ -409,6 +491,7 @@ def _import_node(session: Session, root: Node, spec: dict[str, Any], rev: Revisi
     # ("child", parent, (name, spec)): create the child, then handle it as a node.
     # ("hosts", node, spec): create the node's hosts once every child subtree is done.
     stack: list[tuple[str, Node, Any]] = [("node", root, spec or {})]
+    attachments = 0
     while stack:
         step, node, item = stack.pop()
         if step == "hosts":
@@ -422,9 +505,11 @@ def _import_node(session: Session, root: Node, spec: dict[str, Any], rev: Revisi
             node = get_or_create_node(session, node, name, kind, rev, child_spec.get("inventory_name"))
             item = child_spec
         set_variables(session, node, item.get("vars") or {}, rev)
+        attachments += _set_profiles(session, node, item, rev)
         stack.append(("hosts", node, item))
         for child_name, child_spec in reversed(list((item.get("children") or {}).items())):
             stack.append(("child", node, (child_name, child_spec or {})))
+    return attachments
 
 
 def import_file(session: Session, path: str | Path, **kw: Any) -> Revision:

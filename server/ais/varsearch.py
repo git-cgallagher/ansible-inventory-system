@@ -15,6 +15,14 @@ revision (temporal rows, like everything in ``ais.resolver``):
   contributor's emitted value wins (``tests/test_varsearch.py`` checks it host by host against
   ``resolve``). No second resolver: the fold is ``_emitted``'s.
 
+Profiles (issue #22) count as setting a key wherever they are attached: ``where_set`` lists
+each attachment of a profile that holds the key as an item with ``profile`` and ``source``
+(``profile:gpu-a100 @ <path>``), the node's own value (if any) after it, plus the profiles
+that hold the key (``profiles``, attached or not); ``host_values`` says ``profile`` when a
+host's value comes from a profile, and a fold's ``sources`` name each profile layer the
+same way. The value a profile contributes is the profile's value; the fold runs over the
+layers in application order (``Snapshot.layers``).
+
 ``value`` matching (both): the text is parsed as JSON (``550.90`` is a number, ``"550.90"`` a
 string, ``[1, 2]`` a list); text that is not valid JSON is matched as a plain string
 (``nvidia-550``). Values are compared as canonical JSON, so ``1`` does not match ``true`` and
@@ -34,8 +42,8 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from ais.models import MergeStrategy, Node, NodeKind, NodeVariable, VariableDefinition
-from ais.resolver import _emitted, _live_at, _under, current_revision, fold, load_snapshot
+from ais.models import MergeStrategy, Node, NodeKind, NodeVariable, ProfileAttachment, ProfileVariable, VariableDefinition
+from ais.resolver import _emitted, _live_at, _under, current_revision, fold, load_snapshot, profile_source
 
 MAX_VALUES = 50  # distinct resolved values summarized in ``host_values``'s ``values``
 
@@ -101,7 +109,8 @@ def where_set(
 ) -> dict[str, Any]:
     """The nodes that set ``key`` themselves, by path. ``KeyError`` for an unknown subtree.
 
-    Each item: ``id``, ``path``, ``kind``, ``value`` (the node's own value) and, for a fold
+    Each item: ``id``, ``path``, ``kind``, ``value`` (the node's own value, or with ``profile``
+    and ``source`` an attached profile's) and, for a fold
     strategy, ``effective`` (the cumulative fold the node emits, what its hosts get unless a
     deeper node contributes too). With ``subtree``, ancestors of it that set the key are
     listed first with ``above_subtree: true``."""
@@ -113,32 +122,55 @@ def where_set(
         .where(NodeVariable.key == key, _live_at(NodeVariable, rev), _live_at(Node, rev))
     )
     ancestors: set[str] = set()
+    node_scope = None
     if subtree:
         root = _scope_root(session, subtree, rev)
         ancestors = set(root.ancestors_paths()[:-1])
-        stmt = stmt.where(or_(Node.path.in_(root.ancestors_paths()), _under(session, subtree)))
-    rows = sorted(session.execute(stmt).all(), key=lambda r: r[0].path)
+        node_scope = or_(Node.path.in_(root.ancestors_paths()), _under(session, subtree))
+        stmt = stmt.where(node_scope)
+    # (node, layer order, profile or None, value): a node's profiles (by position), then its own.
+    entries: list[tuple[Node, tuple[int, int], str | None, Any]] = [(node, (1, 0), None, value) for node, value in session.execute(stmt).all()]
 
-    # The fold each setter emits. Every ancestor that sets the key is in ``rows`` (the scope
-    # keeps the subtree's ancestors), and rows are sorted by path, so an ancestor's fold is
-    # ready before its descendants'. Same rule as ``resolver._emitted``, for one key.
-    effective: dict[str, Any] = {}
+    held = dict(session.execute(select(ProfileVariable.profile, ProfileVariable.value).where(ProfileVariable.key == key, _live_at(ProfileVariable, rev))).all())
+    if held:
+        pstmt = (
+            select(Node, ProfileAttachment.profile, ProfileAttachment.position)
+            .join(ProfileAttachment, ProfileAttachment.node_id == Node.id)
+            .where(ProfileAttachment.profile.in_(sorted(held)), _live_at(ProfileAttachment, rev), _live_at(Node, rev))
+        )
+        if node_scope is not None:
+            pstmt = pstmt.where(node_scope)
+        entries += [(node, (0, position), name, held[name]) for node, name, position in session.execute(pstmt).all()]
+    entries.sort(key=lambda e: (e[0].path, e[1]))
+
+    # The fold each layer emits. Every ancestor that sets the key is in ``entries`` (the scope
+    # keeps the subtree's ancestors), and entries are sorted by path then layer, so an
+    # ancestor's fold is ready before its descendants'. Same rule as ``resolver._emitted``.
+    effective: list[Any] = []
     if strategy is not MergeStrategy.replace:
-        for node, value in rows:
-            parent_fold = None
-            for p in reversed(node.ancestors_paths()[:-1]):
-                if p in effective:
-                    parent_fold = effective[p]
-                    break
-            effective[node.path] = fold(strategy, parent_fold, value)
+        final: dict[str, Any] = {}
+        for node, _order, _name, value in entries:
+            if node.path in final:
+                parent_fold = final[node.path]
+            else:
+                parent_fold = None
+                for p in reversed(node.ancestors_paths()[:-1]):
+                    if p in final:
+                        parent_fold = final[p]
+                        break
+            final[node.path] = fold(strategy, parent_fold, value)
+            effective.append(final[node.path])
 
     items: list[dict[str, Any]] = []
-    for node, value in rows:
+    for i, (node, _order, name, value) in enumerate(entries):
         if not wanted.matches(value):
             continue
         item: dict[str, Any] = {"id": node.id, "path": node.path, "kind": node.kind.value, "value": value}
+        if name is not None:
+            item["profile"] = name
+            item["source"] = profile_source(name, node.path)
         if strategy is not MergeStrategy.replace:
-            item["effective"] = effective[node.path]
+            item["effective"] = effective[i]
         if subtree:
             item["above_subtree"] = node.path in ancestors
         items.append(item)
@@ -148,6 +180,8 @@ def where_set(
         "limit": limit,
         "offset": offset,
         "nodes": items[offset : offset + limit],
+        # Every profile that holds the key (attached or not), with its value.
+        "profiles": [{"name": n, "value": v} for n, v in sorted(held.items()) if wanted.matches(v)],
     }
 
 
@@ -184,7 +218,7 @@ def host_values(
     for node in snap.nodes.values():
         if node.kind is not NodeKind.host:
             continue
-        contributors = [anc for anc in snap.chain(node) if key in snap.vars_by_node.get(anc.id, ())]
+        contributors = [anc for anc in snap.chain(node) if snap.sets(anc.id, key)]
         if not contributors:
             without_key += 1
             continue
@@ -194,8 +228,14 @@ def host_values(
         if not wanted.matches(value):
             continue
         item: dict[str, Any] = {"host": node.name, "path": node.path, "value": value, "from": contributors[-1].path}
+        top = [name for name, values in snap.layers(contributors[-1].id) if key in values][-1]
+        if top is not None:  # the deepest contribution is a profile's (the node sets no own value)
+            item["profile"] = top
+            item["source"] = profile_source(top, contributors[-1].path)
         if folds:
-            item["sources"] = [c.path for c in contributors]
+            item["sources"] = [
+                c.path if name is None else profile_source(name, c.path) for c in contributors for name, values in snap.layers(c.id) if key in values
+            ]
         items.append(item)
     items.sort(key=lambda i: i["path"])
     common = counts.most_common(MAX_VALUES)

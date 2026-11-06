@@ -29,7 +29,28 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   server render == `ansible-inventory --host`. Any change to the resolver, exporter or
   plugin that breaks it is wrong by definition, not "a test to update".
 - **One path per node.** No multiple parents, no cross-cutting layers. Cross-cutting
-  convenience = var-less tag groups only. **Tags never carry variables.**
+  convenience = var-less tag groups only. **Tags never carry variables.** Profiles (below) are
+  not a second parent: a profile's values are folded into the node it is attached to.
+- **Profiles are a level between a node's parent and the node** (issue #22, `ais.profiles`,
+  `api_profiles.py`). `Snapshot.layers(node)` = the attached profiles' values in the node's
+  list order, then the node's own; `resolver._emitted` folds over layers, so the plugin export
+  carries profile values on the node as if set there and the parity test covers them (the seed
+  attaches `web-baseline`). `vars_by_node` stays **own** values only: the tree export writes
+  it, and every "who contributes key k at node n" question must use `Snapshot.sets` /
+  `layers` (varsearch, impact's setters, provenance), never `vars_by_node` alone. Profiles
+  attach to **non-host** nodes only (the import format has no place for a host's list) and do
+  not nest. All three tables (`profile`, `profile_variable`, `profile_attachment`) are
+  temporal and keyed by profile **name** (the `profile` row is reopened on a description
+  change); never UPDATE a value or position in place. The unit of attachment change is a
+  node's ordered list (`profiles.set_node_profiles`: dense positions 0..n-1, first = lowest
+  precedence); its audit row (`profile.attach`/`profile.detach`/`node.profiles`, target the
+  node) holds the list before and after. Profile rows (`profile.create`/`update`/`delete`,
+  target `profile`) hold the doc before and after (a delete also every detached node's list)
+  and list the changed keys in `audit_key`. `move_subtree` copies attachments, `delete_subtree`
+  closes them; a **restore never rolls a profile back** (`profile_values=False`: it is shared)
+  and refuses (409) a profile that no longer exists. No `check_export` on profile writes
+  (nothing they change names a group). `load_snapshot(paths=|keys=)` filters attachments and
+  profile values the same way.
 - **Fold is emitted at every contributing node as the cumulative fold** from the root
   (`resolver.emitted_vars`), the host included when the host itself contributes. Nodes that
   do not contribute emit nothing for the key. Never only at the deepest node.
@@ -221,7 +242,10 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   uses `NodePicker`; never a `<select>`/`<datalist>` filled from a list of nodes.
 - **Node detail reads through `POST /render {path, template: false}`**, also for hosts, so the
   page shows exactly what a mock host at that path would get. (Renders write nothing.) Own vars
-  are the provenance entries whose `path` is the node's; ids go in no URL (a move changes them).
+  are the provenance entries whose `path` is the node's **and that have no `profile`** (a
+  profile's value applied at the node is listed with its source, not as "set here"); the
+  render's `profiles` (path → list) feeds the node's profile list. Ids go in no URL (a move
+  changes them).
 - **Structure writes reset the tree.** After a create, move or delete the tree view drops every
   cached node (ids changed) and reveals the path to show next; never patch cached ids in place.
   Pages whose values carry no revision of their own (Variables, Tags) read `GET /revisions?limit=1`
@@ -362,6 +386,12 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   20, `AIS_LOGIN_WINDOW_SECONDS` 300, 0 = off), `server/ais/schema.py` (`check_schema`,
   `check_value`, `check_live`; Draft 2020-12, `format` not asserted).
 - `server/ais/api_tags.py` — `GET /tags[/{name}]`, `PUT /tags/{name}`, `DELETE /tags/{name}`.
+- `server/ais/profiles.py` — profile mutations shared by routes, importer and revert:
+  `set_profile(session, rev, name, wanted|None, check=)`, `set_node_profiles`,
+  `delete_profile(detach=)`, `doc(name, rev)`, `attachments(name, rev)`, `node_list`,
+  `attach_action`, `changed_keys`, `ProfileError(status, detail)`. `server/ais/api_profiles.py`
+  — the routes (`/profiles`, `/profiles/{name}/vars/{key}`, `/nodes/{id}/profiles[/{name}]`).
+  Tests: `tests/test_profiles.py` (incl. the issue's proof estate and its real-plugin parity).
 - `server/ais/api.py` (reads incl. `GET /nodes/{id-or-path}`, export, render, snapshots,
   `GET /audit`, import), `api_write.py` (locked writes incl. `move`), `api_auth.py` (login,
   tokens, users; all audited), `cli.py` (`user`/`token` commands audit with `source=cli`).
@@ -407,7 +437,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `msg`, its other keys (`nodes`, `hosts`, …) the result's. `doc_fragments/api.py` holds the
   `api` and `api.write` fragments; `meta/runtime.yml` declares the `inventory` action group
   (`module_defaults: group/git_cgallagher.inventory.inventory`).
-- `collection/.../plugins/modules/` — `node`, `host`, `variable`, `variable_definition`,
+- `collection/.../plugins/modules/` — `profile` (`vars`, `purge_vars`, `attach`/`detach` paths
+  appended last in a node's list, `state`, `detach_all`) and `profile_info`; `node`, `host`, `variable`, `variable_definition`,
   `tag` (`paths` added, `exclusive` = exactly them, `remove_paths`, `state`; description kept
   when omitted; the one module that retries: a stale 409 re-reads the tag and writes once more
   only if it still differs, through `Client.write_or_stale`, never with `expect_revision`),
@@ -429,15 +460,29 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `NodePicker.tsx` (the node typeahead: ARIA combobox + listbox, 150 ms debounce, newest answer
   wins, `pick` = name or path, `NON_HOST_KINDS`; used by Render, Diff, the move dialog, Search's
   subtree and the audit filters),
+  `Profiles` (`#/profiles[?name=]`: list, values with `VarEditor` (`url` prop), attach through
+  `NodePicker`, detach, delete; every write previewed), `NodeDetail`'s `NodeProfiles` (attach
+  from the profile list, detach; previewed), `SourceLink`/`SourceLabel` (`profile:x @ path`),
   `Search` (`#/search?key=&value=&subtree=&revision=`: where set + host values; the value box is YAML, sent as JSON; reached from the find box above the tree, "where set" on the Variables and node pages),
   `Variables` (definitions: strategy, description, JSON Schema), `Tags`, `Tokens`), `src/styles.css` (tokens, dark via
   `prefers-color-scheme`). `vite.config.ts` sets `outDir: ../server/ais/static`.
   `e2e/smoke.spec.ts` + `e2e/pickers.spec.ts` (read-only, runs first: the smoke counts
-  revisions from 1) + `e2e/serve.sh` + `playwright.config.ts`.
+  revisions from 1) + `e2e/z-profiles.spec.ts` (runs last, writes, pins no revision or
+  count the smoke can change) + `e2e/serve.sh` + `playwright.config.ts`.
 - `server/tests/conftest.py` — `engine` (SQLite or `AIS_TEST_DATABASE_URL`), role tokens,
   `AuthClient` (sends the bearer, `if_match=` kwarg), live `server` + real-plugin helpers.
 
 ## ⚠️ Gotchas
+- **A restore exports profiles at the old revision, which a plain import would roll back.**
+  Profiles are temporal and shared, so `restore_subtree` imports with `profile_values=False`
+  (the block only has to name live profiles) and refuses a profile deleted since. Anything new
+  built on `export_tree` + import of a *subtree* into a live tree needs the same care.
+- **`vars_by_node` is own values, not contributions.** With profiles a node can contribute a
+  key it does not set itself; `key in snap.vars_by_node[n]` misses it (it broke provenance with
+  a KeyError and would have hidden profile values from search and previews). Use
+  `Snapshot.sets(node_id, key)` / `layers(node_id)`.
+- **`GET /vars/hosts?value=570.86` is the number 570.86.** A driver version stored as a
+  string needs `value="570.86"` (quoted JSON); the proof test tripped on it.
 - **A dry run must take its `impact.Preview` before the first change.** The non-temporal state
   (strategies, tag memberships, `inventory_name`) is changed in place and cannot be read "as of
   the base revision" afterwards; nodes and values can (temporal rows). A preview taken late

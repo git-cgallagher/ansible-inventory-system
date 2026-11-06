@@ -29,10 +29,16 @@ What each kind's row records, and its inverse (all exact unless noted):
   paths) → converge it back, or delete it. A ``tag.delete`` row also records the memberships
   of deleted nodes (``deleted_members``) since this release; an older row cannot bring those
   back (they never affect the current tree, only a later restore), and the operation says so.
+* ``profile.create`` / ``profile.update`` / ``profile.delete`` (``before``/``after`` = name,
+  description, vars; a delete's ``before`` also has ``attached``, every node's list before) →
+  converge the profile back (and those lists), or delete it (it must not be attached then).
+* ``profile.attach`` / ``profile.detach`` / ``node.profiles`` (``before``/``after`` = the
+  node's path and ordered profile list) → converge the list back.
 * ``import`` → nodes and values are temporal rows: close the nodes the import created, put
   back the values it replaced (rows closed under its revision) and unset the ones it added.
-  Definitions and tags are not temporal: since this release the row's ``before`` records
-  them as they were; an older import row that changed any is refused (422), never guessed.
+  Profiles and attachments are temporal too: profiles go back to what they were just before
+  the import (or away), node lists likewise. Definitions and tags are not temporal: since
+  this release the row's ``before`` records them as they were; an older import row that changed any is refused (422), never guessed.
 * ``revert`` (the summary row) → nothing.
 
 **Conflicts.** Each row has a footprint (node paths, ``path``/``key`` pairs, definition and
@@ -55,9 +61,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ais import audit, impact, schema
+from ais import profiles as profile_lib
 from ais.audit import current_change
 from ais.importer import ImportError_, live_node_by_path
-from ais.models import PATH_SEP, AuditLog, Node, NodeKind, NodeVariable, Revision, Tag
+from ais.models import PATH_SEP, AuditLog, Node, NodeKind, NodeVariable, Profile, ProfileAttachment, ProfileVariable, Revision, Tag
 from ais.restore import RestoreError, restore_subtree
 
 SUMMARY_ACTION = "revert"
@@ -76,7 +83,8 @@ class RevertError(Exception):
 # ------------------------------------------------------------------ footprints
 
 # A footprint entry: ("var", path, key) | ("node", path) | ("tree", path) | ("member", path)
-# | ("definition", name) | ("tag", name). "tree" covers the node at path and everything below.
+# | ("profiles", path) (a node's profile list) | ("definition", name) | ("tag", name) |
+# ("profile", name). "tree" covers the node at path and everything below.
 Touch = tuple
 
 
@@ -85,7 +93,7 @@ def _within(path: str, root: str) -> bool:
 
 
 def _overlap(a: Touch, b: Touch) -> bool:
-    if a[0] in ("definition", "tag") or b[0] in ("definition", "tag"):
+    if a[0] in ("definition", "tag", "profile") or b[0] in ("definition", "tag", "profile"):
         return a == b
     if a[0] == "tree" and b[0] == "tree":
         return _within(a[1], b[1]) or _within(b[1], a[1])
@@ -96,6 +104,8 @@ def _overlap(a: Touch, b: Touch) -> bool:
     if a[0] == "var" and b[0] == "var":
         return a == b
     if a[0] == "node" and b[0] == "node":
+        return a[1] == b[1]
+    if a[0] == "profiles" and b[0] == "profiles":
         return a[1] == b[1]
     return False
 
@@ -118,6 +128,8 @@ def _describe_touch(t: Touch) -> str:
         return f"{t[1]} and below"
     if t[0] == "member":
         return f"tag member {t[1]}"
+    if t[0] == "profiles":
+        return f"the profiles of {t[1]}"
     return f"{t[0]} {t[1]}"
 
 
@@ -129,6 +141,8 @@ class _ImportFacts:
     roots: list[str] = field(default_factory=list)  # created subtrees' roots, shallowest first
     replaced: dict[tuple[str, str], Any] = field(default_factory=dict)  # (path, key) -> old value (rows closed by the import)
     added: set[tuple[str, str]] = field(default_factory=set)  # (path, key) set on a node that existed before
+    profiles: set[str] = field(default_factory=set)  # profiles created or changed
+    lists: dict[str, list[str]] = field(default_factory=dict)  # path -> profile list before, nodes that existed before
 
 
 def _import_facts(session: Session, revision: int) -> _ImportFacts:
@@ -149,6 +163,18 @@ def _import_facts(session: Session, revision: int) -> _ImportFacts:
             facts.replaced[(path, key)] = value
         if created == revision:
             facts.added.add((path, key))
+    changed = (ProfileVariable.created_rev == revision) | (ProfileVariable.deleted_rev == revision)
+    facts.profiles.update(session.scalars(select(ProfileVariable.profile).where(changed).distinct()))
+    facts.profiles.update(session.scalars(select(Profile.name).where((Profile.created_rev == revision) | (Profile.deleted_rev == revision)).distinct()))
+    att = session.execute(
+        select(Node.path, Node.id)
+        .join(ProfileAttachment, ProfileAttachment.node_id == Node.id)
+        .where((ProfileAttachment.created_rev == revision) | (ProfileAttachment.deleted_rev == revision))
+        .distinct()
+    )
+    for path, node_id in att:
+        if node_id not in facts.created:
+            facts.lists[path] = profile_lib.node_list(session, node_id, revision - 1)
     return facts
 
 
@@ -183,7 +209,15 @@ def footprint(session: Session, row: AuditLog, cache: dict[int, _ImportFacts] | 
         out += [("var", p, k) for p, k in sorted(set(facts.replaced) | facts.added)]
         out += [("definition", n) for n in a.get("definitions") or []]
         out += [("tag", n) for n in a.get("tags") or []]
+        out += [("profile", n) for n in sorted(facts.profiles)]
+        out += [("profiles", p) for p in sorted(facts.lists)]
         return out
+    if act in ("profile.create", "profile.update"):
+        return [("profile", row.target_id)]
+    if act == "profile.delete":
+        return [("profile", row.target_id)] + [("profiles", x.get("path")) for x in (b or {}).get("attached") or []]
+    if act in LIST_ACTIONS:
+        return [("profiles", (a or b).get("path"))]
     if act == SUMMARY_ACTION:
         return []
     return [("unknown", row.action)]
@@ -196,7 +230,13 @@ def _rows_of(session: Session, revisions: list[int]) -> list[AuditLog]:
     return list(session.scalars(select(AuditLog).where(AuditLog.revision.in_(revisions)).order_by(AuditLog.revision.desc(), AuditLog.id.desc())))
 
 
+LIST_ACTIONS = ("profile.attach", "profile.detach", "node.profiles")
+
 INVERTIBLE = {
+    "profile.create",
+    "profile.update",
+    "profile.delete",
+    *LIST_ACTIONS,
     "variable.set",
     "variable.unset",
     "node.create",
@@ -336,7 +376,7 @@ class _Ctx:
     keys: set[str] = field(default_factory=set)
     reverting: int = 0
 
-    def emit(self, action: str, target_type: str, target_id: Any, before: Any, after: Any, summary: str) -> None:
+    def emit(self, action: str, target_type: str, target_id: Any, before: Any, after: Any, summary: str, keys: list[str] | None = None) -> None:
         row = audit.record(
             self.session,
             actor=self.actor,
@@ -347,6 +387,7 @@ class _Ctx:
             after=after,
             source=self.source,
             revision=self.rev.id,
+            keys=keys,
         )
         self.operations.append(
             {"reverts": self.reverting, "action": action, "target_type": target_type, "target_id": row.target_id, "summary": summary, "before": row.before, "after": row.after}
@@ -492,6 +533,43 @@ def _set_tag(ctx: _Ctx, row: AuditLog, name: str, wanted: dict[str, Any] | None)
     ctx.emit("tag.set", "tag", name, before, out, f"set tag {name} ({len(out['members'])} members)")
 
 
+def _set_profile(ctx: _Ctx, row: AuditLog, name: str, wanted: dict[str, Any] | None) -> None:
+    """Converge profile ``name`` to ``wanted`` (a doc) or delete it (None)."""
+    before = profile_lib.doc(ctx.session, name)
+    target = None if wanted is None else {"name": name, "description": wanted.get("description"), "vars": wanted.get("vars") or {}}
+    if before == target or (before is not None and target is not None and before["description"] == target["description"] and not profile_lib.changed_keys(before, target)):
+        return
+    try:
+        out = profile_lib.set_profile(ctx.session, ctx.rev, name, target, check=False)  # schema: check_live at the end
+    except profile_lib.ProfileError as exc:
+        raise _blocked(ctx, row, str(exc), 409 if exc.status == 404 else exc.status) from exc
+    keys = profile_lib.changed_keys(before, out)
+    ctx.keys.update(keys)
+    if out is None:
+        ctx.emit("profile.delete", "profile", name, {**before, "attached": []}, None, f"delete profile {name}", keys=keys)  # type: ignore[dict-item]
+    else:
+        ctx.emit("profile.create" if before is None else "profile.update", "profile", name, before, out, f"set profile {name}", keys=keys)
+
+
+def _set_list(ctx: _Ctx, row: AuditLog, path: str, names: list[str]) -> None:
+    """Converge the node at ``path``'s profile list to ``names``."""
+    node = _live(ctx, row, path)
+    try:
+        before, after = profile_lib.set_node_profiles(ctx.session, ctx.rev, node, list(names))
+    except profile_lib.ProfileError as exc:
+        raise _blocked(ctx, row, str(exc), 409 if exc.status == 404 else exc.status) from exc
+    if before == after:
+        return
+    ctx.emit(
+        profile_lib.attach_action(before, after),
+        "node",
+        node.id,
+        {"path": path, "profiles": before},
+        {"path": path, "profiles": after},
+        f"set the profiles of {path} to {', '.join(after) or '(none)'}",
+    )
+
+
 def _invert(ctx: _Ctx, row: AuditLog) -> None:
     from ais.api_write import live_vars, move_subtree, node_out
 
@@ -544,6 +622,14 @@ def _invert(ctx: _Ctx, row: AuditLog) -> None:
                 "if it had any, they stay lost (the current tree is exact; a later restore of such a node comes back without the tag)"
             )
         _set_tag(ctx, row, row.target_id, b)
+    elif act in ("profile.create", "profile.update"):
+        _set_profile(ctx, row, row.target_id, b)
+    elif act == "profile.delete":
+        _set_profile(ctx, row, row.target_id, b)
+        for entry in b.get("attached") or []:
+            _set_list(ctx, row, entry["path"], entry["profiles"])
+    elif act in LIST_ACTIONS:
+        _set_list(ctx, row, b["path"], b["profiles"])
     elif act == "import":
         facts = _import_facts(session, row.revision)  # type: ignore[arg-type]
         before = b or {}
@@ -554,9 +640,13 @@ def _invert(ctx: _Ctx, row: AuditLog) -> None:
                 _set_var(ctx, row, path, key, facts.replaced[(path, key)])
             else:
                 _set_var(ctx, row, path, key, None, absent=True)
+        for path, names in sorted(facts.lists.items()):
+            _set_list(ctx, row, path, names)
         created = set(facts.created)
         for path in reversed(facts.roots):
             _delete_exactly(ctx, row, path, created, f"the import in revision {row.revision}")
+        for name in sorted(facts.profiles):
+            _set_profile(ctx, row, name, profile_lib.doc(session, name, row.revision - 1))  # type: ignore[operator]
         for name, was in sorted((before.get("definitions") or {}).items()):
             _set_definition(ctx, row, name, was)
     elif act == SUMMARY_ACTION:

@@ -56,6 +56,16 @@ TREE: dict[str, Any] = {
         "http_port": {"merge_strategy": "replace", "json_schema": {"type": "integer", "minimum": 1, "maximum": 65535}},
         "unused_decl": {"merge_strategy": "replace", "description": "declared, set nowhere"},
     },
+    # Issue 22: profiles, attached at two depths; values of every strategy, one shadowed by a
+    # node's own value (http_port), one profile attached nowhere.
+    "profiles": {
+        "hardening": {"vars": {"audit_rules": ["hardened"], "packages": ["auditd"]}},
+        "unused-role": {"description": "attached nowhere", "vars": {"x_unused": 1}},
+        "web-role": {
+            "description": "web servers",
+            "vars": {"http_port": 8081, "packages": ["haproxy", "nginx"], "role_name": "web", "sysctl": {"net": {"core": {"somaxconn": 1024}}}},
+        },
+    },
     "all": {
         "vars": {
             "ntp_server": "time.example.com",
@@ -82,6 +92,7 @@ TREE: dict[str, Any] = {
                                 "vars": {"site_code": "E1", "audit_rules": ["dc"], "dns_servers": ["10.1.0.2", "10.1.0.3"]},
                                 "children": {
                                     "web-tier": {
+                                        "profiles": ["hardening", "web-role"],
                                         "vars": {"http_port": 8080, "packages": ["nginx"]},
                                         "children": {
                                             "app-a": {
@@ -108,7 +119,7 @@ TREE: dict[str, Any] = {
                             },
                             "dc-west": {
                                 "vars": {"site_code": "W1"},
-                                "children": {"web": {"hosts": {"west-web-01": {"ansible_host": "10.2.1.11"}}}},
+                                "children": {"web": {"profiles": ["web-role"], "hosts": {"west-web-01": {"ansible_host": "10.2.1.11"}}}},
                             },
                         },
                     },
@@ -179,7 +190,11 @@ def test_export_carries_own_values_kinds_and_declarations(session, built):
     assert pod["hosts"]["web-01"] == {"ansible_host": "10.1.1.11", "audit_rules": ["host"], "http_port": 8443}
     assert pod["hosts"]["web-02"] == {}
     folded = build_export(load_snapshot(session))["hosts"]["web-01"]["vars"]["audit_rules"]
-    assert folded == ["base", "base", "biz", "dc", "shard", "base", "pod", "host"]
+    # the hardening profile (attached at web-tier) contributes as a level between dc-east-1 and web-tier
+    assert folded == ["base", "base", "biz", "dc", "hardened", "shard", "base", "pod", "host"]
+    tier = east["children"]["web-tier"]
+    assert tier["profiles"] == ["hardening", "web-role"] and tier["vars"] == {"http_port": 8080, "packages": ["nginx"]}  # own only
+    assert tree["profiles"] == TREE["profiles"]  # every profile on a whole-tree export, unattached ones included
     # every definition on a whole-tree export, unused ones included; schemas as stored
     assert tree["variables"] == TREE["variables"]
     assert tree["tags"] == {
@@ -197,7 +212,7 @@ def test_stored_strings_are_verbatim_through_yaml(session, built):
 
 def test_yaml_is_deterministic(session, built):
     assert dump_yaml(export_tree(session)) == dump_yaml(export_tree(session))
-    assert list(export_tree(session)) == ["variables", "all", "tags"]
+    assert list(export_tree(session)) == ["variables", "profiles", "all", "tags"]
 
 
 def test_subtree_export_spine_is_structure_only(session, built):
@@ -434,3 +449,16 @@ def test_cli_export_tree_round_trip(tmp_path):
     assert "does not exist at revision 1" in _ais(a, "export-tree", "--subtree", "all.nope", ok=False).stderr
     assert "revision 7 does not exist" in _ais(a, "export-tree", "--revision", "7", ok=False).stderr
     assert "root cannot be re-rooted" in _ais(a, "export-tree", "--as", "all.x", ok=False).stderr
+
+
+def test_subtree_export_carries_the_profiles_it_uses(session, built, other):
+    """Issue 22: a subtree export names the profiles attached inside it (with their values at
+    the revision, and the definitions their keys use); with ``ancestor_vars`` the spine's too,
+    so the document alone resolves every host as before."""
+    west = export_tree(session, None, "all.commercial.prod.dc-west")
+    assert set(west["profiles"]) == {"web-role"} and "http_port" in west["variables"]
+    pod = export_tree(session, None, POD, ancestor_vars=True)
+    assert set(pod["profiles"]) == {"hardening", "web-role"}
+    import_tree_report(other, pod)
+    other.commit()
+    assert _resolved(other)["web-01"] == _resolved(session)["web-01"]

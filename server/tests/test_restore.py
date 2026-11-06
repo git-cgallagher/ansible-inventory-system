@@ -218,7 +218,7 @@ def test_restore_refusals_write_nothing(editor, viewer, session, built):  # noqa
     rev = editor.delete(f"/api/v1/nodes/{_id(editor, 'all.commercial.prod.dc-west.web.web-01')}", if_match=rev).json()["revision"]
 
     # a definition tightened since the delete rejects an old value: 422, nothing written
-    rev = editor.put("/api/v1/variables/http_port", json={"json_schema": {"type": "integer", "maximum": 8000}}, if_match=rev).json()["revision"]
+    rev = editor.put("/api/v1/variables/http_port", json={"json_schema": {"type": "integer", "maximum": 8100}}, if_match=rev).json()["revision"]
     refused({"path": EAST}, 422, "http_port", rev)
     rev = editor.put("/api/v1/variables/http_port", json={"json_schema": {"type": "integer"}}, if_match=rev).json()["revision"]
 
