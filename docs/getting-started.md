@@ -1228,6 +1228,17 @@ As of 0.4.0:
   you trust not to do that.
 - **Inventory precedence is Ansible's.** Playbook `group_vars`, play vars and `-e` still
   override it (section 4).
+- **Revision ids only go up, but on PostgreSQL they can skip numbers.** A write takes its
+  revision id before its checks run. When a check then refuses it (a 404, 409 or 422 such as
+  "already exists", a schema or strict-keys refusal, a non-empty delete, the export check), or
+  a bulk import turns out to change nothing, the write is rolled back, but PostgreSQL never
+  hands out that id again. A missing number is therefore a refused write or an empty import,
+  never a lost revision; nothing was ever stored under it, and pinning it (`revision: 14`,
+  `?revision=14`) answers 404. Pin, diff and revert by ids you have seen: `GET
+  /api/v1/revisions`, the Revisions page, or the `revision` a write returned. Dry runs, a stale
+  or missing `If-Match`, and the checks a write makes before it starts (a value that fails its
+  schema in a single-variable `PUT`, a revert that conflicts) skip nothing. SQLite reuses the
+  number, so its ids have no gaps.
 
 ## 14. Troubleshooting
 
@@ -1241,6 +1252,7 @@ As of 0.4.0:
 | `403` | the token's role is too low | writes need editor; the audit log needs editor; users need admin |
 | `428 Precondition Required` | a write without `If-Match` | send `If-Match: "<revision>"` |
 | `409` on a write | someone wrote since your revision | re-read, re-apply, retry with the new revision |
+| a revision number is missing from `GET /api/v1/revisions` (PostgreSQL), and pinning it answers 404 | a write that was refused, or a bulk import that changed nothing, used up that id; nothing was stored under it | nothing to fix; pin by ids from the list (section 13) |
 | `422` naming depth or bytes | a node would exceed `AIS_MAX_DEPTH` or the 1,500-byte path limit | shorten names or flatten |
 | `422 … does not match its json_schema` | the value breaks the variable's schema | fix the value, or the schema |
 | `429` with `Retry-After` | too many failed logins | wait; check `FORWARDED_ALLOW_IPS` if it hits everyone |

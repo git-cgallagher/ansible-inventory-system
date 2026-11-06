@@ -299,6 +299,27 @@ def test_dry_runs_take_no_revision_id(editor, seeded):
     assert editor.post("/api/v1/nodes/restore", json={"path": DC1}, if_match=deleted).json()["revision"] == deleted + 1
 
 
+def test_refused_writes_skip_revision_ids_only_on_postgresql(engine, editor, seeded):
+    """What the guide's "Limits and known gaps" says about revision ids (issue #50). A real
+    write inserts its revision before its checks run; one refused after that is rolled back,
+    and on PostgreSQL the id it drew from the sequence stays used (sequences are not
+    transactional). A bulk import that changes nothing does the same. SQLite reuses the id
+    (``revision.id`` is a rowid alias without AUTOINCREMENT). Refusals before the insert
+    (stale or missing ``If-Match``) skip nothing anywhere."""
+    gaps = 2 if engine.dialect.name == "postgresql" else 0
+    rev = current_rev(editor)
+    web = _id(editor, WEB)
+    assert editor.post("/api/v1/nodes", json={"parent_path": DC1, "name": "web"}, if_match=rev).status_code == 409  # after the insert
+    noop = editor.post("/api/v1/import", json={"tree": {"all": {}}}, if_match=rev)
+    assert noop.status_code == 200 and noop.json()["changed"] is False and noop.json()["revision"] == rev
+    assert editor.put(f"/api/v1/nodes/{web}/vars/http_port", json={"value": 1}, if_match=rev - 1).status_code == 409  # stale: before it
+    r = editor.put(f"/api/v1/nodes/{web}/vars/http_port", json={"value": 1}, if_match=rev)
+    assert r.status_code == 200 and r.json()["revision"] == rev + 1 + gaps
+    assert [x["id"] for x in editor.get("/api/v1/revisions", params={"limit": 2}).json()] == [rev + 1 + gaps, rev]
+    for skipped in range(rev + 1, rev + 1 + gaps):  # a skipped id was never a revision: pinning it is a 404
+        assert editor.get("/api/v1/export", params={"revision": skipped}).status_code == 404
+
+
 def test_stale_if_match_refuses_a_dry_run(editor, seeded):
     rev = current_rev(editor)
     web = _id(editor, WEB)

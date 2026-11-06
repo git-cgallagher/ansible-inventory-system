@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+- **Docs: revision ids can skip numbers on PostgreSQL** (issue #50, revision id gaps). A real
+  write takes its revision id from the sequence before its checks run; when a check then
+  refuses it (404/409/422 after the write has started: the export check, "already exists", a
+  schema or strict-keys refusal, a non-empty delete, a revert with nothing to undo, ...) or a
+  bulk import changes nothing, the rollback leaves that id unused. Measured on PostgreSQL 16;
+  SQLite reuses the id. The guide's "Limits and known gaps" and troubleshooting table now say
+  so: a missing number is a refused write or an empty import, never a lost revision; pin by
+  ids you have seen. A PostgreSQL-aware test pins the behaviour. Dry runs still take no id
+  (0.4.0).
+
 ### Fixed
 - **The `host` module no longer downloads every node to find a host by name** (issue #43,
   part 5: scale follow-ups). A task whose host is not at its `parent_path` (a new host, or
