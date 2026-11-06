@@ -21,8 +21,11 @@ changes to the resolver, the exporter, snapshots or the plugin.
 3. **Loading the tree is 2.4 s** of the 3.6 s repeat export: 110k `Node` and 240k
    `NodeVariable` ORM objects. Reading plain rows instead of ORM objects is the next step if
    it matters.
-4. **`GET /api/v1/nodes` without `subtree` returns every node** (110k nodes, ~15 MB). The UI's
-   Render page calls it for its host picker, so that page is slow on a large tree.
+4. **`GET /api/v1/nodes` without `q`, `kind`, `limit` or `subtree` returns every node**
+   (109,917 nodes, 20.6 MB, 2.8 s). The UI no longer calls it: its pickers use the bounded
+   lookup (4–10 ms, see [Node lookup](#node-lookup-2026-11-05-issue-27)). The `host` module
+   still does, once per task whose host is not at its `parent_path` (a new host, or `absent`
+   without a parent).
 5. `ansible-inventory --list` is ~23 s, but that is ansible-core computing every host's
    variables (vars plugins glob `host_vars/` 400k times, then a 17 s JSON dump). A playbook
    never does that. The plugin's own cost is the `--graph` line: 4.5 s with a warm ETag store.
@@ -166,6 +169,63 @@ What is left at the root is reading 110k light rows twice and folding the setter
 key (18,400 distinct `packages` setters here, most of the 1.08 s). That is about a third of
 the export check the write itself runs, so it was not worth more.
 
+### Node lookup (2026-11-05, issue 27)
+
+The UI's host and path pickers used to download every node (`GET /api/v1/nodes`) and filter
+in the browser. They now ask `GET /api/v1/nodes?q=…&kind=…&limit=21` per pause in typing
+(`ais.nodesearch`). Measured like the variable-search lines: `ais serve` on the host (Python
+3.12, one worker, `AIS_SNAPSHOTS=off`) against the generated tree in a PostgreSQL 16.15
+container, medians of 5 from `bench/benchmark.py --lookup-only`.
+
+| Lookup (`limit=21`) | Seconds | Notes |
+|---|---:|---|
+| host prefix `h` | 0.004 | 21 nodes, 3,928 bytes |
+| host prefix `h0123` | 0.005 | 21 nodes, 3,970 bytes |
+| host `h012345` | 0.007 | 1 node: every tier runs (5 queries) |
+| path prefix `all.b0.prod.dc0`, hosts | 0.010 | 21 nodes, 3,865 bytes |
+| path prefix `all.b0.prod`, non-host | 0.010 | 21 nodes |
+| name substring `ole`, non-host | 0.006 | 21 nodes |
+| `x`, hosts: no match at all | 0.073 | 5 queries, the last two sequential scans |
+| host prefix `h0` under `all.b0.prod.dc0` | 0.010 | 21 nodes |
+| every node (`GET /api/v1/nodes`, what the pickers loaded before) | 2.76 | 109,917 nodes, 20.6 MB |
+
+**How it is bounded.** Five tiers (exact name, name prefix, path prefix, name substring, path
+substring), each one `ILIKE` query with `ORDER BY path LIMIT n` that runs only while the answer
+is short; a typical keystroke is one or two queries. Migration 0008 adds `pg_trgm` and two
+GIN trigram indexes, `ix_node_name_trgm` (5.9 MB) and `ix_node_path_trgm` (11 MB). With no
+`revision` the live filter is `deleted_rev IS NULL`, the predicate of the partial index
+`uq_node_path_live`, so the planner has two plans and picks by the estimate (`EXPLAIN
+(ANALYZE, BUFFERS)`):
+
+- **Few matches** (a rare name, a miss of three or more characters): bitmap index scan on a
+  trigram index, then a top-N sort of the handful of rows. 0.01–0.04 ms per tier.
+- **Many matches** (`h`, `h0`, a path prefix): an index scan of `uq_node_path_live` in path
+  order with the `ILIKE` as a filter, stopping at the limit. `h` reads 8 buffers. A path prefix
+  walks the paths that sort before it first: `all.b1.stage.dc2` removed 49,829 rows by filter
+  and took 22 ms; `all.b0.prod.dc0`, near the start, 10 ms end to end.
+- **One or two characters that match nothing**: no trigram to look up, so the two substring
+  tiers scan the table (24 ms and 41 ms for `x`). That is the worst case, 73 ms end to end.
+
+The cost grows with how far a path-order walk goes before it finds `limit` matches, not with
+the number of matches. A lookup at a `revision` uses the same indexes (they cover closed rows
+too) with `_live_at` as a filter. SQLite (development only) has no trigram index and scans.
+
+**The page, before and after.** Bytes per response as the browser received them (Playwright,
+`request.sizes()` and the response bodies), opening each page on a generated tree of 3,000
+hosts (`bench/generate.py --hosts 3000`: 12,917 nodes, since the group levels are fixed) on
+SQLite. No compression on either side (the server sends none).
+
+| Page | Before: API bytes | After: API bytes | Of which the node list (before) |
+|---|---:|---:|---:|
+| `#/render` | 2,315,214 | 634 | 2,314,580 |
+| `#/render?host=h000123` | 2,318,850 | 4,270 | 2,314,580 |
+| `#/diff` | 2,315,344 | 764 | 2,314,580 |
+| `#/diff?host=h000123&from=1&to=1` | 2,315,592 | 1,012 | 2,314,580 |
+
+Typing `h00012` in the Host picker then costs one lookup of 1,871 bytes (10 hosts). The page
+assets are the same on both sides (the bundle grew from 390,974 to 393,203 bytes). At 100k
+hosts the node list alone was 20.6 MB per page open.
+
 ## Before and after
 
 | | before | after |
@@ -226,4 +286,5 @@ $C down -v      # the volume holds the 100k tree; drop it when done
 `generate.py` refuses a database that already holds nodes. Run the benchmark on a freshly
 generated tree, or the "first at this revision" line measures a revision whose snapshots
 already exist. When `AIS_EDITOR_TOKEN` is set, the benchmark runs the five dry runs above
-(nothing written) and then writes one variable (`bench_marker`).
+(nothing written) and then writes one variable (`bench_marker`). `--lookup-only` times just
+the node lookups (read-only, seconds).

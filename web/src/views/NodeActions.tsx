@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { api } from "../api";
 import { ImpactSummary } from "../components";
+import { NodePicker, NON_HOST_KINDS } from "../NodePicker";
 import type { DeleteResult, InvNode, MoveResult, WriteResult } from "../types";
 import { CHILD_KINDS } from "../types";
 
@@ -150,14 +151,15 @@ export function NodeActions(props: {
               <div className="editor-head">
                 <label>
                   New parent{" "}
-                  <input
+                  <NodePicker
+                    label="New parent path"
                     value={parentPath}
-                    onChange={(e) => {
-                      setParentPath(e.target.value);
+                    onChange={(v) => {
+                      setParentPath(v);
                       setMovePreview(null);
                     }}
+                    kinds={NON_HOST_KINDS}
                     required
-                    aria-label="New parent path"
                     size={40}
                   />
                 </label>

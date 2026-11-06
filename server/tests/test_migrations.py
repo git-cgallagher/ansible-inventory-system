@@ -26,8 +26,9 @@ def _fresh(tmp_path):
 def test_migrated_schema_matches_the_models(engine):
     with engine.connect() as conn:
         diffs = compare_metadata(MigrationContext.configure(conn, opts={"compare_type": True}), Base.metadata)
-    # path_ltree (+ its GiST index) is migration-only on PostgreSQL, on purpose (AGENTS.md).
-    diffs = [d for d in diffs if "path_ltree" not in repr(d)]
+    # path_ltree (+ its GiST index) and the trigram indexes of 0008 are migration-only on
+    # PostgreSQL, on purpose (AGENTS.md).
+    diffs = [d for d in diffs if not any(name in repr(d) for name in ("path_ltree", "ix_node_name_trgm", "ix_node_path_trgm"))]
     assert diffs == []
 
 

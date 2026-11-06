@@ -23,12 +23,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, impact, keycheck, oidc, varsearch
+from ais import __version__, api_auth, api_revert, api_tags, api_write, audit, impact, keycheck, nodesearch, oidc, varsearch
 from ais.auth import Principal, require
 from ais.db import get_session, init_db
 from ais.importer import ImportError_, import_tree_report, live_node_by_path
 from ais.locking import check_precondition, etag
-from ais.models import AuditLog, Node, Revision, Role, VariableDefinition
+from ais.models import AuditLog, Node, NodeKind, Revision, Role, VariableDefinition
 from ais.render import MOCK_HOSTNAME, render_templates
 from ais.resolver import GROUP_SEP, build_export, current_revision, host_path, load_chain, load_snapshot, resolve
 from ais import snapshots
@@ -187,10 +187,19 @@ def render(req: RenderRequest, principal: Principal = viewer, session: Session =
 def nodes(
     subtree: str | None = None,
     revision: int | None = None,
+    q: str | None = Query(None, max_length=1500, description="Lookup: name or path, ignoring case; exact name, then name prefix, path prefix, name substring, path substring. Bounded by `limit`."),
+    kind: list[NodeKind] | None = Query(None, description="Lookup: only these kinds (repeat the parameter for several)"),
+    limit: int | None = Query(None, ge=1, le=nodesearch.MAX_LIMIT, description=f"Lookup: at most this many nodes (default {nodesearch.DEFAULT_LIMIT})"),
     principal: Principal = viewer,
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
+    """Without ``q``, ``kind`` and ``limit``: every live node (or every node of ``subtree``)
+    in path order, unbounded, as the plugin's callers and scripts expect. With any of them:
+    the bounded lookup pickers use (``ais.nodesearch``), at most ``limit`` nodes."""
     _check_revision(session, revision)
+    if q is not None or kind or limit is not None:
+        found = nodesearch.search(session, q or "", kinds=kind, subtree=subtree or None, revision=revision, limit=limit or nodesearch.DEFAULT_LIMIT)
+        return [api_write.node_out(n) for n in found]
     try:
         snap = load_snapshot(session, revision, subtree)
     except KeyError:

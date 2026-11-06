@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, errorText } from "../api";
 import { Notice, Spinner, StrategyBadge, Value } from "../components";
 import { useApp } from "../context";
+import { NodePicker, NON_HOST_KINDS } from "../NodePicker";
 import { href, navigate } from "../router";
 import type { VarHosts, VarNodes } from "../types";
 import { canEdit } from "../types";
@@ -132,7 +133,7 @@ export function SearchView({ params }: { params: URLSearchParams }) {
         </label>
         <label>
           subtree
-          <input value={fields.subtree} onChange={(e) => setFields({ ...fields, subtree: e.target.value.trim() })} aria-label="Subtree" placeholder="all.commercial.prod" />
+          <NodePicker label="Subtree" value={fields.subtree} onChange={(v) => setFields({ ...fields, subtree: v.trim() })} kinds={NON_HOST_KINDS} placeholder="all.commercial.prod" />
         </label>
         <label>
           revision

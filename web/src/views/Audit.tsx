@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError, errorText } from "../api";
 import { Notice, Value } from "../components";
 import { when } from "../hooks";
+import { NodePicker, NON_HOST_KINDS } from "../NodePicker";
 import { href, navigate } from "../router";
 import type { AuditRow } from "../types";
 
@@ -50,14 +51,22 @@ export function AuditView({ params }: { params: URLSearchParams }) {
         {FILTERS.map((f) => (
           <label key={f}>
             {f.replace("_", " ")}
-            <input
-              value={filters[f]}
-              onChange={(e) => setFilters({ ...filters, [f]: e.target.value })}
-              placeholder={
-                f === "action" ? "node. or variable.set" : f === "node" || f === "subtree" ? "all.commercial.prod" : f === "key" ? "gpu_driver" : f === "change" ? "SRE-1234" : f === "since" || f === "until" ? "2026-11-01T00:00" : ""
-              }
-              aria-label={f}
-            />
+            {f === "node" || f === "subtree" ? (
+              <NodePicker
+                label={f}
+                value={filters[f]}
+                onChange={(v) => setFilters({ ...filters, [f]: v })}
+                kinds={f === "subtree" ? NON_HOST_KINDS : undefined}
+                placeholder="all.commercial.prod"
+              />
+            ) : (
+              <input
+                value={filters[f]}
+                onChange={(e) => setFilters({ ...filters, [f]: e.target.value })}
+                placeholder={f === "action" ? "node. or variable.set" : f === "key" ? "gpu_driver" : f === "change" ? "SRE-1234" : f === "since" || f === "until" ? "2026-11-01T00:00" : ""}
+                aria-label={f}
+              />
+            )}
           </label>
         ))}
         <div className="inline">

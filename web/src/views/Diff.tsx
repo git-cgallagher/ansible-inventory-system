@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { api, errorText } from "../api";
 import { Notice, Value } from "../components";
-import { useAllNodes, when } from "../hooks";
+import { when } from "../hooks";
+import { NodePicker } from "../NodePicker";
 import { href } from "../router";
 import type { DiffResult, RevisionRow, SnapshotRow } from "../types";
 
@@ -9,7 +10,9 @@ import type { DiffResult, RevisionRow, SnapshotRow } from "../types";
  * offered and answered exactly. ● marks the revisions where this host's resolved variables
  * changed: the background pass stores a snapshot only there (`GET /hosts/{name}/snapshots`). */
 export function DiffView({ params }: { params: URLSearchParams }) {
-  const { nodes, error: nodesError } = useAllNodes();
+  // `text` is the box (a typeahead over the bounded node lookup); `host` the host the page
+  // shows, set by a pick, a deep link or Compare, so typing fetches no snapshots per keystroke.
+  const [text, setText] = useState(params.get("host") ?? "");
   const [host, setHost] = useState(params.get("host") ?? "");
   const [revs, setRevs] = useState<RevisionRow[]>([]);
   const [snaps, setSnaps] = useState<Set<number>>(new Set());
@@ -17,8 +20,6 @@ export function DiffView({ params }: { params: URLSearchParams }) {
   const [to, setTo] = useState(params.get("to") ?? "");
   const [result, setResult] = useState<DiffResult | null>(null);
   const [error, setError] = useState("");
-
-  const hosts = useMemo(() => nodes.filter((n) => n.kind === "host").map((n) => n.name).sort(), [nodes]);
 
   useEffect(() => {
     api<RevisionRow[]>("/api/v1/revisions", { query: { limit: 500 } })
@@ -42,6 +43,8 @@ export function DiffView({ params }: { params: URLSearchParams }) {
     e?.preventDefault();
     setError("");
     setResult(null);
+    const host = text.trim();
+    setHost(host);
     if (!host || !from || !to) {
       setError("Pick a host and two revisions.");
       return;
@@ -70,16 +73,14 @@ export function DiffView({ params }: { params: URLSearchParams }) {
     <div className="page">
       <h1>Diff</h1>
       <p className="muted">How one host's resolved variables changed between two revisions. ● = this host's variables changed in that revision.</p>
-      {nodesError && <Notice kind="error">{nodesError}</Notice>}
       <form className="inline wrap" onSubmit={compare}>
         <label>
           Host
-          <select value={host} onChange={(e) => setHost(e.target.value)} aria-label="Host">
-            <option value="">— pick a host —</option>
-            {hosts.map((h) => (
-              <option key={h}>{h}</option>
-            ))}
-          </select>
+          <NodePicker label="Host" value={text} onChange={(v) => {
+              setText(v);
+              if (v !== host) setHost(""); // the ● marks follow the box
+            }}
+            onPick={(n) => setHost(n.name)} kinds={["host"]} pick="name" placeholder="name or part of it, or a path" />
         </label>
         <label>
           From

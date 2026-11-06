@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { api, errorText } from "../api";
 import { Notice, Provenance, StrategyBadge, Value } from "../components";
-import { useAllNodes } from "../hooks";
+import { NodePicker, NON_HOST_KINDS } from "../NodePicker";
 import { href } from "../router";
 import type { RenderResult } from "../types";
 import { SYNTHETIC_KEYS } from "../types";
 import { parseObject, same } from "../value";
 
-/** `POST /render` for a real host or a mock host at a path, with overrides and facts. */
+/** `POST /render` for a real host or a mock host at a path, with overrides and facts. The host
+ * and the path come from typeaheads over the bounded node lookup, never from the whole node
+ * list; a deep link (`#/render?host=…`, `#/render?path=…`) renders without any lookup. */
 export function RenderView({ params }: { params: URLSearchParams }) {
-  const { nodes, error: nodesError } = useAllNodes();
   const [mode, setMode] = useState<"host" | "path">(params.get("path") ? "path" : "host");
   const [host, setHost] = useState(params.get("host") ?? "");
   const [path, setPath] = useState(params.get("path") ?? "");
@@ -20,9 +21,6 @@ export function RenderView({ params }: { params: URLSearchParams }) {
   const [result, setResult] = useState<RenderResult | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-
-  const hosts = useMemo(() => nodes.filter((n) => n.kind === "host").sort((a, b) => a.name.localeCompare(b.name)), [nodes]);
-  const paths = useMemo(() => nodes.filter((n) => n.kind !== "host").map((n) => n.path), [nodes]);
 
   const run = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -41,7 +39,7 @@ export function RenderView({ params }: { params: URLSearchParams }) {
       return;
     }
     if (mode === "host" ? !host : !path) {
-      setError(mode === "host" ? "Pick a host." : "Type a path, e.g. all.commercial.prod.dc1.web");
+      setError(mode === "host" ? "Pick or type a host." : "Pick or type a path, e.g. all.commercial.prod.dc1.web");
       return;
     }
     setBusy(true);
@@ -68,7 +66,6 @@ export function RenderView({ params }: { params: URLSearchParams }) {
     <div className="page">
       <h1>Render</h1>
       <p className="muted">What a playbook sees for a real host, or for a mock host placed at any node.</p>
-      {nodesError && <Notice kind="error">{nodesError}</Notice>}
       <form className="render-form" onSubmit={run}>
         <fieldset className="seg-field">
           <legend>Target</legend>
@@ -80,26 +77,14 @@ export function RenderView({ params }: { params: URLSearchParams }) {
           </label>
         </fieldset>
         {mode === "host" ? (
-          <label>
+          <label key="host">
             Host
-            <select value={host} onChange={(e) => setHost(e.target.value)} aria-label="Host">
-              <option value="">— pick a host —</option>
-              {hosts.map((h) => (
-                <option key={h.id} value={h.name}>
-                  {h.name} ({h.path})
-                </option>
-              ))}
-            </select>
+            <NodePicker label="Host" value={host} onChange={(v) => setHost(v.trim())} kinds={["host"]} pick="name" placeholder="name or part of it, or a path" />
           </label>
         ) : (
-          <label>
+          <label key="path">
             Path
-            <input value={path} onChange={(e) => setPath(e.target.value.trim())} list="node-paths" placeholder="all.commercial.prod.dc1.web" aria-label="Path" />
-            <datalist id="node-paths">
-              {paths.map((p) => (
-                <option key={p} value={p} />
-              ))}
-            </datalist>
+            <NodePicker label="Path" value={path} onChange={(v) => setPath(v.trim())} kinds={NON_HOST_KINDS} placeholder="all.commercial.prod.dc1.web" />
           </label>
         )}
         <div className="two">
