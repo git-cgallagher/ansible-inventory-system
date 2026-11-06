@@ -550,7 +550,13 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `current_revision` is read); PostgreSQL uses `pg_advisory_xact_lock`. Two writers on SQLite
   serialize on the 5 s busy timeout; that is fine for dev, not a deployment target.
 - A refused write (409/422) rolls back its `Revision` with the request: never commit before
-  `check_export`.
+  `check_export`. **On PostgreSQL the rolled-back id stays used** (sequences are not
+  transactional), so every refusal raised after `begin`/`begin_write` or the importer's or
+  revert's own `Revision(...)` insert, and every no-op import (API and CLI insert first, then
+  roll back), skips one id; SQLite's `revision.id` is a rowid alias without AUTOINCREMENT and
+  reuses it. Documented in the guide's section 13 (issue #50, measured 2026-11-06),
+  pinned by `test_refused_writes_skip_revision_ids_only_on_postgresql`. Never compute a
+  revision as `id - 1`/`id + 1` except under the write lock (`impact.Preview.revision`).
 - `/export` returns a ready-made JSON `Response` (FastAPI's `jsonable_encoder` walked 19 MB in
   Python); its `ETag` is set on that response, not on an injected `response`.
 - The export `ETag` includes a digest of `subtree` / `group_separator` / `emit_tags`, so a

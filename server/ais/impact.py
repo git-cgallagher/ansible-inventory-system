@@ -207,8 +207,8 @@ class Preview:
     def revision(self, *, actor: str, source: str, message: str | None) -> Revision:
         """The dry run's revision, with the id the real write would get on SQLite: ``base + 1``,
         set explicitly so that on PostgreSQL the dry run takes no sequence value (a rolled-back
-        insert still would) and the next real write is ``base + 1`` there too. Safe because the
-        caller holds the write lock: no other revision can appear meanwhile."""
+        insert still would: a refused real write does skip an id there, issue #50). Safe because
+        the caller holds the write lock: no other revision can appear meanwhile."""
         rev = Revision(id=self.base + 1, actor=actor, source=source, message=message, change=current_change())
         self.session.add(rev)
         self.session.flush()
