@@ -30,7 +30,7 @@ from ais.importer import ImportError_, import_tree_report, live_node_by_path
 from ais.locking import check_precondition, etag
 from ais.models import AuditKey, AuditLog, Node, NodeKind, Revision, Role, VariableDefinition
 from ais.render import MOCK_HOSTNAME, render_templates
-from ais.resolver import GROUP_SEP, build_export, current_revision, host_path, load_chain, load_snapshot, resolve
+from ais.resolver import GROUP_SEP, build_export, current_revision, host_path, key_error_message, load_chain, load_snapshot, resolve
 from ais import snapshots
 from ais.snapshots import diff, get_snapshot, list_snapshots
 from ais.tree import TreeExportError, dump_yaml, export_tree
@@ -120,7 +120,7 @@ def export(
         snap = load_snapshot(session, rev, subtree)
         data = build_export(snap, sep=group_separator, emit_tags=emit_tags)
     except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise HTTPException(404, key_error_message(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     # Serialized here: the export is plain JSON already, and FastAPI's jsonable_encoder
@@ -153,7 +153,7 @@ def tree(
     try:
         data = export_tree(session, rev, subtree, as_path=as_path, ancestor_vars=ancestor_vars, hosts=hosts)
     except KeyError as exc:
-        raise HTTPException(404, f"{exc.args[0]} at revision {rev}") from exc
+        raise HTTPException(404, f"{key_error_message(exc)} at revision {rev}") from exc
     except TreeExportError as exc:
         raise HTTPException(422, str(exc)) from exc
     headers = {"ETag": tag, "X-AIS-Revision": str(rev)}
@@ -174,7 +174,7 @@ def render(req: RenderRequest, principal: Principal = viewer, session: Session =
         snap = load_chain(session, req.revision, host=req.host, path=None if req.host else req.path)
         out = resolve(snap, host=req.host, path=req.path, overrides=req.overrides, sep=req.group_separator)
     except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise HTTPException(404, key_error_message(exc)) from exc
     # The profiles attached along the chain (issue #22), in application order, by path.
     out["profiles"] = {snap.nodes[nid].path: [name for name, _values in layers] for nid, layers in snap.profiles.items()}
     if req.template:
@@ -282,7 +282,7 @@ def vars_where_set(args: dict[str, Any] = Depends(_search_args), principal: Prin
     try:
         return varsearch.where_set(session, args.pop("key"), **args)
     except KeyError as exc:
-        raise HTTPException(404, exc.args[0]) from exc
+        raise HTTPException(404, key_error_message(exc)) from exc
 
 
 @app.get("/api/v1/vars/hosts")
@@ -294,7 +294,7 @@ def vars_hosts(args: dict[str, Any] = Depends(_search_args), principal: Principa
     try:
         return varsearch.host_values(session, args.pop("key"), **args)
     except KeyError as exc:
-        raise HTTPException(404, exc.args[0]) from exc
+        raise HTTPException(404, key_error_message(exc)) from exc
 
 
 @app.get("/api/v1/vars/lint")

@@ -45,6 +45,15 @@ def test_mock_host_render_magic_vars(viewer, seeded):
     assert "rendered" not in no_template and "errors" not in no_template
 
 
+
+def test_render_unknown_path_or_host_detail_is_plain_text(viewer, seeded):
+    # str() of a KeyError quotes its argument: the detail was "\"unknown path 'all.nope'\"" (issue #49).
+    r = viewer.post("/api/v1/render", json={"path": "all.nope"})
+    assert r.status_code == 404 and r.json()["detail"] == "unknown path 'all.nope'"
+    r = viewer.post("/api/v1/render", json={"host": "nope"})
+    assert r.status_code == 404 and r.json()["detail"] == "unknown host 'nope'"
+
+
 # A viewer token must never reach the API server through the render: lookups, the builtin
 # filters and tests that read its environment or files, collection plugins, includes and
 # templated facts are all refused, whether the template is stored or sent as an override.

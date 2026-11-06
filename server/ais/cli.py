@@ -358,7 +358,7 @@ def _export_tree(args: argparse.Namespace) -> int:
     """The CLI twin of ``GET /api/v1/tree``. Writes the document to stdout and the revision
     it was taken at to stderr, so ``ais export-tree > tree.yml`` is a clean file."""
     from ais.models import Revision
-    from ais.resolver import current_revision
+    from ais.resolver import current_revision, key_error_message
     from ais.tree import TreeExportError, dump_yaml, export_tree
 
     with session_scope() as s:
@@ -368,7 +368,7 @@ def _export_tree(args: argparse.Namespace) -> int:
         try:
             data = export_tree(s, rev, args.subtree, as_path=args.as_path, ancestor_vars=args.ancestor_vars, hosts=not args.no_hosts)
         except KeyError as exc:
-            raise SystemExit(f"{exc.args[0]} at revision {rev}")
+            raise SystemExit(f"{key_error_message(exc)} at revision {rev}")
         except TreeExportError as exc:
             raise SystemExit(str(exc))
     if args.format == "json":
@@ -384,6 +384,7 @@ def _vars(args: argparse.Namespace) -> int:
     """The CLI twin of ``GET /api/v1/vars`` (``--hosts``: ``/vars/hosts``), read in-process."""
     from ais import varsearch
     from ais.models import Revision
+    from ais.resolver import key_error_message
 
     def show(v: object) -> str:
         return json.dumps(v, sort_keys=True)
@@ -403,7 +404,7 @@ def _vars(args: argparse.Namespace) -> int:
                 offset=args.offset,
             )
         except KeyError as exc:
-            raise SystemExit(exc.args[0])
+            raise SystemExit(key_error_message(exc))
     if args.json:
         json.dump(out, sys.stdout, indent=2, default=str)
         print()
