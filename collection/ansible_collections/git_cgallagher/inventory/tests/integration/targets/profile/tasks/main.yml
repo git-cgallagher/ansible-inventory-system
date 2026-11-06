@@ -1,0 +1,139 @@
+---
+# profile: create, attach, bump (one write reaches every attached node), detach, delete.
+# Seed: all.commercial.lab.dc1.web (lab-web01) and all.federal.prod.dc2.web (fed-web01, fed-edge01).
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: Create and attach in check mode
+      git_cgallagher.inventory.profile:
+        name: it-role
+        description: integration role
+        vars: {it_role_driver: "1.0", it_role_labels: {tier: it}}
+        attach: [all.commercial.lab.dc1.web]
+      check_mode: true
+      diff: true
+      register: chk
+    - name: Not written
+      git_cgallagher.inventory.profile_info:
+        name: it-role
+      register: none_yet
+    - name: Create and attach
+      git_cgallagher.inventory.profile:
+        name: it-role
+        description: integration role
+        vars: {it_role_driver: "1.0", it_role_labels: {tier: it}}
+        attach: [all.commercial.lab.dc1.web]
+      register: made
+    - name: Again (unchanged)
+      git_cgallagher.inventory.profile:
+        name: it-role
+        vars: {it_role_labels: {tier: it}}
+        attach: [all.commercial.lab.dc1.web]
+      register: again
+    - name: A lab host gets the profile's values
+      git_cgallagher.inventory.render_info:
+        host: lab-web01
+      register: lab
+    - ansible.builtin.assert:
+        that:
+          - chk is changed
+          - chk.attached_now == ['all.commercial.lab.dc1.web']
+          - not none_yet.exists
+          - made is changed
+          - made.attached == ['all.commercial.lab.dc1.web']
+          - made.profile.vars.it_role_driver == '1.0'
+          - again is not changed
+          - lab.resolved.it_role_driver == '1.0'
+          - "lab.resolved.it_role_labels == {'tier': 'it'}"
+
+    - name: Attach to a second node
+      git_cgallagher.inventory.profile:
+        name: it-role
+        attach: [all.federal.prod.dc2.web]
+      register: second
+    - name: Bump the driver in check mode (the dry run lists every host it reaches)
+      git_cgallagher.inventory.profile:
+        name: it-role
+        vars: {it_role_driver: "2.0"}
+      check_mode: true
+      diff: true
+      register: bump_chk
+    - name: Bump the driver
+      git_cgallagher.inventory.profile:
+        name: it-role
+        vars: {it_role_driver: "2.0"}
+      register: bump
+    - name: Read it
+      git_cgallagher.inventory.profile_info:
+        name: it-role
+      register: info
+    - name: Read it as it was before the bump
+      git_cgallagher.inventory.profile_info:
+        name: it-role
+        revision: "{{ second.revision }}"
+      register: old
+    - ansible.builtin.assert:
+        that:
+          - second.attached == ['all.commercial.lab.dc1.web', 'all.federal.prod.dc2.web']
+          - bump_chk is changed
+          - bump_chk.impact.total == 3
+          - bump_chk.impact.hosts | map(attribute='host') | sort == ['fed-edge01', 'fed-web01', 'lab-web01']
+          - bump.revision == second.revision + 1
+          - info.profile.vars.it_role_driver == '2.0'
+          - info.profile.attached | map(attribute='path') | list == ['all.commercial.lab.dc1.web', 'all.federal.prod.dc2.web']
+          - old.profile.vars.it_role_driver == '1.0'
+
+    - name: Purge values to exactly these
+      git_cgallagher.inventory.profile:
+        name: it-role
+        vars: {it_role_driver: "2.0"}
+        purge_vars: true
+      register: purged
+    - name: Detach from the lab
+      git_cgallagher.inventory.profile:
+        name: it-role
+        detach: [all.commercial.lab.dc1.web]
+      register: detached
+    - name: Failure - attach to a host
+      git_cgallagher.inventory.profile:
+        name: it-role
+        attach: [all.commercial.lab.dc1.web.lab-web01]
+      register: on_host
+      ignore_errors: true
+    - name: Failure - delete while attached
+      git_cgallagher.inventory.profile:
+        name: it-role
+        state: absent
+      register: attached_still
+      ignore_errors: true
+    - name: Delete, detaching it everywhere
+      git_cgallagher.inventory.profile:
+        name: it-role
+        state: absent
+        detach_all: true
+      register: deleted
+    - name: Delete again (unchanged)
+      git_cgallagher.inventory.profile:
+        name: it-role
+        state: absent
+      register: deleted_again
+    - ansible.builtin.assert:
+        that:
+          - purged is changed
+          - "purged.profile.vars == {'it_role_driver': '2.0'}"
+          - detached.detached == ['all.commercial.lab.dc1.web']
+          - on_host is failed
+          - "'host' in on_host.msg"
+          - attached_still is failed
+          - "'attached' in attached_still.msg"
+          - deleted is changed
+          - deleted.detached == ['all.federal.prod.dc2.web']
+          - deleted_again is not changed
+  always:
+    - name: Cleanup
+      git_cgallagher.inventory.profile:
+        name: it-role
+        state: absent
+        detach_all: true

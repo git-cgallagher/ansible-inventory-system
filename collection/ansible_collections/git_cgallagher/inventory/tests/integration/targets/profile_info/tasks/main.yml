@@ -1,0 +1,27 @@
+---
+# profile_info: one profile, a missing one, the list; seed.yml holds web-baseline.
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: The seed's profile
+      git_cgallagher.inventory.profile_info:
+        name: web-baseline
+      register: one
+    - name: A profile that does not exist
+      git_cgallagher.inventory.profile_info:
+        name: it_info_missing
+      register: missing
+    - name: Every profile
+      git_cgallagher.inventory.profile_info:
+      register: every
+    - ansible.builtin.assert:
+        that:
+          - one is not changed
+          - one.exists
+          - one.profile.vars.nginx_worker_processes == 4
+          - "'all.commercial.prod.dc1.web' in one.profile.attached | map(attribute='path')"
+          - not missing.exists
+          - missing.profile == {}
+          - "'web-baseline' in every.profiles | map(attribute='name')"
