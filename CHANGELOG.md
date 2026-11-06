@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Changed
+- **Tests: the `tag` module's stale-409 retry is tested in CI** (issue #47). The collection
+  gets `ansible-test units` (`tests/unit/plugins/modules/test_tag.py`), run by CI's
+  `collection` job: the module runs against a fake server that moves the revision between the
+  module's read and its write. One stale 409 re-reads and retries with the new revision
+  (`changed: true`, or `changed: false` with no second write when the change is no longer
+  needed); a second stale 409 fails with "the inventory moved while this task ran"; any other
+  409 fails at once with no retry; with `expect_revision` a stale 409 fails with no retry. Both
+  for `state: present` and `state: absent`. Run them with `ansible-test units` from the
+  collection directory (no server needed).
 - **Docs: revision ids can skip numbers on PostgreSQL** (issue #50, revision id gaps). A real
   write takes its revision id from the sequence before its checks run; when a check then
   refuses it (404/409/422 after the write has started: the export check, "already exists", a

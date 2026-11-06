@@ -94,6 +94,9 @@ jobs:
       - name: ansible-test sanity
         working-directory: collection/ansible_collections/git_cgallagher/inventory
         run: ansible-test sanity --requirements --python 3.12 --color no
+      - name: ansible-test units (module logic against a fake server, no API needed)
+        working-directory: collection/ansible_collections/git_cgallagher/inventory
+        run: ansible-test units --requirements --python 3.12 --color no
       - name: Serve the seed tree and mint an editor token for the modules
         working-directory: examples
         env:
