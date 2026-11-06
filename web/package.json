@@ -1,7 +1,7 @@
 {
   "name": "ais-web",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Web UI for the Ansible Inventory System (served by the FastAPI app)",
   "license": "MIT",
   "type": "module",

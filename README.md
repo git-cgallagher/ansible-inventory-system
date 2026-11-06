@@ -7,7 +7,7 @@ An authoritative, database-backed Ansible inventory with a **strict tree hierarc
 per-variable merge strategies, revision history, and a render endpoint that shows what
 any real or hypothetical host resolves to.
 
-**Status: 0.3.0 (2026-11-05): a security fix to the render (see `CHANGELOG.md`), per-host history stored only on change, depth and path limits. 0.2.0 was the first release (2026-11-01).** Phase 4 closed the write gaps (tags, `node_move`
+**Status: 0.4.0 (2026-11-05): profiles, revert and change ids, restore, previews of every write, variable search, typo warnings, tree export, a tag module (see `CHANGELOG.md`; deleting a non-empty group now needs confirmation). 0.3.0 (2026-11-05) was a security fix to the render; 0.2.0 was the first release (2026-11-01).** Phase 4 closed the write gaps (tags, `node_move`
 and `import` modules, enforced JSON Schemas, bad-token audit, login limiter), gave the UI node,
 variable, tag and token management, proved 100k hosts (`docs/scale.md`) and added release
 automation for the collection (GitHub releases; it is not published to Ansible Galaxy). Before that, phase 3 added the web UI on top of phase 1 (bearer-token auth with
@@ -319,14 +319,14 @@ tarball attached; install it from there:
 
 ```bash
 ansible-galaxy collection install \
-  https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.3.0/git_cgallagher-inventory-0.3.0.tar.gz
+  https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.4.0/git_cgallagher-inventory-0.4.0.tar.gz
 ```
 
 or pin it in a `requirements.yml`:
 
 ```yaml
 collections:
-  - name: https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.3.0/git_cgallagher-inventory-0.3.0.tar.gz
+  - name: https://github.com/git-cgallagher/ansible-inventory-system/releases/download/v0.4.0/git_cgallagher-inventory-0.4.0.tar.gz
     type: url
 ```
 
