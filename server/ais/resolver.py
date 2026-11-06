@@ -232,11 +232,16 @@ def sanitize(name: str) -> str:
 
 
 def group_name(node: Node, sep: str = GROUP_SEP) -> str:
-    if node.kind is NodeKind.all:
+    return qualified_name(node.path, node.kind, node.inventory_name, sep)
+
+
+def qualified_name(path: str, kind: NodeKind, inventory_name: str | None, sep: str = GROUP_SEP) -> str:
+    """``group_name`` from the columns alone (no ``Node`` needed)."""
+    if kind is NodeKind.all:
         return "all"
-    if node.inventory_name:
-        return sanitize(node.inventory_name)
-    parts = node.path.split(PATH_SEP)[1:]  # drop "all"
+    if inventory_name:
+        return sanitize(inventory_name)
+    parts = path.split(PATH_SEP)[1:]  # drop "all"
     return sanitize(sep.join(parts))
 
 
@@ -318,12 +323,18 @@ def build_export(snap: Snapshot, *, sep: str = GROUP_SEP, emit_tags: bool = True
         for node in snap.nodes.values():
             if node.kind in TAGGED_KINDS:
                 tags.setdefault(tag_group_name(node, sep), []).extend(hosts_under(node))
+        explicit: dict[str, str] = {}  # group name -> tag name; ``gpu-canary`` and ``gpu_canary`` collide
         for tname, node_ids in snap.tags.items():
             members: list[str] = []
             for nid in node_ids:
                 n = snap.nodes[nid]
                 members.extend([n.name] if n.kind is NodeKind.host else hosts_under(n))
-            tags.setdefault(sanitize(tname), []).extend(members)
+            gname = sanitize(tname)
+            if gname in explicit:
+                first, second = sorted((explicit[gname], tname))
+                raise ValueError(f"tags {first!r} and {second!r} are both emitted as group {gname!r}")
+            explicit[gname] = tname
+            tags.setdefault(gname, []).extend(members)
         for tname in list(tags):
             if tname in groups:
                 raise ValueError(f"tag group {tname!r} collides with a hierarchy group")

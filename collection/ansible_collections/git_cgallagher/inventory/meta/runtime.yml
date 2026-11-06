@@ -12,3 +12,5 @@ action_groups:
     - import
     - revert
     - variable_info
+    - tag
+    - tag_info

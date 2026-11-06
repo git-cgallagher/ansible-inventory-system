@@ -183,14 +183,15 @@ test("structure, definitions, tags and tokens from the UI; history follows a mov
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("alert")).toContainText("json_schema");
 
-  // --- a tag over a group
+  // --- a tag over a group; a '-' in its name becomes '_' in its group, as in node names (issue 28)
   await page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Tags" }).click();
   await page.getByRole("button", { name: "New tag" }).click();
-  await page.getByRole("textbox", { name: "Tag name" }).fill("canary");
+  await page.getByRole("textbox", { name: "Tag name" }).fill("web-canary");
   await page.getByRole("textbox", { name: "Members" }).fill("all.commercial.prod.dc1.web");
   await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.getByRole("status")).toContainText("Saved tag canary");
-  await expect(page.locator('tr[data-name="canary"]')).toContainText("all.commercial.prod.dc1.web");
+  await expect(page.getByRole("status")).toContainText("Saved tag web-canary");
+  await expect(page.locator('tr[data-name="web-canary"]')).toContainText("all.commercial.prod.dc1.web");
+  await expect(page.locator('tr[data-name="web-canary"]')).toContainText("group web_canary");
 
   // --- mint a token (shown once), then revoke it
   await page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Tokens" }).click();

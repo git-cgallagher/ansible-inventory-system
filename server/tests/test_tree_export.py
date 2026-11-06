@@ -120,7 +120,7 @@ TREE: dict[str, Any] = {
     "tags": {
         "patch_wave_1": {"description": "first patch wave", "members": [f"{EAST}.web-tier", "all.ops-tools.ops-bastion01"]},
         "canary": {"members": [f"{POD}.web-01"]},
-        "west_only": {"members": ["all.commercial.prod.dc-west"]},
+        "west-only": {"members": ["all.commercial.prod.dc-west"]},
     },
 }
 
@@ -185,7 +185,7 @@ def test_export_carries_own_values_kinds_and_declarations(session, built):
     assert tree["tags"] == {
         "canary": {"members": [f"{POD}.web-01"]},
         "patch_wave_1": {"description": "first patch wave", "members": [f"{EAST}.web-tier", "all.ops-tools.ops-bastion01"]},
-        "west_only": {"members": ["all.commercial.prod.dc-west"]},
+        "west-only": {"members": ["all.commercial.prod.dc-west"]},
     }
 
 
@@ -223,7 +223,8 @@ def test_whole_tree_round_trips_into_an_empty_database(session, built, other):
     text = dump_yaml(export_tree(session))
     result = import_tree_report(other, yaml.safe_load(text))
     other.commit()
-    assert result.tags_changed == ["canary", "patch_wave_1", "west_only"]
+    assert result.tags_changed == ["canary", "patch_wave_1", "west-only"]
+    assert "west_only" in _plugin_view(other)["tags"]  # a hyphenated tag is emitted as group west_only
     assert _plugin_view(other) == before_plugin
     assert _resolved(other) == before_hosts
     assert dump_yaml(export_tree(other)) == text  # and it exports to the same bytes
@@ -380,15 +381,20 @@ def test_import_tags_is_additive_and_validated(editor, session, seeded):
     for bad, msg in (
         ({"tier_x": {}}, "reserved"),
         ({"all": {}}, "reserved"),
-        ({"bad-name": {}}, "invalid tag name"),
+        ({"bad.name": {}}, "invalid tag name"),
+        ({"tier-x": {}}, "reserved"),  # its group would be tier_x
+        ({"commercial-prod": {"members": ["all.federal"]}}, "hierarchy group of all.commercial.prod"),
+        ({"commercial_prod": {}}, "hierarchy group of all.commercial.prod"),  # members or not
+        ({"wave-": {}, "wave_": {}}, "which tag 'wave-' already is"),
         ({"wave": {"members": ["all.nope"]}}, "does not exist"),
         ({"wave": {"members": "all.federal"}}, "list of node paths"),
         (["wave"], "must be a mapping"),
     ):
         r = editor.post("/api/v1/import", json={"tree": {"all": {}, "tags": bad}}, if_match=rev)
         assert r.status_code == 422 and msg in r.json()["detail"], (bad, r.text)
-    # a tag named like a hierarchy group is the exporter's 409, as with PUT /tags
-    assert editor.post("/api/v1/import", json={"tree": {"all": {}, "tags": {"commercial_prod": {"members": ["all.federal"]}}}}, if_match=rev).status_code == 409
+    # a hyphen maps to '_' in the group name, so 'wave' and an existing tag collide only that way
+    r = editor.post("/api/v1/import", json={"tree": {"all": {}, "tags": {"wa-ve": {}, "wa_ve": {}}}}, if_match=rev)
+    assert r.status_code == 422 and "group 'wa_ve'" in r.json()["detail"]
     assert current_rev(editor) == rev
 
 

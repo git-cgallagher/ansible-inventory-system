@@ -57,9 +57,8 @@
       check_mode: true
       register: chk_again
     - name: The tag holds the member
-      ansible.builtin.uri:
-        url: "{{ ais_url }}/api/v1/tags/it_import_tag"
-        headers: {Authorization: "Bearer {{ ais_token }}"}
+      git_cgallagher.inventory.tag_info:
+        name: it_import_tag
       register: tag
     - name: The host landed with its var
       git_cgallagher.inventory.node_info:
@@ -77,8 +76,8 @@
           - chk_again is not changed
           - host.exists
           - host.node.vars.ansible_host == '10.77.0.1'
-          - tag.json.members == ['all.it_import.prod']
-          - tag.json.description == 'integration'
+          - tag.tag.members == ['all.it_import.prod']
+          - tag.tag.description == 'integration'
 
     - name: A value its json_schema rejects
       git_cgallagher.inventory.import:
@@ -115,19 +114,10 @@
         path: all.it_import
         state: absent
         recursive: true
-    - name: Current revision for the tag cleanup
-      ansible.builtin.uri:
-        url: "{{ ais_url }}/api/v1/revisions?limit=1"
-        headers: {Authorization: "Bearer {{ ais_token }}"}
-      register: revs
-    - name: Cleanup the tag (there is no tag module)
-      ansible.builtin.uri:
-        url: "{{ ais_url }}/api/v1/tags/it_import_tag"
-        method: DELETE
-        headers:
-          Authorization: "Bearer {{ ais_token }}"
-          If-Match: '"{{ revs.json[0].id }}"'
-        status_code: [200, 404]
+    - name: Cleanup the tag
+      git_cgallagher.inventory.tag:
+        name: it_import_tag
+        state: absent
     - name: Cleanup the definition
       git_cgallagher.inventory.variable_definition:
         name: it_import_port

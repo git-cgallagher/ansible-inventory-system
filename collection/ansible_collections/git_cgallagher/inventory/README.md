@@ -31,11 +31,13 @@ ansible-inventory -i inventory.yml --host web01
 | `host` | create / converge / delete a host (`ansible_host`, `ansible_port`, `ansible_user`, vars) | editor |
 | `variable` | set or remove one variable at a node | editor |
 | `variable_definition` | declare a variable's merge strategy (`replace`, `merge`, `append`, `unique_append`) and `json_schema` (enforced on every write) | editor |
+| `tag` | create / converge / delete a tag (a var-less targeting group): `paths` added, or exactly them with `exclusive: true`, `remove_paths` taken out; the group turns `-` into `_` (`gpu-canary` → `gpu_canary`); retries once on a stale 409 when the tag still differs | editor |
 | `node_move` | move and/or rename a node with its subtree (`path` → `new_path`; ids change) | editor |
 | `import` | bulk-import a tree (the `ais import` format) under one revision; additive; check mode is a server dry run | editor |
 | `revert` | undo one revision (`revision`) or every revision of a change id (`revert_change`) as one revision; refuses on later conflicting writes unless `force`; check mode is a server dry run; already reverted = not changed | editor |
 | `node_info` | a node with its variables and children (missing is not an error) | viewer |
 | `render_info` | effective variables of a real host or a mock host at a path, with provenance and Jinja render | viewer |
+| `tag_info` | one tag (`name`; missing is not an error) or every tag | viewer |
 | `variable_info` | where a key is set (nodes and their own values) and, with `hosts: true`, every host's resolved value with the node it comes from; `value` filters (JSON-typed: `"550.90"` is not `550.90`), `subtree`, `revision`, `limit` | viewer |
 
 All writes are idempotent, support check mode and `--diff` (check mode is the server's dry run
@@ -75,9 +77,10 @@ as the revision's change id, so the revisions of one change can be listed
     - git_cgallagher.inventory.node_info:
         path: all.commercial.prod.dc1
       register: dc1
+    - git_cgallagher.inventory.tag:
+        name: cache-canary            # emitted as group cache_canary
+        paths: [all.commercial.prod.dc1.cache.cache01]
 ```
-
-Not yet a module: tags (`PUT /api/v1/tags/{name}` with member paths).
 
 ## Testing
 

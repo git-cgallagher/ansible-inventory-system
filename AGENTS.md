@@ -58,9 +58,17 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   every revision's export. Tag writes still lock, need `If-Match` and open a revision.)
 - **Tags are var-less and named by path.** `PUT /tags/{name}` is declarative (`description`
   replaced, `members` = the complete set of node *paths* when given; ids never, a move changes
-  them). Names are `[A-Za-z0-9_]`; `business_`/`tier_`/`datacenter_` prefixes and `all` are
-  reserved (the automatic tag groups would silently absorb such a tag); a name equal to a
-  hierarchy group is the exporter's 409. A tag with no live members is not emitted.
+  them). **One name rule** with nodes (issue #28): `NAME_RE` (`[A-Za-z0-9_-]`), and the tag's
+  group is `resolver.sanitize(name)` (`gpu-canary` → `gpu_canary`), like a node's. Reserved,
+  checked on that group name: `all` and the `business_`/`tier_`/`datacenter_` prefixes (the
+  automatic tag groups would silently absorb such a tag). `importer.tag_conflict_error` refuses
+  (422) a tag whose group is another tag's or a live hierarchy group's (`qualified_name`,
+  `inventory_name` included; default separator), **with or without members**, in
+  `converge_tag` (so `PUT /tags`, its dry run and a revert) and `_import_tags`; the tag table
+  never holds two tags for one group. `build_export` refuses the same collisions (tag vs
+  hierarchy group, two tags for one group) as the backstop `check_export` turns into 409 for
+  writes that skip that check (a node write creating a group a tag already uses). A tag with
+  no live members is not emitted.
 - **`json_schema` is enforced on every value write** (`ais.schema`): `PUT …/vars/{key}`,
   `POST /nodes` vars, the importer (CLI too) and `PUT /variables/{name}`, which validates the
   schema itself and re-checks every live value of the key. The schema checks each node's stored
@@ -383,7 +391,8 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   from depth unless declared; rejects bad kind order and names, values their schema rejects.
   `import_tree_report` returns an `ImportResult` (counts, `tags_changed`, `changed`, `summary()`;
   `tags:` = name → description + member paths, additive, after the tree; `tag_name_error` is
-  shared with `PUT /tags`; `before()` = the changed definitions and tags as they were, which the
+  shared with `PUT /tags`, and so is `tag_conflict_error` (over `hierarchy_groups`, computed
+  once per import); `before()` = the changed definitions and tags as they were, which the
   `import` audit row records as its `before` for revert; `definition_doc`/`tag_doc` are the
   shapes the API and audit rows use); `POST /import` rolls back a
   no-op (200, `changed: false`, no revision, no audit row) and a `dry_run` (no `If-Match` needed).
@@ -392,16 +401,19 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - `collection/.../plugins/module_utils/client.py` — `Client` (token/url from options or
   `AIS_TOKEN`/`AIS_URL`, `change` from the option or `AIS_CHANGE` sent as `X-AIS-Change` on every
   request (the option is in the shared `api` fragment, so a group `module_defaults` works for info
-  modules too), `request(keep_body=)` returns an allowed status's `detail`, `request`, `write` with `If-Match`, 409 stale vs other 409, 401/403),
+  modules too), `request(keep_body=)` returns an allowed status's `detail`, `request`, `write` with `If-Match`, `write_or_stale` (None on a stale 409 so the caller can re-read and retry once; `write` when `expect_revision` is set), 409 stale vs other 409, 401/403),
   `ensure_node`/`remove_node` (shared by `node` and `host`; `remove_node(recursive=)`, check
   mode = the server's delete `dry_run`). A structured 409 detail's `message` becomes the task's
   `msg`, its other keys (`nodes`, `hosts`, …) the result's. `doc_fragments/api.py` holds the
   `api` and `api.write` fragments; `meta/runtime.yml` declares the `inventory` action group
   (`module_defaults: group/git_cgallagher.inventory.inventory`).
 - `collection/.../plugins/modules/` — `node`, `host`, `variable`, `variable_definition`,
+  `tag` (`paths` added, `exclusive` = exactly them, `remove_paths`, `state`; description kept
+  when omitted; the one module that retries: a stale 409 re-reads the tag and writes once more
+  only if it still differs, through `Client.write_or_stale`, never with `expect_revision`),
   `node_move` (path → new_path; done when only new_path is live), `import` (tree dict; check mode =
   server dry run), `revert` (`revision` or `revert_change`, `force`; dry run first: check mode
-  stops there, 409 `already reverted` = not changed) (write, check + diff mode), `node_info`, `render_info`, `variable_info` (`/vars` + `/vars/hosts`, pages up to `limit`; its `value_counts` is the API's `values`, a name Jinja would resolve to the dict method). `tests/integration/targets/<module>` = check,
+  stops there, 409 `already reverted` = not changed) (write, check + diff mode), `node_info`, `render_info`, `tag_info` (one tag or the list), `variable_info` (`/vars` + `/vars/hosts`, pages up to `limit`; its `value_counts` is the API's `values`, a name Jinja would resolve to the dict method). `tests/integration/targets/<module>` = check,
   real, repeat, failure cases with an `always:` cleanup, all against one shared server (unique
   `it_*`/`it-*` names per target). `tests/sanity/ignore-2.*.txt` only waive the GPLv3-header
   check (the collection is MIT).
@@ -599,13 +611,18 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - **`select(Node.path).join(Node, …)` with the filter on `NodeVariable` fails** ("Don't know how
   to join to Node"): the select's only entity is the join target. Start from the variable table
   with `.select_from(NodeVariable)`.
+- **Running a module's `main()` outside Ansible (a one-off harness) needs a serialization
+  profile** in ansible-core 2.19+: set `basic._ANSIBLE_ARGS` (the `ANSIBLE_MODULE_ARGS` JSON)
+  *and* `basic._ANSIBLE_PROFILE = "legacy"`, or `AnsibleModule` raises "No serialization profile
+  was specified". That is how the `tag` module's stale retry was exercised (a patched
+  `Client.current_revision` returning the revision before; integration can't race it).
 - **A module named `import` works** (ansible-test sanity and AnsiballZ both load it by path)
   even though it is a Python keyword; it cannot be imported with a plain `import` statement,
   which nothing needs.
 
 ## TODO (phase 4 and leftovers, see the plan)
 - Phase 1/2 leftovers: OIDC is a stub that has never run against a real provider (set the
-  four `AIS_OIDC_*`/`AIS_SECRET_KEY` vars and test before relying on it); no `tag` module (the API exists); the login limiter is per process (a
+  four `AIS_OIDC_*`/`AIS_SECRET_KEY` vars and test before relying on it); the login limiter is per process (a
   multi-worker deployment multiplies the limits); `token.rejected` rows are not rate limited, so
   a client retrying a revoked token every second writes a row a second.
 - Phase 3 leftovers: the OIDC button and `ui_handoff` are as unverified as the rest of OIDC; one

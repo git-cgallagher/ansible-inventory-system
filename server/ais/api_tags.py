@@ -1,7 +1,8 @@
 """Tag routes (``/api/v1/tags``): explicit, var-less targeting groups.
 
 A tag is a name, a description and a set of member nodes; the exporter emits it as a
-group directly under ``all`` holding the member hosts (a non-host member contributes
+group directly under ``all`` (named ``resolver.sanitize(name)``: ``gpu-canary`` is group
+``gpu_canary``, the rule node names follow) holding the member hosts (a non-host member contributes
 every host under it). **Tags never carry variables**: no model has a column for them
 and no route here accepts one (``extra="forbid"``).
 
@@ -23,7 +24,7 @@ from sqlalchemy.orm import Session
 from ais.api_write import DRY_RUN, _audit, answer, begin, check_export, unchanged
 from ais.auth import Principal, require
 from ais.db import get_session
-from ais.importer import live_node_by_path, tag_doc, tag_name_error
+from ais.importer import live_node_by_path, tag_conflict_error, tag_doc, tag_name_error
 from ais.locking import IfMatch
 from ais.models import Node, Role, Tag, TagMember
 
@@ -91,7 +92,7 @@ def put_tag(
         return unchanged(response, session, dry_run, {"tag": before})
     rev, preview = begin(session, if_match, dry_run, actor=principal.actor, message=req.message or f"tag {name}")
     out = converge_tag(session, name, req.description, wanted_members)
-    check_export(session)  # a tag named like a hierarchy group is a 409 here
+    check_export(session)
     _audit(session, principal, rev, "tag.set", "tag", name, before, out)
     return answer(session, response, rev, preview, {"tag": out})
 
@@ -100,7 +101,13 @@ def converge_tag(session: Session, name: str, description: str | None, members: 
     """Create or converge tag ``name``: ``description`` replaced, live members exactly
     ``members`` (paths; 404 for one that is not live). Memberships of deleted nodes are left
     alone; ``restore_ids`` adds membership rows for such node ids (a revert of a tag delete
-    puts back the ones the delete removed). Returns ``tag_out``. Shared with ``ais.revert``."""
+    puts back the ones the delete removed). Returns ``tag_out``. Shared with ``ais.revert``.
+
+    422 when the tag's group name is taken (``tag_conflict_error``: another tag that maps to
+    the same group, or a hierarchy group), with or without members."""
+    conflict = tag_conflict_error(session, name)
+    if conflict:
+        raise HTTPException(422, conflict)
     nodes: dict[str, Node] = {}
     for path in members:
         node = live_node_by_path(session, path)

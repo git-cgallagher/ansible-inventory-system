@@ -380,12 +380,12 @@ def test_change_ids_are_validated(editor, session, built):  # noqa: F811
 def test_tag_delete_brings_back_memberships_of_deleted_nodes(editor, session, built):  # noqa: F811
     rev = built
     rev = editor.delete(f"/api/v1/nodes/{_id(editor, WEST)}", params={"recursive": "true"}, if_match=rev).json()["revision"]
-    gone = editor.delete("/api/v1/tags/west_only", if_match=rev).json()["revision"]
+    gone = editor.delete("/api/v1/tags/west-only", if_match=rev).json()["revision"]
     row = session.scalar(select(AuditLog).where(AuditLog.revision == gone))
     assert [m["path"] for m in row.before["deleted_members"]] == [WEST]
     rev = _revert(editor, gone, gone).json()["revision"]
     rev = editor.post("/api/v1/nodes/restore", json={"path": WEST}, if_match=rev).json()["revision"]
-    assert editor.get("/api/v1/tags/west_only").json()["members"] == [WEST]
+    assert editor.get("/api/v1/tags/west-only").json()["members"] == [WEST]
 
 
 # ------------------------------------------------------------------------- CLI

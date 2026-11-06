@@ -1,0 +1,38 @@
+---
+# tag_info: one tag, a missing tag, the list; members from seed.yml.
+- module_defaults:
+    group/git_cgallagher.inventory.inventory:
+      url: "{{ ais_url }}"
+      token: "{{ ais_token }}"
+  block:
+    - name: A tag to read
+      git_cgallagher.inventory.tag:
+        name: it-info-tag
+        description: integration
+        paths: [all.commercial.prod.dc1.web]
+    - name: Read it
+      git_cgallagher.inventory.tag_info:
+        name: it-info-tag
+      register: one
+    - name: A tag that does not exist
+      git_cgallagher.inventory.tag_info:
+        name: it_info_missing
+      register: missing
+    - name: Every tag
+      git_cgallagher.inventory.tag_info:
+      register: every
+    - ansible.builtin.assert:
+        that:
+          - one is not changed
+          - one.exists
+          - one.group == 'it_info_tag'
+          - "one.tag == {'name': 'it-info-tag', 'description': 'integration', 'members': ['all.commercial.prod.dc1.web']}"
+          - not missing.exists
+          - missing.tag == {}
+          - "'it-info-tag' in every.tags | map(attribute='name')"
+          - every.tags | map(attribute='name') | list == every.tags | map(attribute='name') | sort
+  always:
+    - name: Cleanup
+      git_cgallagher.inventory.tag:
+        name: it-info-tag
+        state: absent
