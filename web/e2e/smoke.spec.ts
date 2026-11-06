@@ -74,7 +74,8 @@ test("login, keyboard tree, inherited vars, locked edit with a conflict, render,
 
   // --- render a real host with overrides and facts
   await page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Render" }).click();
-  await page.getByRole("combobox", { name: "Host" }).selectOption("web02");
+  await page.getByRole("combobox", { name: "Host" }).fill("web0");
+  await page.getByRole("option", { name: "web02", exact: true }).click();
   await page.getByRole("textbox", { name: "Facts" }).fill("default_ipv4: {address: 10.1.1.12}");
   await page.getByRole("textbox", { name: "Overrides" }).fill("greeting: '{{ inventory_hostname }} in {{ site_code }}'\nbroken: '{{ nope }}'");
   await page.getByRole("button", { name: "Render", exact: true }).click();
@@ -140,7 +141,7 @@ test("structure, definitions, tags and tokens from the UI; history follows a mov
 
   // --- move and rename it: ids change, the tree and the URL follow
   await page.getByRole("button", { name: "Move / rename" }).click();
-  await page.getByRole("textbox", { name: "New parent path" }).fill("all.commercial.lab.dc1");
+  await page.getByRole("combobox", { name: "New parent path" }).fill("all.commercial.lab.dc1");
   await page.getByRole("textbox", { name: "New name" }).fill("e2e_cache2");
   await page.getByRole("button", { name: "Move", exact: true }).click();
   await expect(page.getByTestId("impact-total")).toHaveText("This changes no host.");

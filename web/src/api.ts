@@ -73,13 +73,15 @@ export interface RequestOptions {
   body?: unknown;
   /** Revision the change is based on; sent as `If-Match: "<n>"`. */
   ifMatch?: number;
-  query?: Record<string, string | number | boolean | null | undefined>;
+  /** An array value repeats the parameter (`kind=host&kind=group`). */
+  query?: Record<string, string | number | boolean | readonly string[] | null | undefined>;
 }
 
 export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const url = new URL(path, window.location.origin);
   for (const [k, v] of Object.entries(opts.query ?? {})) {
-    if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
+    if (Array.isArray(v)) for (const item of v) url.searchParams.append(k, item);
+    else if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
   }
   const headers: Record<string, string> = { Accept: "application/json", "X-AIS-Source": "ui" };
   if (session) headers.Authorization = `Bearer ${session.token}`;

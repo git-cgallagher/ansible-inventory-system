@@ -176,6 +176,12 @@ npm run dev                            # or: hot reload on :5173, API proxied to
   else wrote first, the page says so, reloads the values and keeps your text to re-apply.
 - **Render**: a real host, or a mock host at any path, with optional overrides and facts;
   shows each resolved value, where it came from, the Jinja result and per-key template errors.
+- **Node pickers** (Render's host and path, Diff's host, the move dialog's new parent, Search's
+  subtree, the audit log's node and subtree): type part of a name or path and pick from up to
+  20 matches, each with its path under the name (Down/Up, Enter, Escape, or the mouse). They
+  ask the server for a few nodes per pause in typing (`GET /api/v1/nodes?q=`), so they stay
+  small at any tree size; links like `#/render?host=web01` or
+  `#/diff?host=web01&from=3&to=7` work without a lookup.
 - **Structure** (editor role): add a child, move or rename a node with its subtree, delete a
   subtree (the dialog shows how many nodes and hosts go and confirms that count), from the node
   page. Saving or removing a value, a move and a delete first show how many hosts it changes
@@ -339,7 +345,8 @@ port for a TLS proxy); see section 3 of the getting-started guide.
 | Export / render | `GET /api/v1/export` (ETag, `If-None-Match` → 304), `POST /api/v1/render` (`host` or mock `path`, `overrides`, `facts`, `revision`) | viewer |
 | Tree export | `GET /api/v1/tree?subtree=&revision=&as=&ancestor_vars=&hosts=&format=json\|yaml`: the import format (`POST /import`'s `tree`); ETag, `X-AIS-Revision` | viewer |
 | Variable search | `GET /api/v1/vars?key=&value=&subtree=&revision=&limit=&offset=`: the nodes that set the key themselves (own `value`; `effective` = the fold each emits for merge/append keys; `above_subtree` for the subtree's ancestors). `GET /api/v1/vars/hosts?…` (same parameters): each host's resolved value with `from` (and `sources` for a fold), `total`/`with_key`/`without_key` and the `values` distribution over the whole scope. `value` is JSON (`550.90` a number, `"550.90"` a string; text that is not JSON is a plain string); hosts match the whole resolved value. `GET /api/v1/vars/lint`: undeclared keys that look like typos of known ones (`keys` with `did_you_mean`, `declared`, `nodes`, `paths`) | viewer |
-| Reads | `GET /api/v1/nodes[?subtree=&revision=]`, `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions[?change=&before=&limit=]` | viewer |
+| Node lookup | `GET /api/v1/nodes?q=<text>[&kind=host&kind=…][&subtree=][&revision=][&limit=20]`: at most `limit` (1–100, default 20) live nodes whose name or path contains `q`, ignoring case, ranked exact name, name prefix, path prefix, name substring, path substring (path order within each). Any of `q`, `kind`, `limit` selects this bounded lookup; without them the route lists every node as before | viewer |
+| Reads | `GET /api/v1/nodes[?subtree=&revision=]` (every node, unbounded), `/nodes/{id-or-path}`, `/nodes/{id}/children`, `/nodes/{id}/vars/{key}`, `/variables[/{name}]`, `/revisions[?change=&before=&limit=]` | viewer |
 | Snapshots | `GET /api/v1/hosts/{name}/snapshots` (the revisions where the host changed), `/hosts/{name}/snapshots/{revision}` (its state at any revision; `stored_revision` says which stored row it came from, null when computed on demand), `GET /api/v1/diff?host=&from=&to=`, `GET /api/v1/snapshots/status` | viewer |
 | Tags | `GET /api/v1/tags[/{name}]` (viewer); `PUT /tags/{name}` (`description`, `members` = node paths), `DELETE /tags/{name}` (editor, `If-Match`) | viewer / editor |
 | Revert (`If-Match`) | `POST /api/v1/revisions/{id}/revert`, `POST /api/v1/changes/{change}/revert` (`force`, `dry_run`, `message`; 201): one new revision; 409 `conflict` (with `conflicts`) when a later revision changed the same things, 409 `already reverted`, 422 when nothing recorded can be inverted; `dry_run` needs no `If-Match` and adds `impact` (and `hosts_changed`/`hosts`, its older names) | editor |

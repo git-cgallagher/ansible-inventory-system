@@ -1,18 +1,7 @@
-import { useEffect, useState } from "react";
-import { api, errorText } from "./api";
-import type { InvNode } from "./types";
+import { api } from "./api";
 
-/** Every live node (one `GET /nodes`), for host pickers and path suggestions. */
-export function useAllNodes(): { nodes: InvNode[]; error: string } {
-  const [nodes, setNodes] = useState<InvNode[]>([]);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    api<InvNode[]>("/api/v1/nodes")
-      .then(setNodes)
-      .catch((e) => setError(errorText(e)));
-  }, []);
-  return { nodes, error };
-}
+// No hook loads the whole node list (`GET /api/v1/nodes` without `q`/`limit`): at 100k hosts
+// that is ~21 MB. Pickers use NodePicker, the bounded lookup (AGENTS.md, issue #27).
 
 export function when(ts: string | null | undefined): string {
   if (!ts) return "";

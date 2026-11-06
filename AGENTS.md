@@ -203,6 +203,14 @@ the first time at a revision), subtree export 0.10 s, render 0.01 s, `ansible-in
   run carries the page's revision as `If-Match` (a stale page refuses there), the confirmation
   carries the **preview's** `revision`, and any edit to the form drops the preview. A stale
   409 reloads the values and keeps the user's text; the UI sends `X-AIS-Source: ui`.
+- **UI views never load the whole node list** (issue #27). `GET /api/v1/nodes` without `q`,
+  `kind` or `limit` returns every node (20.6 MB at 100k hosts) and stays only for the plugin's
+  callers and scripts. Anything in the UI that needs to find a host or a path uses `NodePicker`
+  (`web/src/NodePicker.tsx`), the bounded lookup `GET /api/v1/nodes?q=…&limit=21`
+  (`ais.nodesearch`); the tree loads children per node. Deep links (`#/render?host=`,
+  `?path=`, `#/diff?host=&from=&to=`) carry the name or path and need no lookup.
+  `e2e/pickers.spec.ts` fails if Render or Diff ever request the unbounded list. A new picker
+  uses `NodePicker`; never a `<select>`/`<datalist>` filled from a list of nodes.
 - **Node detail reads through `POST /render {path, template: false}`**, also for hosts, so the
   page shows exactly what a mock host at that path would get. (Renders write nothing.) Own vars
   are the provenance entries whose `path` is the node's; ids go in no URL (a move changes them).
@@ -298,7 +306,9 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `ais.db.init_db`; `0001` = spike schema, `0002` = phase 1 incl. the PostgreSQL ltree
   branch, `0003` = `audit_log`, `0004` = `node.meta` / `node_variable.value` NOT NULL, `0005` =
   `snapshot_pass`, `0006` = `revision.change` / `audit_log.change` + `ix_audit_revision`, `0007` =
-  `ix_nodevar_key_live (key, deleted_rev)` + `audit_log.key` (backfilled) + `ix_audit_key`). On SQLite
+  `ix_nodevar_key_live (key, deleted_rev)` + `audit_log.key` (backfilled) + `ix_audit_key`, `0008` =
+`pg_trgm` + `ix_node_name_trgm`/`ix_node_path_trgm` (GIN, PostgreSQL only, migration-only like
+`path_ltree`; the drift test skips them by name)). On SQLite
   `init_db` migrates with `PRAGMA foreign_keys=OFF` and runs `PRAGMA foreign_key_check` before
   turning them back on. `server/alembic.ini` is for hand use only.
 - `server/ais/audit.py` — `RequestIdMiddleware` (`X-Request-ID` in/out, `X-AIS-Source` →
@@ -314,6 +324,12 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   fold, `above_subtree`) and `host_values` (each host's resolved value, `from`/`sources`, counts
   and the `values` distribution), `parse_value`/`Wanted` (the `value=` rule), `canonical`.
   `GET /api/v1/vars` and `/vars/hosts` in `api.py`, `cli._vars` the CLI twin.
+- `server/ais/nodesearch.py` — `search(session, q, kinds=, subtree=, revision=, limit=)`: the
+  pickers' lookup behind `GET /api/v1/nodes?q=` (tiers exact name, name prefix, path prefix,
+  name substring, path substring; each one `ILIKE … ORDER BY path LIMIT n`, run only while the
+  answer is short; `%`/`_` escaped). Live filter `deleted_rev IS NULL` without a revision (the
+  partial indexes' predicate), `_live_at` with one. Tests: `tests/test_nodesearch.py`; timings
+  and plans: `docs/scale.md` "Node lookup".
 - `server/ais/resolver.py` — `fold`, `load_snapshot(revision, subtree, paths=, keys=)` (revision-aware
   for nodes and vars; subtree and paths filter in SQL, the subtree through `path_ltree` on
   PostgreSQL), `load_chain(revision, host=|path=)` (just the ancestor chain, which is all
@@ -398,10 +414,14 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   `src/views/` (`Login`, `Tree` (lazy children, ARIA tree keys), `NodeDetail`, `NodeActions`
   (add child, move/rename, delete), `VarEditor`, `Render`, `Diff`, `Revisions` (change filter,
   Revert panel: dry run, then `If-Match` = the dry run's revision), `Audit` (`key` alone, `subtree`),
+  `NodePicker.tsx` (the node typeahead: ARIA combobox + listbox, 150 ms debounce, newest answer
+  wins, `pick` = name or path, `NON_HOST_KINDS`; used by Render, Diff, the move dialog, Search's
+  subtree and the audit filters),
   `Search` (`#/search?key=&value=&subtree=&revision=`: where set + host values; the value box is YAML, sent as JSON; reached from the find box above the tree, "where set" on the Variables and node pages),
   `Variables` (definitions: strategy, description, JSON Schema), `Tags`, `Tokens`), `src/styles.css` (tokens, dark via
   `prefers-color-scheme`). `vite.config.ts` sets `outDir: ../server/ais/static`.
-  `e2e/smoke.spec.ts` + `e2e/serve.sh` + `playwright.config.ts`.
+  `e2e/smoke.spec.ts` + `e2e/pickers.spec.ts` (read-only, runs first: the smoke counts
+  revisions from 1) + `e2e/serve.sh` + `playwright.config.ts`.
 - `server/tests/conftest.py` — `engine` (SQLite or `AIS_TEST_DATABASE_URL`), role tokens,
   `AuthClient` (sends the bearer, `if_match=` kwarg), live `server` + real-plugin helpers.
 
@@ -511,7 +531,16 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
 - **React state updaters run later, after a loop has moved on.** `setExpanded(s => s.add(node.id))`
   inside a `for` loop over ancestors expanded only the last node (deep links opened a collapsed
   tree). Copy the value into a `const` first. Learned 2026-11-01 from the screenshot check.
-- **Playwright roles**: an `<input list=…>` (datalist) is a `combobox`, not a `textbox`.
+- **Playwright roles**: an `<input list=…>` (datalist) is a `combobox`, not a `textbox`; so is
+  `NodePicker`'s input (`getByRole("combobox", { name: "Host" })`), and its options' accessible
+  names are the picked value (`option`, `{ name: "web02", exact: true }`; the path for path
+  pickers). Its live region is `aria-live`, not `role="status"`: the pages' notices own that
+  role and tests use `getByRole("status")` in strict mode.
+- **Playwright runs spec files in name order on one server** (`workers: 1`):
+  `pickers.spec.ts` runs before `smoke.spec.ts`, so it must not write.
+- **`pg_trgm` cannot serve a one- or two-character substring** (no trigram to look up): those
+  tiers of a lookup that matches nothing scan the table (73 ms at 100k hosts). Prefixes are
+  fine either way (path-order index walk). Measured 2026-11-05.
 - **TypeScript 7 is the native (Go) compiler**; it still installs `tsc`, and the config avoids
   options it dropped (`baseUrl`, `node10` resolution).
 - The Playwright smoke serves on **:8799** (not 8000, which compose and the CI plugin smoke use).
@@ -588,8 +617,10 @@ The venv is Python 3.14 + ansible-core 2.21.5 (no system ansible on this Mac). C
   objects to pick the subtree (~2 s at 100k), where `resolver._under` would read only the
   subtree. `PUT`/`DELETE /variables/{name}` and `DELETE …/vars/{key}` run no `check_export`
   (nothing they change can collide). Loading the
-  tree as ORM objects is 2.4 s. `GET /nodes` without `subtree` returns everything, and the UI's
-  Render page host picker calls it.
+  tree as ORM objects is 2.4 s. `GET /nodes` without `q`/`limit`/`subtree` returns everything
+  (the UI no longer calls it); the `host` module's `find_host` still does, for a host that is
+  not at its `parent_path`. The unbounded list also loads every variable (`load_snapshot`)
+  only to drop them.
 - Release: no container image is published (compose builds from the checkout).
 - Render cost is not bounded: a template like `{{ 'a' * 10**9 }}` (Jinja's sandbox caps
   `range`, not string repetition) allocates that much in the API process. Any viewer can send

@@ -385,6 +385,17 @@ change](#preview-a-change)). The page shows
 each inherited value greyed out, with the node it comes from. If someone saved first, the page
 says so, reloads, and keeps your text for you to re-apply.
 
+Wherever the UI asks for a host or a path (Render, Diff, the move dialog's new parent,
+Search's subtree, the audit log's node and subtree), type part of a name or a path: a list of
+up to 20 matching nodes opens, each with its path under the name. Exact names come first, then
+names that start with what you typed, paths that start with it, names that contain it, and
+last the nodes under a matching group (`dc2` lists `dc2` and then what is under it). Pick with
+Down/Up and Enter or with the mouse; Escape closes the list. If more than 20 match, keep
+typing. You can also type a name or path in full and press Enter. Links into these pages
+(`#/render?host=web01`, `#/render?path=all.commercial.prod`, `#/diff?host=web01&from=3&to=7`)
+open straight away. The pickers never download the whole tree: each pause in typing asks
+`GET /api/v1/nodes?q=…&limit=21`, a few kilobytes at any size.
+
 ### Ansible modules (inventory as code)
 
 The `git_cgallagher.inventory` collection manages the inventory from a playbook. Every module
@@ -436,6 +447,13 @@ curl -s -H "$H" -H "If-Match: \"$REV\"" -H 'Content-Type: application/json' \
 ```
 
 A write answers with the new revision (also its `ETag`). Send that as the next `If-Match`.
+
+To find nodes by name without listing all of them (what the UI's pickers do), add `q`:
+`GET /api/v1/nodes?q=web0&kind=host&limit=20` returns at most 20 live hosts whose name or path
+contains `web0`, ignoring case, best matches first (exact name, then prefixes, then
+substrings). `kind` repeats for several kinds; `subtree` and `revision` work as on the plain
+list. Without `q`, `kind` or `limit`, `GET /api/v1/nodes` still returns every node, which at
+100,000 hosts is about 21 MB.
 
 ### Tags
 
@@ -1047,6 +1065,11 @@ curl -s https://inventory.example.com/healthz     # {"status":"ok","version":"0.
 ```
 
 Upgrade the collection on your controllers to the same version (section 5).
+
+The migrations create two PostgreSQL extensions: `ltree` (subtree queries) and, from the
+release after 0.3.0, `pg_trgm` (the indexes behind the UI's node pickers). Both are trusted
+extensions, so the database owner the API connects as may create them. On a managed
+PostgreSQL that allow-lists extensions, allow both before upgrading.
 
 ### Health and size
 

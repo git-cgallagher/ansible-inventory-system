@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Added
+- **Node lookup for pickers** (#27, Render and Diff downloaded every node). `GET
+  /api/v1/nodes?q=<text>&kind=host&limit=20` returns at most `limit` (1–100, default 20) live
+  nodes whose name or path contains `q`, ignoring case, ranked exact name, name prefix, path
+  prefix, name substring, path substring (path order within each tier; `%` and `_` match
+  themselves). `kind` repeats; `subtree` and `revision` work as on the plain list. Each tier is
+  a `LIMIT`ed query that runs only while the answer is short (`ais.nodesearch`). Migration
+  `0008` adds `pg_trgm` and trigram GIN indexes on `node.name` and `node.path` on PostgreSQL (a
+  no-op on SQLite): 4–10 ms per lookup at 100k hosts, 73 ms for a one-letter miss
+  (`docs/scale.md`). Without `q`, `kind` or `limit` the route lists every node as before.
+
 - **Blast-radius preview: `dry_run` with `impact` on every write** (#25, blast-radius preview).
   `?dry_run=true` on `POST /api/v1/nodes`, `PATCH /nodes/{id}`, `POST /nodes/{id}/move`,
   `PUT`/`DELETE /nodes/{id}/vars/{key}`, `PUT`/`DELETE /variables/{name}` and
@@ -167,6 +177,15 @@
   Under `[defaults]` Ansible ignores the key silently.
 
 ### Fixed
+- **The UI's Render and Diff pages no longer download every node** (#27). Their host `<select>`
+  and path list loaded the whole `GET /api/v1/nodes` (2.3 MB for a 3,000-host generated tree,
+  about 21 MB at 100k hosts) on every open. Both now use a typeahead (an ARIA combobox:
+  Down/Up, Enter, Escape, mouse; the path under each name) over the new bounded lookup: opening
+  Render on that tree now costs 634 bytes of API responses instead of 2,315,214, and a lookup
+  about 2 kB. Deep links (`#/render?host=…`, `#/render?path=…`, `#/diff?host=…&from=…&to=…`)
+  render without any lookup. The same picker now suggests nodes for the move dialog's new
+  parent, Search's subtree and the audit log's node and subtree filters (free text still works
+  in all of them).
 - The getting-started guide said Ansible's inventory cache "also works on top of" the ETag
   store. It does, but it serves stale hosts silently while the server is down; the guide and
   the plugin's docs now say to leave `cache` off in deploy pipelines, and the plugin's example

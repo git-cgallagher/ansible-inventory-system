@@ -10,6 +10,10 @@ Measures, against ``--url`` with a viewer token (``AIS_TOKEN``):
 * tree export in the import format (``GET /api/v1/tree``): the whole tree as JSON and as
   YAML, and the subtree as YAML;
 * single-host render (``POST /render {host}``, Jinja on) and a mock render at a path;
+* node lookup for the UI's pickers (``GET /api/v1/nodes?q=…&kind=…&limit=21``): a
+  one-character and a longer host prefix, a rare host name, a path prefix, a name substring,
+  a miss, and one under ``--subtree``; next to the unbounded ``GET /api/v1/nodes`` the pickers
+  used to download (``--lookup-only`` measures just these);
 * variable search (``GET /api/v1/vars``, ``/vars/hosts``) for ``--key``: where it is set in
   the whole tree, every host's resolved value (whole tree, with ``--value``, and the subtree),
   and a fold key (``packages``) for every host;
@@ -102,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--value", default="9003", help="a value of --key to match (JSON)")
     p.add_argument("--repeat", type=int, default=5)
     p.add_argument("--skip-ansible", action="store_true")
+    p.add_argument("--lookup-only", action="store_true", help="only the node lookup lines (GET /api/v1/nodes?q=)")
     args = p.parse_args(argv)
     token = os.environ["AIS_TOKEN"]
     api = Api(args.url, token)
@@ -124,6 +129,11 @@ def main(argv: list[str] | None = None) -> int:
             if time.monotonic() > deadline:
                 raise TimeoutError(f"snapshot pass stuck at {st['passed']} < {target}")
             time.sleep(0.5)
+
+    if args.lookup_only:
+        lookup(api, args, row)
+        print_table(rows)
+        return 0
 
     dt, status, raw, etag = api.call("GET", "/api/v1/export")
     assert status == 200, (status, raw[:200])
@@ -173,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         note = f"{doc['total']} nodes" if "nodes" in doc else f"{doc['total']} hosts match, {doc['with_key']} have it, {len(doc['values'])} values"
         row(label, med, note)
 
+    lookup(api, args, row)
+
     editor = os.environ.get("AIS_EDITOR_TOKEN")
     if editor:
         ed = Api(args.url, editor)
@@ -216,10 +228,39 @@ def main(argv: list[str] | None = None) -> int:
                 med, _ = timed(lambda: (ansible_inventory(args.url, token, store, mode), None), 3)
             row(f"ansible-inventory {mode} (ETag store warm: 304)", med, note)
 
+    print_table(rows)
+    return 0
+
+
+def print_table(rows: list[tuple[str, float, str]]) -> None:
     print("| Operation | Seconds | Notes |\n|---|---:|---|")
     for name, seconds, note in rows:
-        print(f"| {name} | {seconds:.2f} | {note} |")
-    return 0
+        print(f"| {name} | {seconds:.2f} | {note} |" if seconds >= 0.1 else f"| {name} | {seconds:.3f} | {note} |")
+
+
+def lookup(api: Api, args, row) -> None:
+    """The pickers' bounded lookup (``ais.nodesearch``), against the unbounded list."""
+    from urllib.parse import urlencode
+
+    nonhost = [("kind", k) for k in ("all", "business", "tier", "datacenter", "group")]
+    sub_parent = args.subtree.rpartition(".")[0] or args.subtree
+    for label, params in (
+        ("node lookup, host prefix `h`", [("q", "h"), ("kind", "host")]),
+        ("node lookup, host prefix `h0123`", [("q", "h0123"), ("kind", "host")]),
+        (f"node lookup, host `{args.host}` (all five tiers run)", [("q", args.host), ("kind", "host")]),
+        (f"node lookup, path prefix `{args.subtree}`, hosts", [("q", args.subtree), ("kind", "host")]),
+        (f"node lookup, path prefix `{sub_parent}`, non-host", [("q", sub_parent), *nonhost]),
+        ("node lookup, name substring `ole`, non-host", [("q", "ole"), *nonhost]),
+        ("node lookup, `x`: no match (all five tiers, sequential scans)", [("q", "x"), ("kind", "host")]),
+        (f"node lookup, host prefix `h0` under {args.subtree}", [("q", "h0"), ("kind", "host"), ("subtree", args.subtree)]),
+    ):
+        query = urlencode([*params, ("limit", 21)])
+        med, last = timed(lambda: (lambda r: (r[0], r))(api.call("GET", f"/api/v1/nodes?{query}")), args.repeat)
+        assert last[1] == 200, last[2][:200]
+        row(label, med, f"{len(json.loads(last[2]))} nodes, {len(last[2]):,} bytes")
+    med, last = timed(lambda: (lambda r: (r[0], r))(api.call("GET", "/api/v1/nodes")), args.repeat)
+    assert last[1] == 200, last[2][:200]
+    row("every node (`GET /api/v1/nodes`, what the pickers used to load)", med, f"{len(json.loads(last[2])):,} nodes, {len(last[2]) / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":
