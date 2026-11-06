@@ -158,9 +158,11 @@
   group was the export check's **409**, and only once it had members. The reserved names
   (`all`, the `business_`/`tier_`/`datacenter_` prefixes) are checked on the group name, so
   `tier-prod` is reserved too. The export refuses two tags with one group (409) as a backstop
-  for writes that skip the tag check, instead of merging them silently. Existing tags are
-  unaffected (no migration): none could hold a `-`. The UI's Tags page accepts the new names
-  and shows the group when it differs.
+  for writes that skip the tag check, instead of merging them silently. No migration: no stored
+  tag can hold a `-`. One edge: an *empty* tag named like a hierarchy group, which the old
+  export check let through, now refuses any change (422) until it is deleted (`DELETE` still
+  works) or the group goes away. The UI's Tags page accepts the new names and shows the group
+  when it differs.
 
 - **Dry runs take the write lock and write in their transaction** (#25). `DELETE /nodes/{id}`'s
   `dry_run` was a pure read; it now deletes and rolls back like the others, so it can report
